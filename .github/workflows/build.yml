@@ -54,7 +54,7 @@ jobs:
           echo "Package info:"
           dpkg-deb --info build/RainbowKeyboard-rootless.deb
           echo "Installed layout:"
-          dpkg-deb --contents build/RainbowKeyboard-rootless.deb | head -n 20
+          dpkg-deb --contents build/RainbowKeyboard-rootless.deb
           ls -lh build/RainbowKeyboard-rootless.deb
 
       - uses: actions/upload-artifact@v4
