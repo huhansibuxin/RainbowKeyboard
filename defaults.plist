@@ -1,0 +1,31 @@
+{
+    Enabled = 1;
+    EffectStyle = 0;
+    AmbientGlow = 1;
+    AmbientStrength = 0.85;
+    PureBlackKeyboard = 1;
+    KeyboardBackgroundColor = (0, 0, 0);
+    KeycapColor = (0, 0, 0);
+    ColorMode = 0;
+    NeonSaturation = 0.72;
+    Brightness = 0.95;
+    Opacity = 0.65;
+    RippleEnabled = 1;
+    Duration = 0.55;
+    Spread = 2;
+    Softness = 8;
+    CoreStrength = 0.5;
+    MaxEffects = 4;
+    BackgroundFeedback = 1;
+    BackgroundDuration = 0.4;
+    BackgroundRadius = 180;
+    BackgroundBand = 0.55;
+    BackgroundStrength = 0.18;
+    NativeKeyboard = 1;
+    WeChatKeyboard = 1;
+    CandidateGradient = 1;
+    CandidateNative = 1;
+    CandidateWeType = 1;
+    CandidateStart = (0, 0.65, 1);
+    CandidateEnd = (0.85, 0.15, 1);
+}
