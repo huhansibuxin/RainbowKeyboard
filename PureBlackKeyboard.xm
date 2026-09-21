@@ -1166,22 +1166,34 @@ void RKApplyBlackKeyboardHost(UIView *host) {
 
 %group RKBlackKeyplane
 %hook UIKBKeyplaneView
-- (void)layoutSubviews { %orig; RKUpdateBlackKeyplane((UIView *)self); }
+- (void)layoutSubviews {
+    %orig;
+    RKUpdateBlackKeyplane((UIView *)self);
+}
 %end
 %end
 %group RKBlackKeyplaneDisplay
 %hook UIKBKeyplaneView
-- (void)displayLayer:(CALayer *)layer { %orig; RKUpdateBlackKeyplane((UIView *)self); }
+- (void)displayLayer:(CALayer *)layer {
+    %orig;
+    RKUpdateBlackKeyplane((UIView *)self);
+}
 %end
 %end
 %group RKBlackKeyplaneRender
 %hook UIKBKeyplaneView
-- (void)drawContentsOfRenderers:(id)renderers { %orig; RKUpdateBlackKeyplane((UIView *)self); }
+- (void)drawContentsOfRenderers:(id)renderers {
+    %orig;
+    RKUpdateBlackKeyplane((UIView *)self);
+}
 %end
 %end
 %group RKBlackSplitLayout
 %hook UIKBSplitImageView
-- (void)layoutSubviews { %orig; RKUpdateBlackSplitView((UIView *)self); }
+- (void)layoutSubviews {
+    %orig;
+    RKUpdateBlackSplitView((UIView *)self);
+}
 %end
 %end
 %group RKBlackSplitImage
@@ -1330,11 +1342,17 @@ void RKApplyBlackKeyboardHost(UIView *host) {
     %orig;
 }
 - (void)setHidden:(BOOL)hidden {
-    if (objc_getAssociatedObject(self, &RKBlackHidingKey)) { %orig; return; }
+    if (objc_getAssociatedObject(self, &RKBlackHidingKey)) {
+        %orig;
+        return;
+    }
     NSNumber *original = objc_getAssociatedObject(self, &RKBlackHiddenKey);
     if (original) {
         objc_setAssociatedObject(self, &RKBlackHiddenKey, @(hidden), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        if (RKBlackEnabled() && RKBlackInScope((CALayer *)self)) { %orig(YES); return; }
+        if (RKBlackEnabled() && RKBlackInScope((CALayer *)self)) {
+            %orig(YES);
+            return;
+        }
         objc_setAssociatedObject(self, &RKBlackHiddenKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     %orig;
@@ -1363,10 +1381,18 @@ void RKApplyBlackKeyboardHost(UIView *host) {
 
 %group RKBlackRenderConfig
 %hook UIKBRenderConfig
-- (CGFloat)keycapOpacity { return RKBlackEnabled() ? 0 : %orig; }
-- (CGFloat)lightKeycapOpacity { return RKBlackEnabled() ? 0 : %orig; }
-- (BOOL)lightKeyboard { return RKBlackEnabled() ? NO : %orig; }
-- (BOOL)whiteText { return RKBlackEnabled() ? YES : %orig; }
+- (CGFloat)keycapOpacity {
+    return RKBlackEnabled() ? 0 : %orig;
+}
+- (CGFloat)lightKeycapOpacity {
+    return RKBlackEnabled() ? 0 : %orig;
+}
+- (BOOL)lightKeyboard {
+    return RKBlackEnabled() ? NO : %orig;
+}
+- (BOOL)whiteText {
+    return RKBlackEnabled() ? YES : %orig;
+}
 %end
 %end
 
@@ -1400,7 +1426,11 @@ void RKApplyBlackKeyboardHost(UIView *host) {
 - (void)changeBackgroundToActiveIfNecessary {
     void *previous = RKNativeBackgroundContext;
     if (RKNativeKeyView((UIView *)self)) RKNativeBackgroundContext = (__bridge void *)self;
-    @try { %orig; } @finally { RKNativeBackgroundContext = previous; }
+    @try {
+        %orig;
+    } @finally {
+        RKNativeBackgroundContext = previous;
+    }
     RKRefreshSystemKey((UIView *)self);
 }
 %end
@@ -1410,7 +1440,11 @@ void RKApplyBlackKeyboardHost(UIView *host) {
 - (void)changeBackgroundToEnabled {
     void *previous = RKNativeBackgroundContext;
     if (RKNativeKeyView((UIView *)self)) RKNativeBackgroundContext = (__bridge void *)self;
-    @try { %orig; } @finally { RKNativeBackgroundContext = previous; }
+    @try {
+        %orig;
+    } @finally {
+        RKNativeBackgroundContext = previous;
+    }
     RKRefreshSystemKey((UIView *)self);
 }
 %end
@@ -1486,7 +1520,10 @@ void RKApplyBlackKeyboardHost(UIView *host) {
 %group RKNativeMultiplyLayer
 %hook CALayer
 - (void)setContentsMultiplyColor:(CGColorRef)color {
-    if (objc_getAssociatedObject(self, &RKNativeMultiplyUpdatingKey)) { %orig; return; }
+    if (objc_getAssociatedObject(self, &RKNativeMultiplyUpdatingKey)) {
+        %orig;
+        return;
+    }
     NSDictionary *cache = objc_getAssociatedObject(self, &RKNativeMultiplyKey);
     if (cache) {
         NSMutableDictionary *updated = [cache mutableCopy];
@@ -1592,7 +1629,10 @@ void RKApplyBlackKeyboardHost(UIView *host) {
 %end
 %hook CALayer
 - (void)setCompositingFilter:(id)filter {
-    if (objc_getAssociatedObject(self, &RKNativeFilterUpdatingKey)) { %orig; return; }
+    if (objc_getAssociatedObject(self, &RKNativeFilterUpdatingKey)) {
+        %orig;
+        return;
+    }
     if (objc_getAssociatedObject(self, &RKNativeCompositingKey))
         objc_setAssociatedObject(self, &RKNativeCompositingKey,
             @{@"source":filter ?: NSNull.null}, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -1603,11 +1643,26 @@ void RKApplyBlackKeyboardHost(UIView *host) {
     %orig;
     if (objc_getAssociatedObject(self, &RKNativeKeyOwnerKey)) RKUpdateNativeCompositing((CALayer *)self);
 }
-- (void)addSublayer:(CALayer *)layer { %orig; RKPrepareNativeAttachedLayer(layer); }
-- (void)insertSublayer:(CALayer *)layer atIndex:(unsigned int)index { %orig; RKPrepareNativeAttachedLayer(layer); }
-- (void)insertSublayer:(CALayer *)layer below:(CALayer *)sibling { %orig; RKPrepareNativeAttachedLayer(layer); }
-- (void)insertSublayer:(CALayer *)layer above:(CALayer *)sibling { %orig; RKPrepareNativeAttachedLayer(layer); }
-- (void)replaceSublayer:(CALayer *)oldLayer with:(CALayer *)newLayer { %orig; RKPrepareNativeAttachedLayer(newLayer); }
+- (void)addSublayer:(CALayer *)layer {
+    %orig;
+    RKPrepareNativeAttachedLayer(layer);
+}
+- (void)insertSublayer:(CALayer *)layer atIndex:(unsigned int)index {
+    %orig;
+    RKPrepareNativeAttachedLayer(layer);
+}
+- (void)insertSublayer:(CALayer *)layer below:(CALayer *)sibling {
+    %orig;
+    RKPrepareNativeAttachedLayer(layer);
+}
+- (void)insertSublayer:(CALayer *)layer above:(CALayer *)sibling {
+    %orig;
+    RKPrepareNativeAttachedLayer(layer);
+}
+- (void)replaceSublayer:(CALayer *)oldLayer with:(CALayer *)newLayer {
+    %orig;
+    RKPrepareNativeAttachedLayer(newLayer);
+}
 - (void)setSublayers:(NSArray *)layers {
     %orig;
     for (CALayer *layer in layers) RKPrepareNativeAttachedLayer(layer);
