@@ -1,4 +1,4 @@
-name: Build RainbowKeyboard (Rootless)
+name: Build RainbowKeyboard
 
 on:
   workflow_dispatch:
@@ -61,3 +61,56 @@ jobs:
         with:
           name: RainbowKeyboard-rootless
           path: build/RainbowKeyboard-rootless.deb
+
+  roothide:
+    name: Build RootHide .deb (arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install dpkg ldid xz
+
+      - name: Install Theos
+        run: |
+          set -euxo pipefail
+          git clone --recursive --depth=1 --single-branch \
+            https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+
+      - name: Install iOS SDK (iPhoneOS16.5)
+        run: |
+          set -euxo pipefail
+          git clone --depth=1 --filter=blob:none --sparse \
+            https://github.com/theos/sdks.git /tmp/sdks
+          cd /tmp/sdks
+          git sparse-checkout set iPhoneOS16.5.sdk
+          test -d iPhoneOS16.5.sdk
+          cp -R iPhoneOS16.5.sdk "$HOME/theos/sdks/"
+
+      - name: Build roothide package
+        run: |
+          set -euxo pipefail
+          rm -rf packages build
+          make clean
+          ARCHS=arm64 THEOS_PACKAGE_SCHEME=roothide make package FINALPACKAGE=1
+          deb=$(find packages -maxdepth 1 -type f -name '*.deb' | head -n 1)
+          test -n "$deb"
+          mkdir -p build
+          cp "$deb" build/RainbowKeyboard-roothide.deb
+
+      - name: Verify artifact
+        run: |
+          set -euxo pipefail
+          test -s build/RainbowKeyboard-roothide.deb
+          echo "Package info:"
+          dpkg-deb --info build/RainbowKeyboard-roothide.deb
+          echo "Installed layout:"
+          dpkg-deb --contents build/RainbowKeyboard-roothide.deb
+          ls -lh build/RainbowKeyboard-roothide.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RainbowKeyboard-roothide
+          path: build/RainbowKeyboard-roothide.deb
