@@ -12,7 +12,12 @@
 //
 // Hooking a class that is absent from the current process is a no-op (Logos resolves
 // it with objc_getClass and skips when nil), so this file is safe to load into the
-// native keyboard, WeType and every other injected process alike.
+// native keyboard and the WeType keyboard extension alike.
+//
+// %hook only sees each target as a forward class, so `self` is typed as that class and
+// has neither the UIView properties nor a UIView* conversion. Casting once here keeps
+// every hook body readable and type-correct.
+#define RKViewSelf ((UIView *)self)
 
 // ---------------------------------------------------------------------------
 // Keyboard host: the key area only (candidate bar and toolbars are separate views).
@@ -20,22 +25,22 @@
 %hook WBKeyboardView                 // WeType: key panel container
 - (void)layoutSubviews {
     %orig;
-    RKRegisterKeyboardHost(self);
+    RKRegisterKeyboardHost(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterKeyboardHost(self);
+    if (RKViewSelf.window) RKRegisterKeyboardHost(RKViewSelf);
 }
 %end
 
 %hook UIKeyboardLayoutStar           // Native keyboard: key area
 - (void)layoutSubviews {
     %orig;
-    RKRegisterKeyboardHost(self);
+    RKRegisterKeyboardHost(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterKeyboardHost(self);
+    if (RKViewSelf.window) RKRegisterKeyboardHost(RKViewSelf);
 }
 %end
 
@@ -46,22 +51,22 @@
 %hook WBKeyView                      // WeType keycap (also inherited by WBNewlineKeyView,
 - (void)layoutSubviews {             // WBReturnKeyView, WBSecKeyboardKeyView, WBRuleKeyView)
     %orig;
-    RKRegisterKeyView(self);
+    RKRegisterKeyView(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterKeyView(self);
+    if (RKViewSelf.window) RKRegisterKeyView(RKViewSelf);
 }
 %end
 
 %hook UIKBKeyView                    // Native keycap
 - (void)layoutSubviews {
     %orig;
-    RKRegisterKeyView(self);
+    RKRegisterKeyView(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterKeyView(self);
+    if (RKViewSelf.window) RKRegisterKeyView(RKViewSelf);
 }
 %end
 
@@ -73,87 +78,87 @@
 %hook WBTopBar                       // WeType top bar (holds WBCandidateView)
 - (void)layoutSubviews {
     %orig;
-    RKRegisterCandidateContainer(self);
+    RKRegisterCandidateContainer(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterCandidateContainer(self);
+    if (RKViewSelf.window) RKRegisterCandidateContainer(RKViewSelf);
 }
 %end
 
 %hook WBCandidateView
 - (void)layoutSubviews {
     %orig;
-    RKRegisterCandidateContainer(self);
+    RKRegisterCandidateContainer(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterCandidateContainer(self);
+    if (RKViewSelf.window) RKRegisterCandidateContainer(RKViewSelf);
 }
 %end
 
 %hook WBSplitCandidateView
 - (void)layoutSubviews {
     %orig;
-    RKRegisterCandidateContainer(self);
+    RKRegisterCandidateContainer(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterCandidateContainer(self);
+    if (RKViewSelf.window) RKRegisterCandidateContainer(RKViewSelf);
 }
 %end
 
 %hook TUICandidateView
 - (void)layoutSubviews {
     %orig;
-    RKRegisterCandidateContainer(self);
+    RKRegisterCandidateContainer(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterCandidateContainer(self);
+    if (RKViewSelf.window) RKRegisterCandidateContainer(RKViewSelf);
 }
 %end
 
 %hook TUIPredictionViewCell
 - (void)layoutSubviews {
     %orig;
-    RKRegisterCandidateContainer(self);
+    RKRegisterCandidateContainer(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterCandidateContainer(self);
+    if (RKViewSelf.window) RKRegisterCandidateContainer(RKViewSelf);
 }
 %end
 
 %hook TUIPredictionView
 - (void)layoutSubviews {
     %orig;
-    RKRegisterCandidateContainer(self);
+    RKRegisterCandidateContainer(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterCandidateContainer(self);
+    if (RKViewSelf.window) RKRegisterCandidateContainer(RKViewSelf);
 }
 %end
 
 %hook UIKBCandidateView
 - (void)layoutSubviews {
     %orig;
-    RKRegisterCandidateContainer(self);
+    RKRegisterCandidateContainer(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterCandidateContainer(self);
+    if (RKViewSelf.window) RKRegisterCandidateContainer(RKViewSelf);
 }
 %end
 
 %hook UIKeyboardCandidateView
 - (void)layoutSubviews {
     %orig;
-    RKRegisterCandidateContainer(self);
+    RKRegisterCandidateContainer(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
-    if (self.window) RKRegisterCandidateContainer(self);
+    if (RKViewSelf.window) RKRegisterCandidateContainer(RKViewSelf);
 }
 %end
