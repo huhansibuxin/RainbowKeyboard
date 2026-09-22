@@ -18,13 +18,42 @@ static BOOL RKIsWeTypeProcess(void) {
     });
     return weType;
 }
+// Animation values, keyTimes and gradient locations are constants, yet the old code
+// rebuilt these arrays -- and every NSNumber inside them -- on every keystroke: 10
+// arrays plus 42 numbers per press for the ambient pass alone, then 1 array plus 4
+// numbers per animated key for its fade keyTimes. They are immutable and Core
+// Animation only reads them, so a single shared copy is safe and produces the same
+// animation.
+enum { RKConstAmbientLocations, RKConstSpreadValues, RKConstSpreadKeyTimes,
+       RKConstAmbientFadeValues, RKConstAmbientFadeKeyTimes, RKConstKeyFadeKeyTimes,
+       RKConstCount };
+static NSArray *RKAnimConstant(NSUInteger index) {
+    static NSArray *table[RKConstCount];
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        table[RKConstAmbientLocations]    = @[@0, @.22, @.52, @.78, @1];
+        table[RKConstSpreadValues]        = @[@.04, @.64, @1, @1.08];
+        table[RKConstSpreadKeyTimes]      = @[@0, @.32, @.7, @1];
+        table[RKConstAmbientFadeValues]   = @[@0, @1, @.9, @0];
+        table[RKConstAmbientFadeKeyTimes] = @[@0, @.08, @.52, @1];
+        table[RKConstKeyFadeKeyTimes]     = @[@0, @.12, @.38, @1];
+    });
+    return index < RKConstCount ? table[index] : nil;
+}
 @interface RainbowEffectView ()
 @property(nonatomic,strong) NSDictionary *config;
 @property(nonatomic) CGFloat hue;
 @property(nonatomic) CGFloat pressHue;
 @property(nonatomic) NSInteger lastStyle;
 @end
-@implementation RainbowEffectView
+@implementation RainbowEffectView {
+    // Cached compound "gaps" path for the gutter light. It depends only on bounds and
+    // the key frames, yet the old code rebuilt all of them (one rounded-rect bezier
+    // path per key) on every single keystroke.
+    CGPathRef _gutterPath;
+    CGRect _gutterPathBounds;
+    BOOL _gutterPathValid;
+}
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
         self.userInteractionEnabled = NO;
@@ -36,7 +65,10 @@ static BOOL RKIsWeTypeProcess(void) {
     }
     return self;
 }
-- (void)dealloc { [[NSNotificationCenter defaultCenter] removeObserver:self]; }
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    if (_gutterPath) CGPathRelease(_gutterPath);
+}
 - (void)reloadConfiguration { self.config = RKReadPreferences(); }
 - (CGFloat)number:(NSString *)key fallback:(CGFloat)fallback low:(CGFloat)low high:(CGFloat)high {
     id x = self.config[key];
@@ -51,12 +83,23 @@ static BOOL RKIsWeTypeProcess(void) {
     // 自定义键帽与底色已移除，键帽一律使用系统原生配色，不再保留黑色键面。
     return NO;
 }
-- (CAShapeLayer *)keyGutterMask {
+// The compound path (keyboard rect + even-odd key faces) is a pure function of
+// self.bounds and self.keyFrames. Rebuild it only when one of those changes.
+- (CGPathRef)keyGutterPath {
+    if (_gutterPathValid && CGRectEqualToRect(_gutterPathBounds, self.bounds)) return _gutterPath;
     UIBezierPath *gaps = [UIBezierPath bezierPathWithRect:self.bounds];
     for (NSValue *value in self.keyFrames) [gaps appendPath:RKKeyboardKeyFacePath(value.CGRectValue)];
+    CGPathRef built = CGPathCreateCopy(gaps.CGPath);
+    if (_gutterPath) CGPathRelease(_gutterPath);
+    _gutterPath = built;
+    _gutterPathBounds = self.bounds;
+    _gutterPathValid = (built != NULL);
+    return _gutterPath;
+}
+- (CAShapeLayer *)keyGutterMask {
     CAShapeLayer *mask = [CAShapeLayer layer];
     mask.frame = self.bounds;
-    mask.path = gaps.CGPath;
+    mask.path = [self keyGutterPath];
     mask.fillRule = kCAFillRuleEvenOdd;
     return mask;
 }
@@ -74,6 +117,7 @@ static BOOL RKIsWeTypeProcess(void) {
 - (void)setKeyFrames:(NSArray<NSValue *> *)keyFrames {
     if ([_keyFrames isEqualToArray:keyFrames]) return;
     _keyFrames = [keyFrames copy];
+    _gutterPathValid = NO;
     for (CALayer *pulse in self.layer.sublayers.copy) [pulse removeFromSuperlayer];
 }
 - (void)addAmbientGlowToPulse:(CALayer *)pulse origin:(CGPoint)origin radius:(CGFloat)radius
@@ -111,17 +155,17 @@ static BOOL RKIsWeTypeProcess(void) {
             (id)[middle colorWithAlphaComponent:level].CGColor,
             (id)[outer colorWithAlphaComponent:level * .5].CGColor,
             (id)[outer colorWithAlphaComponent:0].CGColor];
-        bloom.locations = @[@0, @.22, @.52, @.78, @1];
+        bloom.locations = RKAnimConstant(RKConstAmbientLocations);
         bloom.opacity = 0;
         [field addSublayer:bloom];
         CAKeyframeAnimation *spread = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
-        spread.values = @[@.04, @.64, @1, @1.08];
-        spread.keyTimes = @[@0, @.32, @.7, @1];
+        spread.values = RKAnimConstant(RKConstSpreadValues);
+        spread.keyTimes = RKAnimConstant(RKConstSpreadKeyTimes);
         spread.duration = duration;
         [bloom addAnimation:spread forKey:@"ambientExpansion"];
         CAKeyframeAnimation *fade = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
-        fade.values = @[@0, @1, @.9, @0];
-        fade.keyTimes = @[@0, @.08, @.52, @1];
+        fade.values = RKAnimConstant(RKConstAmbientFadeValues);
+        fade.keyTimes = RKAnimConstant(RKConstAmbientFadeKeyTimes);
         fade.duration = duration;
         [bloom addAnimation:fade forKey:@"ambientFade"];
     }
@@ -215,7 +259,7 @@ static BOOL RKIsWeTypeProcess(void) {
         CGFloat peak = alpha * (1 - progress * .42);
         CAKeyframeAnimation *fade = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
         fade.values = @[@0, @(peak), @(peak * .72), @0];
-        fade.keyTimes = @[@0, @.12, @.38, @1];
+        fade.keyTimes = RKAnimConstant(RKConstKeyFadeKeyTimes);
         fade.duration = tail;
         fade.beginTime = now + progress * travel;
         [key addAnimation:fade forKey:@"keyWave"];

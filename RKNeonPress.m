@@ -182,7 +182,11 @@ void RKShowNeonKeyPress(UIView *overlay, CGRect keyFrame, UIColor *color, CGFloa
     }
     CAKeyframeAnimation *fade = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
     fade.values = @[@(peak), @(peak), @(peak * .65), @0];
-    fade.keyTimes = @[@0, @.35, @.65, @1];
+    // Constant, so it is shared instead of rebuilt (with its four NSNumbers) per press.
+    static NSArray *keyTimes;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ keyTimes = @[@0, @.35, @.65, @1]; });
+    fade.keyTimes = keyTimes;
     fade.duration = duration;
     [cap addAnimation:fade forKey:@"neonPressFade"];
 

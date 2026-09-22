@@ -1,6 +1,45 @@
 # RainbowKeyboard
 
-彩虹键盘光效越狱插件。`1.0.26~samsung17.6` 修复「自定义」预设不生效，其余功能不变。
+彩虹键盘光效越狱插件。`1.0.27~samsung17.7` 按键热路径瘦身，观感不变。
+
+## Samsung17.7 按键热路径瘦身
+
+审计顺序：先看系统侧有没有能耗裁决 → 再看 dylib 静态规模 → 最后逐项数热路径的对象分配。
+
+- **系统能耗裁决与本插件无关**：`wxkb_plugin.wakeups_resource-*.ips` / `wxkb.*.ips`
+  中 `grep -c 'RainbowKeyboard|TweakInject|ellekit'` 均为 **0**，且 heaviest stack
+  是 `dyld → Foundation/PlugInKit → UIKitCore → GraphicsServices → CoreFoundation
+  → mach_msg_trap` 的标准 runloop 等待路径，`Action taken: none`（只记账未处置）。
+  事件时间 09-18，早于本版本安装时间，属微信键盘自身的扩展宿主唤醒。
+- **dylib 静态规模可忽略**：2 个 ObjC 类 / 183 selrefs / 30 classrefs，vmsize 128 KB，
+  8 条 `LC_LOAD_DYLIB` 全是宿主进程本来就有的框架。dyld 登记成本不是问题。
+- **源码扫描无阻塞**：无 `dispatch_sync` / 信号量 / 文件 IO / 目录遍历。
+- **真正可消除的是重复分配**，两处：
+  1. `CAKeyframeAnimation` 的 `keyTimes` / `values` 与 `CAGradientLayer` 的 `locations`
+     全是常量，但旧代码每次按键都重建（含数组里每个 `NSNumber`）。这些数组不可变、
+     Core Animation 只读取，改为共享一份。背景霓虹两趟共省 4 组动画常量数组；
+     每个参与动画的键再省一组 `fade.keyTimes`。
+  2. `keyGutterMask` 的复合路径只取决于 `bounds` 与 `keyFrames`，旧代码每次按键都把
+     全部键面（约 32 个圆角贝塞尔路径）重新构建一遍。改为按 `bounds` 缓存，
+     `setKeyFrames:` 与 bounds 变化时失效（`dealloc` 释放）。
+- **量化（逐项对应源码分配语句的对象账）**：
+
+  | 场景 | reach(pt) | 参与动画键数 N | 改前对象/次 | 改后对象/次 | 降幅 |
+  |---|---|---|---|---|---|
+  | 出厂默认 180 / 2.0 | 180.0 | 19.4 | 555 | 373 | **-33%** |
+  | 设备实测 126.26 / 1.5 | 94.7 | 7.9 | 291 | 166 | **-43%** |
+  | 半径小 / 扩散大 126.26 / 2.0 | 126.3 | 12.3 | 391 | 245 | -37% |
+  | 全部拉满 360 / 3.0 | 540.0 | 32.0 | 844 | 599 | -29% |
+
+  说明：N 由 `reach = BackgroundRadius × Spread / 2` 决定，所以成本与「最大半径」
+  「扩散倍率」两个滑条强相关 —— 当前设备参数已把成本压到出厂默认的约 45%。
+- **刻意不改的项（已排除，不再重复怀疑）**：
+  - `RKReadEffectivePreferences()` 每次按键有 2 次 `notify_get_state` + 1 次
+    `notify_check`（约 30~90 µs）。节流可省，但会把「改设置后下一次按键即生效」
+    变成最长 100 ms 延迟，收益与体验不成比例，故保留。
+  - `halo` 的 shadow 每层一次离屏合成 —— 那是光晕本身，去掉就是改观感。
+  - 轻弹模式的字形截图（`RKPressForeground` 的 render server 取图）是唯一未量化的
+    毫秒级项，但仅在该模式下执行；当前设备用的是三星风格扩散，不在此路径上。
 
 ## Samsung17.6 自定义参数备份
 
