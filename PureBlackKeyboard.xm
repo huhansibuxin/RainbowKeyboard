@@ -1905,43 +1905,6 @@ static void RKPublishBlackDiagnostic(void) {
         RKNativeTraitsRecolored, RKNativeStateRefreshes, RKNativeMultiplyChanges, RKNativeStretchImages);
 }
 
-static void RKWriteBlackDiagnostic(void) {
-    RKInstallBlackHooks();
-    RKPublishBlackDiagnostic();
-    NSMutableSet *views = [NSMutableSet set], *layers = [NSMutableSet set];
-    for (UIView *view in RKBlackViews) [views addObject:NSStringFromClass(view.class)];
-    for (CALayer *layer in RKBlackImageLayers) [layers addObject:NSStringFromClass(layer.class)];
-    NSDictionary *report = @{@"version":@"samsung17",
-        @"systemVersion":UIDevice.currentDevice.systemVersion, @"preferenceSync":RKPreferencesDiagnostic(),
-        @"processBundle":NSBundle.mainBundle.bundleIdentifier ?: @"unknown",
-        @"enabled":@(RKBlackEnabled()), @"configHook":@(RKBlackConfigHooksInstalled),
-        @"qqAppearanceHook":@(RKQQAppearanceHookInstalled), @"qqAppearanceOverrides":@(RKQQAppearanceOverrides),
-        @"storedPreferenceReads":@(RKStoredPreferenceReads),
-        @"keyViewHook":@(RKBlackActionHookInstalled), @"imageLayerHook":@(RKBlackLayerHookInstalled),
-        @"keyplaneHook":@(RKBlackKeyplaneHookInstalled),
-        @"splitImageHook":@(RKBlackSplitHookInstalled),
-        @"atlasImagesConverted":@(RKBlackAtlasImages), @"backgroundImagesConverted":@(RKBlackBackgroundImages),
-        @"weTypeKeyVisits":@(RKBlackWeTypeKeys),
-        @"backgroundColorsChanged":@(RKBlackBackgroundColors),
-        @"directDraws":@(RKBlackDirectDraws), @"directConversions":@(RKBlackDirectConversions),
-        @"stateRefreshes":@(RKBlackStateRefreshes),
-        @"nativeStateHooks":@(RKNativeStateHooksInstalled), @"nativeStateRefreshes":@(RKNativeStateRefreshes),
-        @"nativeStateBatches":@(RKNativeStateBatches), @"nativeStateLookups":@(RKNativeStateLookups),
-        @"geometryRequests":@(RKBlackGeometryRequests),
-        @"nativeStretchImages":@(RKNativeStretchImages), @"nativeFilterChanges":@(RKNativeFilterChanges),
-        @"nativeTraitsHook":@(RKNativeTraitsHookInstalled), @"nativeTraitsRecolored":@(RKNativeTraitsRecolored),
-        @"nativeMultiplyHook":@(RKNativeMultiplyHookInstalled), @"nativeMultiplyChanges":@(RKNativeMultiplyChanges),
-        @"suppressedBackgrounds":@(RKBlackSuppressedBackgrounds), @"shapeFaces":@(RKBlackShapeFaces),
-        @"grayImagesConverted":@(RKBlackGrayImages), @"blueImagesConverted":@(RKBlackBlueImages),
-        @"unchangedImages":@(RKBlackUnchangedImages),
-        @"observedViewClasses":views.allObjects, @"observedLayerClasses":layers.allObjects};
-    NSString *file = [NSString stringWithFormat:@"RainbowKeyboard-black-probe-%@.plist",
-        NSBundle.mainBundle.bundleIdentifier ?: @"unknown"];
-    NSString *path = [@"/var/mobile/Library/Preferences" stringByAppendingPathComponent:file];
-    if (![report writeToFile:path atomically:YES])
-        [report writeToFile:[NSTemporaryDirectory() stringByAppendingPathComponent:file] atomically:YES];
-}
-
 %ctor {
     @autoreleasepool {
         RKBlackViews = [NSHashTable weakObjectsHashTable];
@@ -1973,12 +1936,6 @@ static void RKWriteBlackDiagnostic(void) {
             object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 RKRequestPreferencesRelay();
                 RKBlackReload();
-            }];
-        [[NSNotificationCenter defaultCenter] addObserverForName:UIKeyboardDidShowNotification
-            object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                    RKWriteBlackDiagnostic();
-                });
             }];
     }
 }

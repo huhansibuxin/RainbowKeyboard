@@ -9,76 +9,12 @@ static NSDictionary *RKReadPreferences(void) {
 static NSBundle *RKPrefsBundle(void) {
     static NSBundle *b;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ b = [NSBundle bundleForClass:NSClassFromString(@"RKBPackageInfoController")]; });
+    dispatch_once(&once, ^{ b = [NSBundle bundleForClass:NSClassFromString(@"RKBRootListController")]; });
     return b ?: [NSBundle mainBundle];
 }
 static NSString *RKLoc(NSString *key) {
     return [RKPrefsBundle() localizedStringForKey:key value:key table:@"RainbowKeyboard"];
 }
-@interface RKBPackageInfoController : UIViewController
-@end
-@implementation RKBPackageInfoController
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.title = RKLoc(@"关于与预览");
-    self.view.backgroundColor = UIColor.systemBackgroundColor;
-    NSBundle *bundle = [NSBundle bundleForClass:self.class];
-    NSData *data = [NSData dataWithContentsOfFile:[bundle pathForResource:@"PackageInfo" ofType:@"json"]];
-    NSDictionary *info = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-    UIScrollView *scroll = [UIScrollView new];
-    scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:scroll];
-    UIStackView *stack = [UIStackView new];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 18;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [scroll addSubview:stack];
-    [NSLayoutConstraint activateConstraints:@[
-        [scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],
-        [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:20],
-        [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-20],
-        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
-        [stack.widthAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.widthAnchor constant:-40]
-    ]];
-    UIImageView *icon = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"PackageIcon"
-        inBundle:bundle compatibleWithTraitCollection:nil]];
-    icon.contentMode = UIViewContentModeScaleAspectFit;
-    [icon.heightAnchor constraintEqualToConstant:88].active = YES;
-    [stack addArrangedSubview:icon];
-    void (^label)(NSString *, UIFontTextStyle, UIColor *) = ^(NSString *text, UIFontTextStyle style, UIColor *color) {
-        UILabel *view = [UILabel new];
-        view.text = text;
-        view.numberOfLines = 0;
-        view.font = [UIFont preferredFontForTextStyle:style];
-        view.adjustsFontForContentSizeCategory = YES;
-        view.textColor = color;
-        [stack addArrangedSubview:view];
-    };
-    label(info[@"name"] ?: RKLoc(@"彩虹键盘光效"), UIFontTextStyleTitle2, UIColor.labelColor);
-    label([NSString stringWithFormat:@"%@ · %@", info[@"version"] ?: @"", info[@"author"] ?: @"MoWang"],
-        UIFontTextStyleFootnote, UIColor.secondaryLabelColor);
-    label(info[@"summary"] ?: RKLoc(@"说明文件未找到，请重新安装完整安装包。"), UIFontTextStyleBody, UIColor.labelColor);
-    for (NSDictionary *item in info[@"screenshots"]) {
-        UIImage *image = [UIImage imageWithContentsOfFile:[bundle.resourcePath stringByAppendingPathComponent:item[@"file"]]];
-        if (!image || image.size.width <= 0) continue;
-        UIImageView *preview = [[UIImageView alloc] initWithImage:image];
-        preview.contentMode = UIViewContentModeScaleAspectFit;
-        preview.isAccessibilityElement = YES;
-        preview.accessibilityLabel = item[@"title"];
-        [preview.heightAnchor constraintEqualToAnchor:preview.widthAnchor multiplier:image.size.height / image.size.width].active = YES;
-        [stack addArrangedSubview:preview];
-    }
-    for (NSDictionary *section in info[@"sections"]) {
-        label(section[@"title"], UIFontTextStyleHeadline, UIColor.labelColor);
-        label(section[@"body"], UIFontTextStyleBody, UIColor.secondaryLabelColor);
-    }
-}
-- (void)close { [self dismissViewControllerAnimated:YES completion:nil]; }
-@end
 @interface RKBRootListController : PSListController <UIColorPickerViewControllerDelegate>
 @property(nonatomic,copy) NSString *editingColorKey;
 @end
@@ -152,15 +88,6 @@ static NSString *RKLoc(NSString *key) {
 - (void)chooseKeyboardBackground { [self openCandidatePicker:@"KeyboardBackgroundColor"]; }
 - (void)chooseKeycapColor { [self openCandidatePicker:@"KeycapColor"]; }
 - (void)choosePressColor { [self openCandidatePicker:@"PressColor"]; }
-- (void)showPackageInfo {
-    RKBPackageInfoController *controller = [RKBPackageInfoController new];
-    if (self.navigationController) [self.navigationController pushViewController:controller animated:YES];
-    else {
-        controller.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
-            initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:controller action:@selector(close)];
-        [self presentViewController:[[UINavigationController alloc] initWithRootViewController:controller] animated:YES completion:nil];
-    }
-}
 - (void)copyBlackDiagnostic {
     NSDictionary *values = RKReadPreferences();
     NSDictionary *report = @{@"build":@"1.0.25~samsung17.1", @"systemVersion":UIDevice.currentDevice.systemVersion,

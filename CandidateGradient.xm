@@ -17,7 +17,6 @@ static NSUInteger RKTUIGlyphDraws;
 static NSUInteger RKNativeLabelDraws;
 static os_unfair_lock RKHookLock = OS_UNFAIR_LOCK_INIT;
 static BOOL RKHookInstallQueued;
-static void RKWriteNativeDiagnostic(void);
 
 static NSDictionary *RKCandidateReadPreferences(void) {
     return RKReadEffectivePreferences();
@@ -181,11 +180,6 @@ static void RKDrawNativeGlyphView(UIView *view, CGRect dirtyRect, void (^origina
                             (maxX - minX + 1) / glyphs.scale, bounds.size.height);
     RKTUIGlyphDraws++;
     objc_setAssociatedObject(view, &RKCandidateRenderedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (RKTUIGlyphDraws == 1) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            RKWriteNativeDiagnostic();
-        });
-    }
     RKDrawGradientText(CGRectIntersection(bounds, dirtyRect), ink, ^{ [glyphs drawInRect:bounds]; });
 }
 
@@ -250,32 +244,6 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
         RKInstallNativeCandidateHook();
     });
 }
-static void RKWriteNativeDiagnostic(void) {
-    RKInstallNativeCandidateHook();
-    NSMutableSet *classes = [NSMutableSet set];
-    for (UIView *view in RKCandidateViews) [classes addObject:NSStringFromClass(view.class)];
-    Class cls = NSClassFromString(@"TUICandidateLabel");
-    Method draw = cls ? class_getInstanceMethod(cls, @selector(drawRect:)) : NULL;
-    NSDictionary *report = @{@"version":@"samsung8",
-        @"systemVersion":UIDevice.currentDevice.systemVersion,
-        @"processBundle":NSBundle.mainBundle.bundleIdentifier ?: @"unknown",
-        @"nativeClassLoaded":@(cls != Nil), @"nativeGlyphHookInstalled":@(RKTUIHookInstalled),
-        @"nativePredictionHookInstalled":@(RKPredictionHookInstalled),
-        @"nativeLabelDrawCount":@(RKNativeLabelDraws),
-        @"nativeGlyphDrawCount":@(RKTUIGlyphDraws),
-        @"drawEncoding":draw ? @(method_getTypeEncoding(draw)) : @"missing",
-        @"observedViewClasses":classes.allObjects,
-        @"CandidateGradient":@(RKCandidateFlag(@"CandidateGradient")),
-        @"CandidateNative":@(RKCandidateFlag(@"CandidateNative")),
-        @"CandidateWeType":@(RKCandidateFlag(@"CandidateWeType")),
-        @"settingsRevision":@(RKPreferencesRevision(RKCandidatePrefs))};
-    NSString *file = [NSString stringWithFormat:@"RainbowKeyboard-native-probe-%@.plist",
-        NSBundle.mainBundle.bundleIdentifier ?: @"unknown"];
-    NSString *path = [@"/var/mobile/Library/Preferences" stringByAppendingPathComponent:file];
-    if (![report writeToFile:path atomically:YES])
-        [report writeToFile:[NSTemporaryDirectory() stringByAppendingPathComponent:file] atomically:YES];
-}
-
 %hook UILabel
 - (void)drawTextInRect:(CGRect)rect {
     RKDrawCandidate(self, rect, YES, ^{
@@ -393,9 +361,6 @@ static void RKWriteNativeDiagnostic(void) {
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) { RKCandidateReload(); }];
         [[NSNotificationCenter defaultCenter] addObserverForName:UIKeyboardDidShowNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
             RKCandidateReload();
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                RKWriteNativeDiagnostic();
-            });
         }];
     }
 }

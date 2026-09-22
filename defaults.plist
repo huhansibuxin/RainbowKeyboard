@@ -3,7 +3,7 @@
     EffectStyle = 0;
     AmbientGlow = 1;
     AmbientStrength = 0.85;
-    PureBlackKeyboard = 1;
+    PureBlackKeyboard = 0;
     KeyboardBackgroundColor = (0, 0, 0);
     KeycapColor = (0, 0, 0);
     ColorMode = 0;
