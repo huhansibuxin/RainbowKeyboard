@@ -12,8 +12,14 @@ static inline NSArray<NSString *> *RKDisplayNumbers(void) {
         @"BackgroundDuration", @"BackgroundRadius", @"BackgroundBand", @"ColorMode",
         @"Hue", @"EffectStyle", @"Preset"];
 }
+// The flag list is a POSITIONAL wire format: the array index is the bit number in
+// words[1] (presence 21+i, value 31+i). Never delete or reorder an element. A
+// removed setting must leave a tombstone slot behind, otherwise every later flag
+// shifts one bit and states left in notifyd by an already-running process get
+// decoded as a different flag -- dropping "PureBlackKeyboard" made WeChatKeyboard
+// read the old NativeKeyboard bit, which turned the keyboard gate off entirely.
 static inline NSArray<NSString *> *RKDisplayFlags(void) {
-    return @[@"CandidateGradient", @"CandidateNative", @"CandidateWeType",
+    return @[@"CandidateGradient", @"CandidateNative", @"CandidateWeType", @"RKLegacySlot3",
         @"Enabled", @"NativeKeyboard", @"WeChatKeyboard", @"RippleEnabled", @"AmbientGlow", @"BackgroundFeedback"];
 }
 static inline NSArray<NSString *> *RKDisplayColors(void) {
@@ -27,7 +33,9 @@ static inline NSArray<NSString *> *RKDisplayKeys(void) {
 static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[RKDisplayWordCount]) {
     memset(words, 0, RKDisplayWordCount * sizeof(uint64_t));
     words[0] = [prefs[@"RKSettingsRevision"] unsignedLongLongValue];
-    words[1] = UINT64_C(0xD1) << 56;
+    // Snapshot magic doubles as a layout revision. Bumping it makes any state left
+    // behind by an older layout unusable, so a format change can never be misread.
+    words[1] = UINT64_C(0xD2) << 56;
     NSArray *numbers = RKDisplayNumbers(), *flags = RKDisplayFlags(), *colors = RKDisplayColors();
     for (NSUInteger i = 0; i < numbers.count; i++) {
         id value = prefs[numbers[i]];
@@ -81,7 +89,7 @@ static inline uint64_t RKDisplayChecksum(const uint64_t words[RKDisplayWordCount
     return (hash & UINT64_C(0x7FFFFFFFFFFFFFFF)) | 1;
 }
 static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDisplayWordCount], uint64_t checksum) {
-    if ((words[1] >> 56) != 0xD1 || !checksum || checksum == UINT64_MAX ||
+    if ((words[1] >> 56) != 0xD2 || !checksum || checksum == UINT64_MAX ||
         RKDisplayChecksum(words) != checksum) return nil;
     NSMutableDictionary *result = [@{@"RKSettingsRevision":@(words[0])} mutableCopy];
     NSArray *numbers = RKDisplayNumbers(), *flags = RKDisplayFlags(), *colors = RKDisplayColors();
@@ -116,7 +124,7 @@ static inline int RKDisplayToken(NSUInteger index) {
     dispatch_once(&once, ^{
         for (NSUInteger i = 0; i <= RKDisplayWordCount; i++) {
             tokens[i] = -1;
-            NSString *name = [NSString stringWithFormat:@"com.minis.rainbowkeyboard.snapshot.v2.%lu", (unsigned long)i];
+            NSString *name = [NSString stringWithFormat:@"com.minis.rainbowkeyboard.snapshot.v3.%lu", (unsigned long)i];
             int token = -1;
             if (notify_register_check(name.UTF8String, &token) == NOTIFY_STATUS_OK) tokens[i] = token;
         }
