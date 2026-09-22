@@ -96,6 +96,7 @@
 			<key>validTitles</key>
 			<array>
 				<string>自定义</string>
+				<string>自用</string>
 				<string>柔和水波</string>
 				<string>鲜艳彩虹</string>
 				<string>快速点击</string>
@@ -104,6 +105,7 @@
 			<key>validValues</key>
 			<array>
 				<integer>-1</integer>
+				<integer>4</integer>
 				<integer>0</integer>
 				<integer>1</integer>
 				<integer>2</integer>

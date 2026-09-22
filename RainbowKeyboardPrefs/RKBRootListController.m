@@ -23,22 +23,30 @@ static NSArray<NSString *> *RKEffectParameterKeys(void) {
         keys = @[@"Opacity", @"Brightness", @"NeonSaturation", @"Duration", @"Spread",
             @"Softness", @"CoreStrength", @"MaxEffects", @"EffectStyle", @"AmbientGlow",
             @"AmbientStrength", @"ColorMode", @"BackgroundFeedback",
-            @"BackgroundStrength", @"BackgroundDuration"];
+            @"BackgroundStrength", @"BackgroundDuration",
+            @"BackgroundRadius", @"BackgroundBand",
+            @"Hue", @"PressBrightness"];
     });
     return keys;
 }
-static NSArray<NSDictionary *> *RKPresetOptions(void) {
-    static NSArray *options;
+// A preset's number is persisted in the plist, so a new preset must take a fresh
+// number instead of shifting the existing ones: 自用 is 4 while 柔和/鲜艳/快速/推荐 keep
+// 0..3. Display order comes from the plist's validValues array -- that is what places
+// 自用 ahead of 柔和水波 without rewriting anybody's saved selection.
+enum { RKPresetValueSelfUse = 4 };
+static NSDictionary *RKPresetTable(NSInteger preset) {
+    static NSDictionary *tables[RKPresetValueSelfUse + 1];
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        options = @[
-            @{@"Opacity":@.4,@"Brightness":@.8,@"NeonSaturation":@.4,@"Duration":@.6,@"Spread":@1.5,@"Softness":@10,@"CoreStrength":@.3,@"MaxEffects":@3},
-            @{@"Opacity":@.75,@"Brightness":@1,@"NeonSaturation":@1,@"Duration":@.55,@"Spread":@2.2,@"Softness":@8,@"CoreStrength":@.65,@"MaxEffects":@4},
-            @{@"Opacity":@.6,@"Brightness":@.95,@"NeonSaturation":@.72,@"Duration":@.25,@"Spread":@1.3,@"Softness":@5,@"CoreStrength":@.6,@"MaxEffects":@3},
-            @{@"Opacity":@.65,@"Brightness":@.95,@"NeonSaturation":@.72,@"Duration":@.55,@"Spread":@2,@"Softness":@8,@"CoreStrength":@.5,@"MaxEffects":@4}
-        ];
+        tables[0] = @{@"Opacity":@.4,@"Brightness":@.8,@"NeonSaturation":@.4,@"Duration":@.6,@"Spread":@1.5,@"Softness":@10,@"CoreStrength":@.3,@"MaxEffects":@3};
+        tables[1] = @{@"Opacity":@.75,@"Brightness":@1,@"NeonSaturation":@1,@"Duration":@.55,@"Spread":@2.2,@"Softness":@8,@"CoreStrength":@.65,@"MaxEffects":@4};
+        tables[2] = @{@"Opacity":@.6,@"Brightness":@.95,@"NeonSaturation":@.72,@"Duration":@.25,@"Spread":@1.3,@"Softness":@5,@"CoreStrength":@.6,@"MaxEffects":@3};
+        tables[3] = @{@"Opacity":@.65,@"Brightness":@.95,@"NeonSaturation":@.72,@"Duration":@.55,@"Spread":@2,@"Softness":@8,@"CoreStrength":@.5,@"MaxEffects":@4};
+        // 自用 is the shared frozen tuning (RKPresetSelfUseTable) -- the very same table the
+        // renderer falls back on, so the preset and the no-configuration look cannot drift.
+        tables[RKPresetValueSelfUse] = RKPresetSelfUseTable();
     });
-    return options;
+    return (preset >= 0 && preset <= RKPresetValueSelfUse) ? tables[preset] : nil;
 }
 // Keys every preset also forces, so a preset always lands on 三星风格扩散.
 static NSDictionary *RKPresetBase(void) {
@@ -99,7 +107,11 @@ static void RKRestoreCustomParameters(NSMutableDictionary *values) {
 - (id)readPreferenceValue:(PSSpecifier *)specifier {
     NSString *key = [specifier propertyForKey:@"key"];
     NSDictionary *values = RKReadPreferences();
-    return (key ? values[key] : nil) ?: [specifier propertyForKey:@"default"];
+    if (key && values[key]) return values[key];
+    // With nothing stored the renderer uses the frozen 自用 tuning, so the page shows that
+    // number rather than the plist literal -- display and behaviour stay the same value.
+    NSNumber *selfUse = key ? RKPresetSelfUseTable()[key] : nil;
+    return selfUse ?: [specifier propertyForKey:@"default"];
 }
 - (void)setPreferenceValue:(id)value specifier:(PSSpecifier *)specifier {
     NSString *key = [specifier propertyForKey:@"key"];
@@ -111,13 +123,13 @@ static void RKRestoreCustomParameters(NSMutableDictionary *values) {
     values[key] = value;
     if ([key isEqualToString:@"Preset"]) {
         NSInteger preset = [value integerValue];
-        NSArray *options = RKPresetOptions();
-        if (preset >= 0 && preset < (NSInteger)options.count) {
+        NSDictionary *table = RKPresetTable(preset);
+        if (table) {
             // A fresh install has no backup yet; seed one from the current
             // (default) numbers so 自定义 still has something to return to.
             if (wasCustom || !values[@"CustomParams"]) RKSnapshotCustomParameters(values);
             [values addEntriesFromDictionary:RKPresetBase()];
-            [values addEntriesFromDictionary:options[preset]];
+            [values addEntriesFromDictionary:table];
         } else if (preset == -1) {
             RKRestoreCustomParameters(values);
         }

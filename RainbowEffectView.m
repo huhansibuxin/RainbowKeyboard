@@ -71,6 +71,12 @@ static NSArray *RKAnimConstant(NSUInteger index) {
 }
 - (void)reloadConfiguration { self.config = RKReadPreferences(); }
 - (CGFloat)number:(NSString *)key fallback:(CGFloat)fallback low:(CGFloat)low high:(CGFloat)high {
+    // The literal shipped fallback yields to the frozen 自用 tuning for any key that table
+    // defines, so a keyboard process which cannot reach the saved plist -- or a fresh
+    // install -- still renders that look instead of a different set of numbers. Keys the
+    // table does not define keep the literal, which stays spelled out at each call site.
+    NSNumber *selfUse = RKPresetSelfUseTable()[key];
+    if (selfUse) fallback = selfUse.doubleValue;
     id x = self.config[key];
     CGFloat v = [x respondsToSelector:@selector(doubleValue)] ? [x doubleValue] : fallback;
     return isfinite(v) ? MIN(high,MAX(low,v)) : fallback;
