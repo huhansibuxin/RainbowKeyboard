@@ -53,6 +53,14 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     CGPathRef _gutterPath;
     CGRect _gutterPathBounds;
     BOOL _gutterPathValid;
+    // Fingerprint of the layout the current keyFrames were collected from. It has to be
+    // more than the bounds: a nine-key to full-layout switch keeps the host bounds
+    // identical while replacing every single key, which is how the effect ended up
+    // still spreading from the old numeric-key centres.
+    BOOL _keyFramesStampValid;
+    uint64_t _keyFramesStamp;
+    NSUInteger _keyFramesKeyCount;
+    CGRect _keyFramesHostBounds;
 }
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
@@ -125,6 +133,27 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     _keyFrames = [keyFrames copy];
     _gutterPathValid = NO;
     for (CALayer *pulse in self.layer.sublayers.copy) [pulse removeFromSuperlayer];
+}
+- (BOOL)updateKeyFramesForHost:(UIView *)host {
+    if (!host) return NO;
+    // Three O(1) reads and no allocation. The host is laid out again when it swaps key
+    // sets, and the registered keycap count moves when a different set is installed;
+    // either changing means the frames must be re-collected, neither changing means
+    // this keystroke can reuse them. Bounds stay in the gate for rotation and for
+    // keyboards that resize when the candidate bar appears.
+    CGRect hostBounds = host.bounds;
+    uint64_t stamp = RKKeyboardLayoutStamp();
+    NSUInteger keyCount = RKRegisteredKeyCount();
+    if (_keyFramesStampValid && _keyFramesStamp == stamp &&
+        _keyFramesKeyCount == keyCount && CGRectEqualToRect(_keyFramesHostBounds, hostBounds))
+        return NO;
+    self.frame = hostBounds;
+    self.keyFrames = RKKeyboardKeyFrames(host);
+    _keyFramesStamp = stamp;
+    _keyFramesKeyCount = keyCount;
+    _keyFramesHostBounds = hostBounds;
+    _keyFramesStampValid = YES;
+    return YES;
 }
 - (void)addAmbientGlowToPulse:(CALayer *)pulse origin:(CGPoint)origin radius:(CGFloat)radius
                          hue:(CGFloat)hue mode:(NSInteger)mode duration:(CGFloat)duration {

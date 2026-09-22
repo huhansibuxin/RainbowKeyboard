@@ -19,10 +19,23 @@
 static __weak UIView *RKKeyboardHostWeak;                        // WBKeyboardView / UIKeyboardLayoutStar
 static NSHashTable<UIView *> *RKKeyViewRegistry;                 // WBKeyView / UIKBKeyView
 static NSHashTable<UIView *> *RKCandidateContainerRegistry;      // WBTopBar / TUICandidateView / ...
+static uint64_t RKLayoutStamp = 1;                               // bumped on every host layout
 
 void RKRegisterKeyboardHost(UIView *host) {
-    if (host) RKKeyboardHostWeak = host;
+    if (!host) return;
+    // The host is laid out again whenever the key set is replaced -- a nine-key to
+    // full-layout switch does exactly that while leaving host.bounds identical. This
+    // counter is the signal that a bounds comparison alone could never see.
+    RKLayoutStamp++;
+    // A keyboard that keeps a second, hidden host instance for the other layout must
+    // not take the pointer over from the one that is actually on screen.
+    if (!host.window || host.hidden || host.alpha < .01) return;
+    RKKeyboardHostWeak = host;
 }
+
+uint64_t RKKeyboardLayoutStamp(void) { return RKLayoutStamp; }
+
+NSUInteger RKRegisteredKeyCount(void) { return RKKeyViewRegistry.count; }
 
 void RKRegisterKeyView(UIView *keyView) {
     if (!keyView) return;
@@ -51,7 +64,8 @@ BOOL RKIsInCandidateContainer(UIView *view) {
 // is needed to confirm ownership.
 UIView *RKKeyboardEffectHost(UIView *view) {
     UIView *host = RKKeyboardHostWeak;
-    return (host && host.window) ? host : nil;
+    if (!host || !host.window || host.hidden || host.alpha < .01) return nil;
+    return host;
 }
 
 UIBezierPath *RKKeyboardKeyFacePath(CGRect keyFrame) {
@@ -129,11 +143,35 @@ static void RKAddKey(NSMutableArray<NSValue *> *frames, CGRect rect, CGRect boun
     if (frames.count < 100) [frames addObject:[NSValue valueWithCGRect:rect]];
 }
 
+// A keycap only counts while it belongs to the key set that is on screen. WeType
+// installs the new layout in place and keeps the outgoing one alive inside a
+// container it hides, so retired keycaps keep hidden == NO and alpha == 1 on
+// themselves: a self-only check let their stale frames keep feeding the geometry.
+// Walking the short chain up to the host (2-3 levels, fixed depth -- no recursion,
+// no class-name matching) catches the hidden container.
+static BOOL RKKeyViewIsLive(UIView *keyView, UIView *host) {
+    // Window equality also rejects keycaps parked in a preload window, whose frames
+    // would otherwise convert into perfectly plausible host coordinates.
+    if (!keyView || !host || keyView.window != host.window) return NO;
+    if (keyView.hidden || keyView.alpha < .01) return NO;
+    UIView *node = keyView.superview;
+    for (NSUInteger depth = 0; node && node != host && depth < 16; depth++) {
+        if (node.hidden || node.alpha < .01) return NO;
+        node = node.superview;
+    }
+    return YES;
+}
+
 // Keycaps registered by the exact-class hooks. Linear over the registered keys only
-// (tens of objects), never over the view hierarchy.
-static void RKAddRegisteredKeys(UIView *host, NSMutableArray<NSValue *> *frames) {
+// (tens of objects), never over the view hierarchy. requireLive selects the strict
+// test above; the loose pass keeps the original self-only test and is used only when
+// the strict one would leave the effect with no keys at all.
+static void RKAddRegisteredKeys(UIView *host, NSMutableArray<NSValue *> *frames,
+                                BOOL requireLive) {
     for (UIView *keyView in RKKeyViewRegistry.allObjects) {
-        if (!keyView.window || keyView.hidden || keyView.alpha < .01) continue;
+        if (requireLive) {
+            if (!RKKeyViewIsLive(keyView, host)) continue;
+        } else if (!keyView.window || keyView.hidden || keyView.alpha < .01) continue;
         RKAddKey(frames, [keyView convertRect:keyView.bounds toView:host], host.bounds);
     }
 }
@@ -161,7 +199,15 @@ NSArray<NSValue *> *RKKeyboardKeyFrames(UIView *host) {
     // WeType has no keyplane model: use the keycaps registered by the exact-class
     // hook on WBKeyView (linear over registered keycaps only).
     [frames removeAllObjects];
-    RKAddRegisteredKeys(host, frames);
+    RKAddRegisteredKeys(host, frames, YES);
+    if (frames.count < 3) {
+        // The strict pass can come up empty when the keyboard hides a container on the
+        // path down to its keys. Losing every key would kill the effect outright, which
+        // is worse than the stale-frame problem that pass exists to fix, so fall back to
+        // the loose test and let the frame validation above do what it can.
+        [frames removeAllObjects];
+        RKAddRegisteredKeys(host, frames, NO);
+    }
     return frames;
 }
 
@@ -172,7 +218,7 @@ UIView *RKKeyboardKeyViewAtFrame(UIView *host, CGRect keyFrame) {
     UIView *best = nil;
     CGFloat bestDelta = 5;
     for (UIView *keyView in RKKeyViewRegistry.allObjects) {
-        if (!keyView.window) continue;
+        if (!RKKeyViewIsLive(keyView, host)) continue;
         CGRect rect = [keyView convertRect:keyView.bounds toView:host];
         CGFloat delta = MAX(MAX(fabs(rect.origin.x - keyFrame.origin.x),
                                fabs(rect.origin.y - keyFrame.origin.y)),
