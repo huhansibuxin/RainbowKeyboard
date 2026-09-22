@@ -1,6 +1,6 @@
 Package: com.minis.rainbowkeyboard
 Name: 彩虹键盘光效
-Version: 1.0.25~samsung17.5
+Version: 1.0.26~samsung17.6
 Architecture: iphoneos-arm64
 Description: 霓虹扩散与键帽光效，支持原生键盘和微信输入法
  键缝背光、粗彩色键框、候选词渐变及独立开关，不改动键帽原生配色。
@@ -12,6 +12,9 @@ Description: 霓虹扩散与键帽光效，支持原生键盘和微信输入法
  输入与绘制路径不再递归视图树、也不逐层匹配祖先类名。
  修复 17.3 光效全部失效：显示状态为位置型位域，删除开关项导致后续位号前移，
  现保留占位槽并升级快照版本号，彻底隔离旧版残留状态。
+ 修复 17.6「自定义」不生效：预设与自定义写的是同一批参数键，预设没有备份就
+ 覆盖了用户自己的数值，之后选「自定义」只能改标签、参数仍是预设的。现在预设
+ 生效前先把自定义参数存入 CustomParams，选「自定义」即完整还原。
 Maintainer: MoWang
 Author: MoWang
 Section: Tweaks

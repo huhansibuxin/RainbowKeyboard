@@ -14,6 +14,59 @@ static NSBundle *RKPrefsBundle(void) {
 static NSString *RKLoc(NSString *key) {
     return [RKPrefsBundle() localizedStringForKey:key value:key table:@"RainbowKeyboard"];
 }
+// The exact key set a preset writes. Presets overwrite these in place, so the
+// same list defines what "自定义" has to be able to put back afterwards.
+static NSArray<NSString *> *RKEffectParameterKeys(void) {
+    static NSArray *keys;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        keys = @[@"Opacity", @"Brightness", @"NeonSaturation", @"Duration", @"Spread",
+            @"Softness", @"CoreStrength", @"MaxEffects", @"EffectStyle", @"AmbientGlow",
+            @"AmbientStrength", @"ColorMode", @"BackgroundFeedback",
+            @"BackgroundStrength", @"BackgroundDuration"];
+    });
+    return keys;
+}
+static NSArray<NSDictionary *> *RKPresetOptions(void) {
+    static NSArray *options;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        options = @[
+            @{@"Opacity":@.4,@"Brightness":@.8,@"NeonSaturation":@.4,@"Duration":@.6,@"Spread":@1.5,@"Softness":@10,@"CoreStrength":@.3,@"MaxEffects":@3},
+            @{@"Opacity":@.75,@"Brightness":@1,@"NeonSaturation":@1,@"Duration":@.55,@"Spread":@2.2,@"Softness":@8,@"CoreStrength":@.65,@"MaxEffects":@4},
+            @{@"Opacity":@.6,@"Brightness":@.95,@"NeonSaturation":@.72,@"Duration":@.25,@"Spread":@1.3,@"Softness":@5,@"CoreStrength":@.6,@"MaxEffects":@3},
+            @{@"Opacity":@.65,@"Brightness":@.95,@"NeonSaturation":@.72,@"Duration":@.55,@"Spread":@2,@"Softness":@8,@"CoreStrength":@.5,@"MaxEffects":@4}
+        ];
+    });
+    return options;
+}
+// Keys every preset also forces, so a preset always lands on 三星风格扩散.
+static NSDictionary *RKPresetBase(void) {
+    static NSDictionary *base;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        base = @{@"EffectStyle":@0, @"AmbientGlow":@YES, @"AmbientStrength":@.85,
+            @"ColorMode":@0, @"BackgroundFeedback":@YES,
+            @"BackgroundStrength":@.18, @"BackgroundDuration":@.4};
+    });
+    return base;
+}
+// "自定义" is not a preset table -- it is the user's own last manual numbers. The
+// preset writes the very same keys in place, so without this backup it destroys
+// them and picking 自定义 afterwards changes nothing but the label. Kept out of
+// RKDisplayKeys() on purpose: the display wire format is positional and this is
+// a dictionary, so registering it would shift every later bit.
+static void RKSnapshotCustomParameters(NSMutableDictionary *values) {
+    NSMutableDictionary *custom = [NSMutableDictionary dictionary];
+    for (NSString *key in RKEffectParameterKeys()) if (values[key]) custom[key] = values[key];
+    if (custom.count) values[@"CustomParams"] = custom;
+}
+static void RKRestoreCustomParameters(NSMutableDictionary *values) {
+    id stored = values[@"CustomParams"];
+    if (![stored isKindOfClass:NSDictionary.class]) return;
+    NSDictionary *custom = stored;
+    for (NSString *key in RKEffectParameterKeys()) if (custom[key]) values[key] = custom[key];
+}
 @interface RKBRootListController : PSListController <UIColorPickerViewControllerDelegate>
 @property(nonatomic,copy) NSString *editingColorKey;
 @end
@@ -52,26 +105,26 @@ static NSString *RKLoc(NSString *key) {
     NSString *key = [specifier propertyForKey:@"key"];
     if (!key || !value) return;
     NSMutableDictionary *values = [RKReadPreferences() mutableCopy];
+    // Read the outgoing preset before the new value lands: a preset may only
+    // replace the backup when the state it overwrites really is 自定义.
+    BOOL wasCustom = [values[@"Preset"] integerValue] == -1;
     values[key] = value;
     if ([key isEqualToString:@"Preset"]) {
         NSInteger preset = [value integerValue];
-        NSArray *options = @[
-            @{@"Opacity":@.4,@"Brightness":@.8,@"NeonSaturation":@.4,@"Duration":@.6,@"Spread":@1.5,@"Softness":@10,@"CoreStrength":@.3,@"MaxEffects":@3},
-            @{@"Opacity":@.75,@"Brightness":@1,@"NeonSaturation":@1,@"Duration":@.55,@"Spread":@2.2,@"Softness":@8,@"CoreStrength":@.65,@"MaxEffects":@4},
-            @{@"Opacity":@.6,@"Brightness":@.95,@"NeonSaturation":@.72,@"Duration":@.25,@"Spread":@1.3,@"Softness":@5,@"CoreStrength":@.6,@"MaxEffects":@3},
-            @{@"Opacity":@.65,@"Brightness":@.95,@"NeonSaturation":@.72,@"Duration":@.55,@"Spread":@2,@"Softness":@8,@"CoreStrength":@.5,@"MaxEffects":@4}
-        ];
+        NSArray *options = RKPresetOptions();
         if (preset >= 0 && preset < (NSInteger)options.count) {
+            // A fresh install has no backup yet; seed one from the current
+            // (default) numbers so 自定义 still has something to return to.
+            if (wasCustom || !values[@"CustomParams"]) RKSnapshotCustomParameters(values);
+            [values addEntriesFromDictionary:RKPresetBase()];
             [values addEntriesFromDictionary:options[preset]];
-            values[@"EffectStyle"] = @0;
-            values[@"AmbientGlow"] = @YES;
-            values[@"AmbientStrength"] = @.85;
-            values[@"ColorMode"] = @0;
-            values[@"BackgroundFeedback"] = @YES;
-            values[@"BackgroundStrength"] = @.18;
-            values[@"BackgroundDuration"] = @.4;
+        } else if (preset == -1) {
+            RKRestoreCustomParameters(values);
         }
-    } else values[@"Preset"] = @(-1);
+    } else {
+        values[@"Preset"] = @(-1);
+        RKSnapshotCustomParameters(values);
+    }
     if (!RKSavePreferences(values)) {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:RKLoc(@"保存失败") message:RKLoc(@"配置文件未写入，请检查偏好设置目录权限。") preferredStyle:UIAlertControllerStyleAlert];
         [alert addAction:[UIAlertAction actionWithTitle:RKLoc(@"知道了") style:UIAlertActionStyleDefault handler:nil]];
