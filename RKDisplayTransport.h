@@ -13,16 +13,16 @@ static inline NSArray<NSString *> *RKDisplayNumbers(void) {
         @"Hue", @"EffectStyle", @"Preset"];
 }
 static inline NSArray<NSString *> *RKDisplayFlags(void) {
-    return @[@"CandidateGradient", @"CandidateNative", @"CandidateWeType", @"PureBlackKeyboard",
+    return @[@"CandidateGradient", @"CandidateNative", @"CandidateWeType",
         @"Enabled", @"NativeKeyboard", @"WeChatKeyboard", @"RippleEnabled", @"AmbientGlow", @"BackgroundFeedback"];
 }
 static inline NSArray<NSString *> *RKDisplayColors(void) {
-    return @[@"CandidateStart", @"CandidateEnd", @"KeyboardBackgroundColor", @"KeycapColor"];
+    return @[@"CandidateStart", @"CandidateEnd"];
 }
 static inline NSArray<NSString *> *RKDisplayKeys(void) {
     return [[[RKDisplayNumbers() arrayByAddingObjectsFromArray:RKDisplayFlags()]
         arrayByAddingObjectsFromArray:RKDisplayColors()]
-        arrayByAddingObjectsFromArray:@[@"PressColorMode", @"PressBrightness", @"PressColor"]];
+        arrayByAddingObjectsFromArray:@[@"PressBrightness"]];
 }
 static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[RKDisplayWordCount]) {
     memset(words, 0, RKDisplayWordCount * sizeof(uint64_t));
@@ -61,11 +61,6 @@ static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[R
         if ([value boolValue]) words[1] |= UINT64_C(1) << (31 + i);
     }
     // Optional extension in v2's unused bits. Older clients ignore these fields.
-    id mode = prefs[@"PressColorMode"];
-    if ([mode isKindOfClass:NSNumber.class] && isfinite([mode doubleValue])) {
-        words[1] |= UINT64_C(1) << 41;
-        if ([mode integerValue] == 1) words[1] |= UINT64_C(1) << 42;
-    }
     id brightness = prefs[@"PressBrightness"];
     if ([brightness isKindOfClass:NSNumber.class] && isfinite([brightness doubleValue])) {
         float value = MIN(1, MAX(0, [brightness doubleValue]));
@@ -73,17 +68,6 @@ static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[R
         memcpy(&bits, &value, sizeof(bits));
         words[14] |= (uint64_t)bits << 32;
         words[1] |= UINT64_C(1) << 43;
-    }
-    id pressColor = prefs[@"PressColor"];
-    if ([pressColor isKindOfClass:NSArray.class] && [pressColor count] == 3) {
-        BOOL valid = YES;
-        for (id component in pressColor)
-            valid &= [component isKindOfClass:NSNumber.class] && isfinite([component doubleValue]);
-        if (valid) {
-            words[1] |= UINT64_C(1) << 44;
-            for (NSUInteger c = 0; c < 3; c++)
-                words[2 + c] |= (uint64_t)llround(MIN(1, MAX(0, [pressColor[c] doubleValue])) * 65535) << 48;
-        }
     }
 }
 static inline uint64_t RKDisplayChecksum(const uint64_t words[RKDisplayWordCount]) {
@@ -117,7 +101,6 @@ static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDispl
     }
     for (NSUInteger i = 0; i < flags.count; i++)
         if (words[1] & (UINT64_C(1) << (21 + i))) result[flags[i]] = @((words[1] >> (31 + i)) & 1);
-    if (words[1] & (UINT64_C(1) << 41)) result[@"PressColorMode"] = @((words[1] >> 42) & 1);
     if (words[1] & (UINT64_C(1) << 43)) {
         uint32_t bits = (uint32_t)(words[14] >> 32);
         float value;
@@ -125,9 +108,6 @@ static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDispl
         if (!isfinite(value) || value < 0 || value > 1) return nil;
         result[@"PressBrightness"] = @(value);
     }
-    if (words[1] & (UINT64_C(1) << 44))
-        result[@"PressColor"] = @[@((words[2] >> 48) / 65535.0),
-            @((words[3] >> 48) / 65535.0), @((words[4] >> 48) / 65535.0)];
     return result;
 }
 static inline int RKDisplayToken(NSUInteger index) {

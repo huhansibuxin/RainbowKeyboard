@@ -30,7 +30,6 @@ static inline BOOL RKPublishColorState(NSDictionary *prefs) {
     if (!prefs[@"CandidateGradient"] || [prefs[@"CandidateGradient"] boolValue]) state |= UINT64_C(1) << 48;
     if (!prefs[@"CandidateNative"] || [prefs[@"CandidateNative"] boolValue]) state |= UINT64_C(1) << 49;
     if (!prefs[@"CandidateWeType"] || [prefs[@"CandidateWeType"] boolValue]) state |= UINT64_C(1) << 50;
-    if (!prefs[@"PureBlackKeyboard"] || [prefs[@"PureBlackKeyboard"] boolValue]) state |= UINT64_C(1) << 51;
     state |= UINT64_C(1) << 52; // Presence bit keeps older color-only messages compatible.
     if (!prefs[@"Enabled"] || [prefs[@"Enabled"] boolValue]) state |= UINT64_C(1) << 53;
     if (!prefs[@"NativeKeyboard"] || [prefs[@"NativeKeyboard"] boolValue]) state |= UINT64_C(1) << 54;
@@ -54,7 +53,6 @@ static inline NSDictionary *RKDecodeColorState(uint64_t state) {
         @"CandidateNative":@((state >> 49) & 1), @"CandidateWeType":@((state >> 50) & 1),
         @"CandidateStart":colors[0], @"CandidateEnd":colors[1]} mutableCopy];
     if ((state >> 52) & 1) {
-        prefs[@"PureBlackKeyboard"] = @((state >> 51) & 1);
         prefs[@"Enabled"] = @((state >> 53) & 1);
         prefs[@"NativeKeyboard"] = @((state >> 54) & 1);
         if ((state >> 56) == 0xA8) prefs[@"WeChatKeyboard"] = @((state >> 55) & 1);

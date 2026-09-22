@@ -1,7 +1,6 @@
 #import <UIKit/UIKit.h>
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
-#import "../RKBlackProbe.h"
 #import "../RKPreferences.h"
 static NSDictionary *RKReadPreferences(void) {
     return RKReadStoredPreferences();
@@ -67,7 +66,6 @@ static NSString *RKLoc(NSString *key) {
             values[@"EffectStyle"] = @0;
             values[@"AmbientGlow"] = @YES;
             values[@"AmbientStrength"] = @.85;
-            values[@"PureBlackKeyboard"] = @YES;
             values[@"ColorMode"] = @0;
             values[@"BackgroundFeedback"] = @YES;
             values[@"BackgroundStrength"] = @.18;
@@ -85,34 +83,14 @@ static NSString *RKLoc(NSString *key) {
 }
 
 - (void)chooseCandidateStart { [self openCandidatePicker:@"CandidateStart"]; }
-- (void)chooseKeyboardBackground { [self openCandidatePicker:@"KeyboardBackgroundColor"]; }
-- (void)chooseKeycapColor { [self openCandidatePicker:@"KeycapColor"]; }
-- (void)choosePressColor { [self openCandidatePicker:@"PressColor"]; }
-- (void)copyBlackDiagnostic {
-    NSDictionary *values = RKReadPreferences();
-    NSDictionary *report = @{@"build":@"1.0.25~samsung17.1", @"systemVersion":UIDevice.currentDevice.systemVersion,
-        @"preferenceSync":RKPreferencesDiagnostic(),
-        @"native":RKReadBlackProbe(NO), @"weType":RKReadBlackProbe(YES),
-        @"settings":@{@"revision":@(RKPreferencesRevision(values)),
-            @"CandidateGradient":values[@"CandidateGradient"] ?: @YES,
-            @"CandidateNative":values[@"CandidateNative"] ?: @YES,
-            @"CandidateWeType":values[@"CandidateWeType"] ?: @YES}};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:nil];
-    if (!data) return;
-    UIPasteboard.generalPasteboard.string = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:RKLoc(@"键帽诊断已复制")
-        message:RKLoc(@"仅包含版本、接口状态和处理数量，不含输入文字或图片。") preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:RKLoc(@"好") style:UIAlertActionStyleDefault handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
 - (void)chooseCandidateEnd { [self openCandidatePicker:@"CandidateEnd"]; }
 - (void)openCandidatePicker:(NSString *)key {
     self.editingColorKey = key;
     UIColorPickerViewController *picker = [UIColorPickerViewController new];
     picker.delegate = self;
     picker.supportsAlpha = NO;
-    picker.title = @{@"CandidateStart":RKLoc(@"候选词起始颜色"), @"CandidateEnd":RKLoc(@"候选词结束颜色"),
-        @"KeyboardBackgroundColor":RKLoc(@"键盘底色"), @"KeycapColor":RKLoc(@"键帽颜色"), @"PressColor":RKLoc(@"霓虹键帽单色")}[key];
+    picker.title = @{@"CandidateStart":RKLoc(@"候选词起始颜色"),
+        @"CandidateEnd":RKLoc(@"候选词结束颜色")}[key];
     NSDictionary *values = RKReadPreferences();
     id rgb = values[key];
     if ([rgb isKindOfClass:NSArray.class] && [rgb count] == 3 &&
@@ -120,7 +98,6 @@ static NSString *RKLoc(NSString *key) {
         picker.selectedColor = [UIColor colorWithRed:[rgb[0] doubleValue] green:[rgb[1] doubleValue] blue:[rgb[2] doubleValue] alpha:1];
     } else if ([key isEqualToString:@"CandidateStart"]) picker.selectedColor = [UIColor colorWithRed:0 green:.65 blue:1 alpha:1];
     else if ([key isEqualToString:@"CandidateEnd"]) picker.selectedColor = [UIColor colorWithRed:.85 green:.15 blue:1 alpha:1];
-    else if ([key isEqualToString:@"PressColor"]) picker.selectedColor = RKKeyboardColor(values, key);
     else picker.selectedColor = UIColor.blackColor;
     [self presentViewController:picker animated:YES completion:nil];
 }

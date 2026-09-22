@@ -37,7 +37,8 @@ static NSDictionary *RKReadPreferences(void) {
     return base * [self number:@"NeonSaturation" fallback:.72 low:0 high:1];
 }
 - (BOOL)preservesBlackFaces {
-    return [self flag:@"PureBlackKeyboard"];
+    // 自定义键帽与底色已移除，键帽一律使用系统原生配色，不再保留黑色键面。
+    return NO;
 }
 - (CAShapeLayer *)keyGutterMask {
     UIBezierPath *gaps = [UIBezierPath bezierPathWithRect:self.bounds];
@@ -242,9 +243,8 @@ static NSDictionary *RKReadPreferences(void) {
         for (NSValue *value in self.keyFrames) {
             if (!CGRectContainsPoint(value.CGRectValue, point)) continue;
             self.pressHue = fmod(self.pressHue + .38196601125, 1);
-            BOOL single = [self number:@"PressColorMode" fallback:0 low:0 high:1] == 1;
-            UIColor *color = single ? RKKeyboardColor(self.config, @"PressColor") :
-                [UIColor colorWithHue:self.pressHue saturation:1 brightness:1 alpha:1];
+            // 「亮色模式」（彩色/单色）已移除：轻弹固定使用逐次换色的鲜艳纯色。
+            UIColor *color = [UIColor colorWithHue:self.pressHue saturation:1 brightness:1 alpha:1];
             RKShowNeonKeyPress(self, value.CGRectValue, color,
                 [self number:@"PressBrightness" fallback:1 low:0 high:1],
                 duration, UIAccessibilityIsReduceMotionEnabled(), sourceView);

@@ -95,8 +95,6 @@ static inline NSDictionary *RKReadUncachedEffectivePreferences(void) {
     uint64_t before = 0, after = 0;
     if (token >= 0) notify_get_state(token, &before);
     NSMutableDictionary *transport = [RKReceiveColorState() mutableCopy] ?: [NSMutableDictionary dictionary];
-    NSDictionary *palette = RKReceiveKeyboardPalette();
-    if (palette) [transport addEntriesFromDictionary:palette];
     if (token >= 0) notify_get_state(token, &after);
     return RKResolvePreferencesSnapshot(stored, transport, before, after);
 }
@@ -140,23 +138,11 @@ static inline BOOL RKPublishPreferences(NSDictionary *values) {
         return full;
     }
     BOOL colors = RKPublishColorState(values);
-    BOOL palette = RKPublishKeyboardPalette(values);
-    BOOL committed = colors && palette &&
+    BOOL committed = colors &&
         notify_set_state(token, RKPreferencesRevision(values)) == NOTIFY_STATUS_OK;
     if (!committed) notify_set_state(token, 0);
     notify_post("com.minis.rainbowkeyboard.changed");
     return full && committed;
-}
-
-static inline NSDictionary *RKPreferencesDiagnostic(void) {
-    NSDictionary *stored = RKReadStoredPreferences(), *transport = RKReceiveDisplaySnapshot();
-    NSDictionary *effective = RKReadEffectivePreferences();
-    return @{@"transportVersion":@2, @"snapshotAvailable":@(transport != nil),
-        @"storedRevision":@(RKPreferencesRevision(stored)),
-        @"receivedRevision":@(RKPreferencesRevision(transport)),
-        @"effectiveRevision":@(RKPreferencesRevision(effective)),
-        @"keyboardBackground":RKKeyboardRGB(effective[@"KeyboardBackgroundColor"]),
-        @"keycap":RKKeyboardRGB(effective[@"KeycapColor"])};
 }
 
 static inline void RKRestorePreferencesRelay(void) {

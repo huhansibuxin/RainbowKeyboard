@@ -24,8 +24,12 @@ static NSDictionary *RKCandidateReadPreferences(void) {
 
 static BOOL RKCandidateRegion(UIView *view) {
     for (UIView *p = view; p; p = p.superview) {
-        NSString *name = NSStringFromClass(p.class).lowercaseString;
-        if ([name containsString:@"candidate"] || [name containsString:@"prediction"] || [name containsString:@"suggestion"]) return YES;
+        // Case-insensitive lookup: same match as lowercasing, without allocating
+        // a lowercased copy for every ancestor on every draw.
+        NSString *name = NSStringFromClass(p.class);
+        if ([name rangeOfString:@"candidate" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"prediction" options:NSCaseInsensitiveSearch].location != NSNotFound ||
+            [name rangeOfString:@"suggestion" options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
         if ([p isKindOfClass:UIWindow.class]) break;
     }
     return NO;
@@ -44,11 +48,23 @@ static BOOL RKNativeCandidateRegion(UIView *view) {
 static BOOL RKCandidateFlag(NSString *key) {
     return !RKCandidatePrefs[key] || [RKCandidatePrefs[key] boolValue];
 }
+// The bundle identifier never changes at runtime; resolve it once instead of
+// allocating a lowercased string on every label draw.
+static BOOL RKCandidateIsWeTypeBundle(void) {
+    static BOOL weType;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        weType = [NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"];
+    });
+    return weType;
+}
 static BOOL RKCandidateIsWeType(UIView *view) {
-    if ([NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"]) return YES;
+    if (RKCandidateIsWeTypeBundle()) return YES;
+    if (!view) return NO;
     Class label = NSClassFromString(@"WBTextItemLabel");
+    if (!label) return NO;
     for (UIView *parent = view; parent; parent = parent.superview)
-        if (label && [parent isKindOfClass:label]) return YES;
+        if ([parent isKindOfClass:label]) return YES;
     return NO;
 }
 static UIColor *RKCandidateColor(id value, UIColor *fallback) {
@@ -110,12 +126,14 @@ static void RKDrawGradientText(CGRect rect, CGRect textRect, void (^original)(vo
     }
 }
 static void RKDrawCandidate(UILabel *label, CGRect rect, BOOL native, void (^original)(void)) {
+    // Cheapest gates first. The ancestor walk below is the expensive part and
+    // previously ran on every single label draw even with the feature off.
+    if (RKCandidateDrawingDepth || !RKCandidateFlag(@"CandidateGradient")) { original(); return; }
     if (RKCandidateIsWeType(label)) native = NO;
     BOOL region = native ? RKNativeCandidateRegion(label) : RKCandidateRegion(label);
-    if (!region || RKCandidateDrawingDepth) { original(); return; }
+    if (!region) { original(); return; }
     [RKCandidateViews addObject:label];
-    if (!RKCandidateFlag(@"CandidateGradient") ||
-        !RKCandidateFlag(native ? @"CandidateNative" : @"CandidateWeType")) {
+    if (!RKCandidateFlag(native ? @"CandidateNative" : @"CandidateWeType")) {
         RKCandidateDrawingDepth++;
         @try { original(); } @finally { RKCandidateDrawingDepth--; }
         return;
@@ -134,12 +152,12 @@ static BOOL RKNativeTextDrawingEnabled(void) {
 // TUICandidateLabel draws CoreText directly. Capture just its drawRect glyphs, not
 // its background, and use their ink bounds so short words get both endpoint colors.
 static void RKDrawNativeGlyphView(UIView *view, CGRect dirtyRect, void (^original)(void)) {
-    [RKCandidateViews addObject:view];
+    if (RKCandidateDrawingDepth || !RKCandidateFlag(@"CandidateGradient")) { original(); return; }
     CGRect bounds = view.bounds;
-    if (!RKCandidateFlag(@"CandidateGradient") ||
-        !RKCandidateFlag(RKCandidateIsWeType(view) ? @"CandidateWeType" : @"CandidateNative") ||
-        RKCandidateDrawingDepth || !UIGraphicsGetCurrentContext() || CGRectIsEmpty(bounds) ||
+    if (!RKCandidateFlag(RKCandidateIsWeType(view) ? @"CandidateWeType" : @"CandidateNative") ||
+        !UIGraphicsGetCurrentContext() || CGRectIsEmpty(bounds) ||
         bounds.size.width > 2048 || bounds.size.height > 512) { original(); return; }
+    [RKCandidateViews addObject:view];
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
     format.opaque = NO;
     format.preferredRange = UIGraphicsImageRendererFormatRangeStandard;
@@ -255,8 +273,10 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
 // Scope custom string drawing to native candidate views. Never tint their backgrounds.
 %hook UIView
 - (void)drawLayer:(CALayer *)layer inContext:(CGContextRef)context {
-    BOOL candidate = RKNativeCandidateRegion(self);
-    if (!candidate) {
+    // UIView drawing is a hot path: bail on the cheap flags before walking the
+    // ancestor chain, so non-candidate draws stay close to stock cost.
+    if (RKCandidateDrawingDepth || !RKCandidateFlag(@"CandidateGradient") ||
+        !RKNativeCandidateRegion(self)) {
         %orig;
         return;
     }

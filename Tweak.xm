@@ -3,7 +3,6 @@
 #import <objc/runtime.h>
 #import "RainbowEffectView.h"
 #import "RKKeyboardGeometry.h"
-#import "RKBlackKeyboard.h"
 static char RKOverlayKey;
 static char RKOverlayBoundsKey;
 static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, NSUInteger depth) {
@@ -31,9 +30,6 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
             effect = [[RainbowEffectView alloc] initWithFrame:host.bounds];
             objc_setAssociatedObject(host, &RKOverlayKey, effect, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             [host addSubview:effect];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (host.window) RKApplyBlackKeyboardHost(host);
-            });
         }
         BOOL geometryChanged = ![objc_getAssociatedObject(host, &RKOverlayBoundsKey)
             CGRectValue].size.width ||

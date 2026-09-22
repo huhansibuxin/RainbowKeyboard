@@ -129,29 +129,8 @@
 		</dict>
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
-			<key>label</key><string>霓虹键帽亮色</string>
-			<key>footerText</key><string>仅用于「霓虹键帽 · 轻弹」。彩色：每次点击换一种鲜艳纯色，连续亮起的键帽各有自己的颜色，同一个键帽内不混色。单色：所有按键亮起你选择的同一种颜色。以下设置不会改变键帽平时的底色，也不影响三星扩散与圆环。</string>
-		</dict>
-		<dict>
-			<key>cell</key><string>PSSegmentCell</string>
-			<key>defaults</key><string>com.minis.rainbowkeyboard</string>
-			<key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string>
-			<key>key</key><string>PressColorMode</string>
-			<key>label</key><string>亮色模式</string>
-			<key>default</key><integer>0</integer>
-			<key>validTitles</key><array><string>彩色</string><string>单色</string></array>
-			<key>validValues</key><array><integer>0</integer><integer>1</integer></array>
-		</dict>
-		<dict>
-			<key>cell</key><string>PSButtonCell</string>
-			<key>label</key><string>单色灯光颜色</string>
-			<key>action</key><string>choosePressColor</string>
-			<key>colorKey</key><string>PressColor</string>
-		</dict>
-		<dict>
-			<key>cell</key><string>PSGroupCell</string>
 			<key>label</key><string>键帽灯光亮度（暗光→强光）</string>
-			<key>footerText</key><string>仅调整轻弹模式的纯色灯光，单色和彩色都生效。0 不亮灯；0.1～0.3 为暗光，0.4～0.7 为中等亮度，1 为所选颜色的最强显示亮度，不再叠加渐变、高光或旧的不透明度。单色选得很暗时，1 仍保留该颜色，想更亮请在选色器里选明亮颜色。此项不改变屏幕亮度，消退过程仍会逐渐变淡。</string>
+			<key>footerText</key><string>仅调整「霓虹键帽 · 轻弹」的纯色灯光亮度。0 不亮灯；0.1～0.3 为暗光，0.4～0.7 为中等亮度，1 为最强显示亮度，不再叠加渐变、高光或旧的不透明度。此项不改变屏幕亮度，消退过程仍会逐渐变淡。</string>
 		</dict>
 		<dict>
 			<key>cell</key><string>PSSliderCell</string>
@@ -189,7 +168,7 @@
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
 			<key>label</key><string>扩散色带强度</string>
-			<key>footerText</key><string>原版圆环中控制向外传播的背景色带，调低更淡、调高更明显。三星风格中只影响相邻键面的轻微填色；开启「自定义键帽与底色」后不填色。要增强当前纯黑键盘的背光，请调「背景霓虹强度」。</string>
+			<key>footerText</key><string>原版圆环中控制向外传播的背景色带，调低更淡、调高更明显。三星风格中只影响相邻键面的轻微填色。要增强键缝与键框周围的背光，请调「背景霓虹强度」。</string>
 		</dict>
 		<dict>
 			<key>defaults</key>
@@ -238,8 +217,8 @@
 		</dict>
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
-			<key>label</key><string>背景霓虹与纯黑</string>
-			<key>footerText</key><string>原生键盘与微信键盘共用配色，底色与键帽默认均为 #000000。关闭自定义主题后恢复原皮肤。</string>
+			<key>label</key><string>背景霓虹</string>
+			<key>footerText</key><string>原生键盘与微信键盘共用配色。此处只控制键缝与键框周围的霓虹背光，不改变键帽自身的底色。</string>
 		</dict>
 		<dict>
 			<key>cell</key><string>PSSwitchCell</string>
@@ -264,34 +243,6 @@
 			<key>min</key><real>0</real>
 			<key>max</key><real>1</real>
 			<key>showValue</key><true/>
-		</dict>
-		<dict>
-			<key>cell</key><string>PSGroupCell</string>
-		</dict>
-		<dict>
-			<key>cell</key><string>PSSwitchCell</string>
-			<key>defaults</key><string>com.minis.rainbowkeyboard</string>
-			<key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string>
-			<key>key</key><string>PureBlackKeyboard</string>
-			<key>label</key><string>自定义键帽与底色（原生/微信）</string>
-			<key>default</key><true/>
-		</dict>
-		<dict>
-			<key>cell</key><string>PSButtonCell</string>
-			<key>colorKey</key><string>KeyboardBackgroundColor</string>
-			<key>label</key><string>键盘底色</string>
-			<key>action</key><string>chooseKeyboardBackground</string>
-		</dict>
-		<dict>
-			<key>cell</key><string>PSButtonCell</string>
-			<key>colorKey</key><string>KeycapColor</string>
-			<key>label</key><string>键帽颜色</string>
-			<key>action</key><string>chooseKeycapColor</string>
-		</dict>
-		<dict>
-			<key>cell</key><string>PSButtonCell</string>
-			<key>label</key><string>复制键帽诊断</string>
-			<key>action</key><string>copyBlackDiagnostic</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -485,7 +436,7 @@
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
 			<key>label</key><string>按下键填色 / 圆环中心强度</string>
-			<key>footerText</key><string>三星风格中，控制按下键内部的短暂填色；开启自定义键帽主题时不填亮键面。原版圆环中控制点击中心闪光，调低更含蓄、调高更明显。轻弹模式不使用此项，请调「键帽灯光亮度」。</string>
+			<key>footerText</key><string>三星风格中，控制按下键内部的短暂填色。原版圆环中控制点击中心闪光，调低更含蓄、调高更明显。轻弹模式不使用此项，请调「键帽灯光亮度」。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -569,7 +520,7 @@
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
 			<key>label</key><string>固定色相（0～1）</string>
-			<key>footerText</key><string>仅在三星扩散或圆环的颜色模式为「固定颜色」时生效。沿滑条依次经过红、黄、绿、青、蓝、紫，再回到红；约 0.33 为绿、0.5 为青、0.67 为蓝。不改变键帽底色或候选词渐变。轻弹模式请用「单色灯光颜色」。</string>
+			<key>footerText</key><string>仅在三星扩散或圆环的颜色模式为「固定颜色」时生效。沿滑条依次经过红、黄、绿、青、蓝、紫，再回到红；约 0.33 为绿、0.5 为青、0.67 为蓝。不改变键帽底色或候选词渐变。轻弹模式不使用此项。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
