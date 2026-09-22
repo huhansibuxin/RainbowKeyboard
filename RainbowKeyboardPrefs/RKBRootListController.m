@@ -6,12 +6,21 @@
 static NSDictionary *RKReadPreferences(void) {
     return RKReadStoredPreferences();
 }
+static NSBundle *RKPrefsBundle(void) {
+    static NSBundle *b;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ b = [NSBundle bundleForClass:NSClassFromString(@"RKBPackageInfoController")]; });
+    return b ?: [NSBundle mainBundle];
+}
+static NSString *RKLoc(NSString *key) {
+    return [RKPrefsBundle() localizedStringForKey:key value:key table:@"RainbowKeyboard"];
+}
 @interface RKBPackageInfoController : UIViewController
 @end
 @implementation RKBPackageInfoController
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"关于与预览";
+    self.title = RKLoc(@"关于与预览");
     self.view.backgroundColor = UIColor.systemBackgroundColor;
     NSBundle *bundle = [NSBundle bundleForClass:self.class];
     NSData *data = [NSData dataWithContentsOfFile:[bundle pathForResource:@"PackageInfo" ofType:@"json"]];
@@ -49,10 +58,10 @@ static NSDictionary *RKReadPreferences(void) {
         view.textColor = color;
         [stack addArrangedSubview:view];
     };
-    label(info[@"name"] ?: @"彩虹键盘光效", UIFontTextStyleTitle2, UIColor.labelColor);
+    label(info[@"name"] ?: RKLoc(@"彩虹键盘光效"), UIFontTextStyleTitle2, UIColor.labelColor);
     label([NSString stringWithFormat:@"%@ · %@", info[@"version"] ?: @"", info[@"author"] ?: @"MoWang"],
         UIFontTextStyleFootnote, UIColor.secondaryLabelColor);
-    label(info[@"summary"] ?: @"说明文件未找到，请重新安装完整安装包。", UIFontTextStyleBody, UIColor.labelColor);
+    label(info[@"summary"] ?: RKLoc(@"说明文件未找到，请重新安装完整安装包。"), UIFontTextStyleBody, UIColor.labelColor);
     for (NSDictionary *item in info[@"screenshots"]) {
         UIImage *image = [UIImage imageWithContentsOfFile:[bundle.resourcePath stringByAppendingPathComponent:item[@"file"]]];
         if (!image || image.size.width <= 0) continue;
@@ -82,7 +91,7 @@ static NSDictionary *RKReadPreferences(void) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"彩虹键盘光效";
+    self.title = RKLoc(@"彩虹键盘光效");
 }
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
@@ -130,8 +139,8 @@ static NSDictionary *RKReadPreferences(void) {
         }
     } else values[@"Preset"] = @(-1);
     if (!RKSavePreferences(values)) {
-        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"保存失败" message:@"配置文件未写入，请检查偏好设置目录权限。" preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:RKLoc(@"保存失败") message:RKLoc(@"配置文件未写入，请检查偏好设置目录权限。") preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:RKLoc(@"知道了") style:UIAlertActionStyleDefault handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];
         return;
     }
@@ -164,9 +173,9 @@ static NSDictionary *RKReadPreferences(void) {
     NSData *data = [NSJSONSerialization dataWithJSONObject:report options:NSJSONWritingPrettyPrinted error:nil];
     if (!data) return;
     UIPasteboard.generalPasteboard.string = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"键帽诊断已复制"
-        message:@"仅包含版本、接口状态和处理数量，不含输入文字或图片。" preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:RKLoc(@"键帽诊断已复制")
+        message:RKLoc(@"仅包含版本、接口状态和处理数量，不含输入文字或图片。") preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:RKLoc(@"好") style:UIAlertActionStyleDefault handler:nil]];
     [self presentViewController:alert animated:YES completion:nil];
 }
 - (void)chooseCandidateEnd { [self openCandidatePicker:@"CandidateEnd"]; }
@@ -175,8 +184,8 @@ static NSDictionary *RKReadPreferences(void) {
     UIColorPickerViewController *picker = [UIColorPickerViewController new];
     picker.delegate = self;
     picker.supportsAlpha = NO;
-    picker.title = @{@"CandidateStart":@"候选词起始颜色", @"CandidateEnd":@"候选词结束颜色",
-        @"KeyboardBackgroundColor":@"键盘底色", @"KeycapColor":@"键帽颜色", @"PressColor":@"霓虹键帽单色"}[key];
+    picker.title = @{@"CandidateStart":RKLoc(@"候选词起始颜色"), @"CandidateEnd":RKLoc(@"候选词结束颜色"),
+        @"KeyboardBackgroundColor":RKLoc(@"键盘底色"), @"KeycapColor":RKLoc(@"键帽颜色"), @"PressColor":RKLoc(@"霓虹键帽单色")}[key];
     NSDictionary *values = RKReadPreferences();
     id rgb = values[key];
     if ([rgb isKindOfClass:NSArray.class] && [rgb count] == 3 &&
@@ -198,8 +207,8 @@ static NSDictionary *RKReadPreferences(void) {
     self.editingColorKey = nil;
     [picker dismissViewControllerAnimated:YES completion:^{
         if (!saved) {
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"颜色保存失败" message:@"请检查配置文件权限。" preferredStyle:UIAlertControllerStyleAlert];
-            [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:RKLoc(@"颜色保存失败") message:RKLoc(@"请检查配置文件权限。") preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:RKLoc(@"知道了") style:UIAlertActionStyleDefault handler:nil]];
             [self presentViewController:alert animated:YES completion:nil];
         } else {
             [self reloadSpecifiers];
