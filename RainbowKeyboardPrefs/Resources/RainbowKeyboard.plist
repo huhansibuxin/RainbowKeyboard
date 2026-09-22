@@ -24,7 +24,7 @@
 			<key>label</key>
 			<string>启用候选词渐变</string>
 			<key>default</key>
-			<true/>
+			<false/>
 		</dict>
 		<dict>
 			<key>defaults</key>
@@ -38,7 +38,7 @@
 			<key>label</key>
 			<string>原生键盘候选词</string>
 			<key>default</key>
-			<true/>
+			<false/>
 		</dict>
 		<dict>
 			<key>defaults</key>
@@ -52,7 +52,7 @@
 			<key>label</key>
 			<string>微信输入法进程</string>
 			<key>default</key>
-			<true/>
+			<false/>
 		</dict>
 		<dict>
 			<key>cell</key>

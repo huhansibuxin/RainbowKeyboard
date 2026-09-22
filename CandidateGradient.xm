@@ -7,6 +7,11 @@
 #import "RKKeyboardGeometry.h"
 
 static NSDictionary *RKCandidatePrefs;
+// Cached master switch for candidate tinting. The draw hooks below run on every text
+// label draw, so when the feature is off (now the default) the hot path must cost one
+// flag read, not a dictionary lookup plus a boolValue unboxing. Refreshed only when the
+// preferences actually change.
+static BOOL RKCandidateTintMaster;
 static NSHashTable<UIView *> *RKCandidateViews;
 static __thread NSUInteger RKCandidateDrawingDepth;
 static char RKCandidateRenderedKey;
@@ -18,8 +23,17 @@ static NSDictionary *RKCandidateReadPreferences(void) {
     return RKReadEffectivePreferences();
 }
 
+// Candidate tinting is opt-in: a missing key means OFF.
+//
+// It used to mean ON, and the settings bundle shipped default:true for these switches.
+// The two combined made the effect appear on installs that never asked for it, and made
+// the switch read as ON even when the stored value was OFF. Requiring an explicit YES
+// makes the stored value authoritative: no candidate tint unless it was asked for.
+// The switches stay on the settings page so the feature remains available on demand --
+// only their shipped defaults changed to off.
 static BOOL RKCandidateFlag(NSString *key) {
-    return !RKCandidatePrefs[key] || [RKCandidatePrefs[key] boolValue];
+    id value = RKCandidatePrefs[key];
+    return value ? [value boolValue] : NO;
 }
 static UIColor *RKCandidateColor(id value, UIColor *fallback) {
     if (![value isKindOfClass:NSArray.class] || [value count] != 3) return fallback;
@@ -34,6 +48,7 @@ static void RKCandidateReload(void) {
     NSDictionary *preferences = RKCandidateReadPreferences();
     if ([RKCandidatePrefs isEqual:preferences]) return;
     RKCandidatePrefs = preferences;
+    RKCandidateTintMaster = RKCandidateFlag(@"CandidateGradient");
     for (UIView *view in RKCandidateViews.allObjects) {
         // Drop our rendered pixels, not the original text, so disabled gradients
         // do not remain in a reused label's backing layer.
@@ -83,7 +98,7 @@ static void RKDrawGradientText(CGRect rect, CGRect textRect, void (^original)(vo
 // matched against the registered candidate containers, and that test is skipped
 // entirely while no candidate bar is on screen.
 static void RKDrawCandidate(UILabel *label, CGRect rect, BOOL weType, void (^original)(void)) {
-    if (RKCandidateDrawingDepth || !RKCandidateFlag(@"CandidateGradient")) { original(); return; }
+    if (RKCandidateDrawingDepth || !RKCandidateTintMaster) { original(); return; }
     if (!RKCandidateFlag(weType ? @"CandidateWeType" : @"CandidateNative")) {
         RKCandidateDrawingDepth++;
         @try { original(); } @finally { RKCandidateDrawingDepth--; }
@@ -100,7 +115,7 @@ static void RKDrawCandidate(UILabel *label, CGRect rect, BOOL weType, void (^ori
 // TUICandidateLabel draws CoreText directly. Capture just its drawRect glyphs, not
 // its background, and use their ink bounds so short words get both endpoint colors.
 static void RKDrawNativeGlyphView(UIView *view, CGRect dirtyRect, void (^original)(void)) {
-    if (RKCandidateDrawingDepth || !RKCandidateFlag(@"CandidateGradient") ||
+    if (RKCandidateDrawingDepth || !RKCandidateTintMaster ||
         !RKCandidateFlag(@"CandidateNative")) { original(); return; }
     CGRect bounds = view.bounds;
     if (!UIGraphicsGetCurrentContext() || CGRectIsEmpty(bounds) ||
@@ -165,7 +180,7 @@ static void RKDrawNativeGlyphView(UIView *view, CGRect dirtyRect, void (^origina
 - (BOOL)_usesMorphingLabelForCandidate:(id)candidate {
     // UIKit's normal-label path preserves layout and selection, unlike tinting
     // individual cached morphing images (which would restart the gradient per glyph).
-    if (RKCandidateFlag(@"CandidateGradient") && RKCandidateFlag(@"CandidateNative")) return NO;
+    if (RKCandidateTintMaster && RKCandidateFlag(@"CandidateNative")) return NO;
     return %orig;
 }
 %end
