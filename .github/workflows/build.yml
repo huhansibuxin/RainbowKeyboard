@@ -71,11 +71,11 @@ jobs:
       - name: Install build tools
         run: brew install dpkg ldid xz
 
-      - name: Install Theos
+      - name: Install Theos (roothide fork)
         run: |
           set -euxo pipefail
           git clone --recursive --depth=1 --single-branch \
-            https://github.com/theos/theos.git "$HOME/theos"
+            https://github.com/roothide/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "$HOME/theos/bin" >> "$GITHUB_PATH"
 
