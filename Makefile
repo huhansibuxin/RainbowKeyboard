@@ -1,5 +1,8 @@
 TARGET := iphone:clang:latest:15.0
-ARCHS ?= arm64
+# A12+ devices (e.g. iPhone 14 Pro Max / A16) run Settings as an arm64e process;
+# an arm64-only PreferenceBundle is rejected by dlopen_preflight with
+# "incompatible architecture (have 'arm64', need 'arm64e')". Build arm64e.
+ARCHS ?= arm64e
 
 include $(THEOS)/makefiles/common.mk
 

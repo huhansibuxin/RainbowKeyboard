@@ -1,0 +1,6 @@
+# 构建产物（deb 不入库，由 GitHub Actions 产出）
+build/
+packages/
+.theos/
+obj/
+*.deb

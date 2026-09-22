@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   rootless:
-    name: Build Rootless .deb (arm64)
+    name: Build Rootless .deb (arm64e)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +41,7 @@ jobs:
           set -euxo pipefail
           rm -rf packages build
           make clean
-          ARCHS=arm64 THEOS_PACKAGE_SCHEME=rootless make package FINALPACKAGE=1
+          ARCHS=arm64e THEOS_PACKAGE_SCHEME=rootless make package FINALPACKAGE=1
           deb=$(find packages -maxdepth 1 -type f -name '*.deb' | head -n 1)
           test -n "$deb"
           mkdir -p build
@@ -63,7 +63,7 @@ jobs:
           path: build/RainbowKeyboard-rootless.deb
 
   roothide:
-    name: Build RootHide .deb (arm64)
+    name: Build RootHide .deb (arm64e)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -94,7 +94,7 @@ jobs:
           set -euxo pipefail
           rm -rf packages build
           make clean
-          ARCHS=arm64 THEOS_PACKAGE_SCHEME=roothide make package FINALPACKAGE=1
+          ARCHS=arm64e THEOS_PACKAGE_SCHEME=roothide make package FINALPACKAGE=1
           deb=$(find packages -maxdepth 1 -type f -name '*.deb' | head -n 1)
           test -n "$deb"
           mkdir -p build
