@@ -7,7 +7,7 @@ ARCHS ?= arm64e
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME := RainbowKeyboard
-RainbowKeyboard_FILES := Tweak.xm RainbowEffectView.m RKNeonPress.m RKKeyboardGeometry.m CandidateGradient.xm
+RainbowKeyboard_FILES := Tweak.xm RKKeyboardHooks.xm RainbowEffectView.m RKNeonPress.m RKKeyboardGeometry.m CandidateGradient.xm
 # -Oz overrides Theos' default -Os (user CFLAGS are appended after OPTFLAG), and
 # -dead_strip drops unreferenced code/data to keep the injected __TEXT segment small.
 RainbowKeyboard_CFLAGS := -fobjc-arc -Wno-deprecated-declarations -Oz

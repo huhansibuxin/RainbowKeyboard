@@ -7,6 +7,17 @@
 static NSDictionary *RKReadPreferences(void) {
     return RKReadEffectivePreferences();
 }
+// showRippleAtPoint: runs on every key press and the bundle identifier cannot change
+// at runtime, so the keyboard type is resolved once instead of lowercasing the
+// identifier (two string allocations) on every keystroke.
+static BOOL RKIsWeTypeProcess(void) {
+    static BOOL weType;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        weType = [NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"];
+    });
+    return weType;
+}
 @interface RainbowEffectView ()
 @property(nonatomic,strong) NSDictionary *config;
 @property(nonatomic) CGFloat hue;
@@ -217,8 +228,7 @@ static NSDictionary *RKReadPreferences(void) {
 }
 - (void)showRippleAtPoint:(CGPoint)point sourceView:(UIView *)sourceView {
     [self reloadConfiguration];
-    NSString *bid = NSBundle.mainBundle.bundleIdentifier.lowercaseString ?: @"";
-    BOOL weType = [bid containsString:@"wetype"];
+    BOOL weType = RKIsWeTypeProcess();
     if (![self flag:@"Enabled"] || ![self flag:@"RippleEnabled"] || ![self flag:weType ? @"WeChatKeyboard" : @"NativeKeyboard"]) {
         for (CALayer *l in self.layer.sublayers.copy) [l removeFromSuperlayer];
         return;

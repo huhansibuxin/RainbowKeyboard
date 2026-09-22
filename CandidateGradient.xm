@@ -2,70 +2,24 @@
 #import <math.h>
 #import <objc/runtime.h>
 #import <mach-o/dyld.h>
-#import <os/lock.h>
+#import <string.h>
 #import "RKPreferences.h"
+#import "RKKeyboardGeometry.h"
 
 static NSDictionary *RKCandidatePrefs;
 static NSHashTable<UIView *> *RKCandidateViews;
 static __thread NSUInteger RKCandidateDrawingDepth;
-static __thread NSUInteger RKNativeDrawingScope;
-static __thread NSUInteger RKCandidateRenderCount;
 static char RKCandidateRenderedKey;
 static BOOL RKTUIHookInstalled;
 static BOOL RKPredictionHookInstalled;
-static NSUInteger RKTUIGlyphDraws;
-static NSUInteger RKNativeLabelDraws;
-static os_unfair_lock RKHookLock = OS_UNFAIR_LOCK_INIT;
 static BOOL RKHookInstallQueued;
 
 static NSDictionary *RKCandidateReadPreferences(void) {
     return RKReadEffectivePreferences();
 }
 
-static BOOL RKCandidateRegion(UIView *view) {
-    for (UIView *p = view; p; p = p.superview) {
-        // Case-insensitive lookup: same match as lowercasing, without allocating
-        // a lowercased copy for every ancestor on every draw.
-        NSString *name = NSStringFromClass(p.class);
-        if ([name rangeOfString:@"candidate" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [name rangeOfString:@"prediction" options:NSCaseInsensitiveSearch].location != NSNotFound ||
-            [name rangeOfString:@"suggestion" options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
-        if ([p isKindOfClass:UIWindow.class]) break;
-    }
-    return NO;
-}
-static BOOL RKNativeCandidateRegion(UIView *view) {
-    for (UIView *parent = view; parent; parent = parent.superview) {
-        NSString *name = NSStringFromClass(parent.class);
-        if (([name hasPrefix:@"UIKB"] && [name containsString:@"Candidate"]) ||
-            [name hasPrefix:@"UIKeyboardCandidate"] || [name hasPrefix:@"TUICandidate"] ||
-            [name hasPrefix:@"TUIInlineCandidate"] || [name hasPrefix:@"TUIPrediction"] ||
-            [name hasPrefix:@"UIKeyboardPrediction"] || [name hasPrefix:@"_UIKeyboardCandidate"]) return YES;
-        if ([parent isKindOfClass:UIWindow.class]) break;
-    }
-    return NO;
-}
 static BOOL RKCandidateFlag(NSString *key) {
     return !RKCandidatePrefs[key] || [RKCandidatePrefs[key] boolValue];
-}
-// The bundle identifier never changes at runtime; resolve it once instead of
-// allocating a lowercased string on every label draw.
-static BOOL RKCandidateIsWeTypeBundle(void) {
-    static BOOL weType;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        weType = [NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"];
-    });
-    return weType;
-}
-static BOOL RKCandidateIsWeType(UIView *view) {
-    if (RKCandidateIsWeTypeBundle()) return YES;
-    if (!view) return NO;
-    Class label = NSClassFromString(@"WBTextItemLabel");
-    if (!label) return NO;
-    for (UIView *parent = view; parent; parent = parent.superview)
-        if ([parent isKindOfClass:label]) return YES;
-    return NO;
 }
 static UIColor *RKCandidateColor(id value, UIColor *fallback) {
     if (![value isKindOfClass:NSArray.class] || [value count] != 3) return fallback;
@@ -106,7 +60,6 @@ static void RKDrawGradientText(CGRect rect, CGRect textRect, void (^original)(vo
     CGGradientRef gradient = CGGradientCreateWithColors(space, (__bridge CFArrayRef)colors, NULL);
     CGColorSpaceRelease(space);
     if (!gradient) { original(); return; }
-    RKCandidateRenderCount++;
     CGContextSaveGState(ctx);
     CGContextClipToRect(ctx, rect);
     CGContextBeginTransparencyLayer(ctx, NULL);
@@ -125,39 +78,33 @@ static void RKDrawGradientText(CGRect rect, CGRect textRect, void (^original)(vo
         CGGradientRelease(gradient);
     }
 }
-static void RKDrawCandidate(UILabel *label, CGRect rect, BOOL native, void (^original)(void)) {
-    // Cheapest gates first. The ancestor walk below is the expensive part and
-    // previously ran on every single label draw even with the feature off.
+// weType labels are identified by their exact class -- the WBTextItemLabel hook below
+// is itself the proof -- so no ancestor walk is needed for them. Native labels are
+// matched against the registered candidate containers, and that test is skipped
+// entirely while no candidate bar is on screen.
+static void RKDrawCandidate(UILabel *label, CGRect rect, BOOL weType, void (^original)(void)) {
     if (RKCandidateDrawingDepth || !RKCandidateFlag(@"CandidateGradient")) { original(); return; }
-    if (RKCandidateIsWeType(label)) native = NO;
-    BOOL region = native ? RKNativeCandidateRegion(label) : RKCandidateRegion(label);
-    if (!region) { original(); return; }
-    [RKCandidateViews addObject:label];
-    if (!RKCandidateFlag(native ? @"CandidateNative" : @"CandidateWeType")) {
+    if (!RKCandidateFlag(weType ? @"CandidateWeType" : @"CandidateNative")) {
         RKCandidateDrawingDepth++;
         @try { original(); } @finally { RKCandidateDrawingDepth--; }
         return;
     }
-    if (native) RKNativeLabelDraws++;
+    if (!weType && !RKIsInCandidateContainer(label)) { original(); return; }
+    // Only a view we actually paint needs to stay reachable for later invalidation.
+    [RKCandidateViews addObject:label];
     objc_setAssociatedObject(label, &RKCandidateRenderedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     CGRect textRect = [label textRectForBounds:rect limitedToNumberOfLines:label.numberOfLines];
     RKDrawGradientText(rect, textRect, original);
-}
-static BOOL RKNativeTextDrawingEnabled(void) {
-    return RKNativeDrawingScope && !RKCandidateDrawingDepth &&
-        RKCandidateFlag(@"CandidateGradient") &&
-        RKCandidateFlag(RKCandidateIsWeType(nil) ? @"CandidateWeType" : @"CandidateNative");
 }
 
 // TUICandidateLabel draws CoreText directly. Capture just its drawRect glyphs, not
 // its background, and use their ink bounds so short words get both endpoint colors.
 static void RKDrawNativeGlyphView(UIView *view, CGRect dirtyRect, void (^original)(void)) {
-    if (RKCandidateDrawingDepth || !RKCandidateFlag(@"CandidateGradient")) { original(); return; }
+    if (RKCandidateDrawingDepth || !RKCandidateFlag(@"CandidateGradient") ||
+        !RKCandidateFlag(@"CandidateNative")) { original(); return; }
     CGRect bounds = view.bounds;
-    if (!RKCandidateFlag(RKCandidateIsWeType(view) ? @"CandidateWeType" : @"CandidateNative") ||
-        !UIGraphicsGetCurrentContext() || CGRectIsEmpty(bounds) ||
+    if (!UIGraphicsGetCurrentContext() || CGRectIsEmpty(bounds) ||
         bounds.size.width > 2048 || bounds.size.height > 512) { original(); return; }
-    [RKCandidateViews addObject:view];
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
     format.opaque = NO;
     format.preferredRange = UIGraphicsImageRendererFormatRangeStandard;
@@ -196,7 +143,9 @@ static void RKDrawNativeGlyphView(UIView *view, CGRect dirtyRect, void (^origina
     if (minX > maxX) return;
     CGRect ink = CGRectMake(bounds.origin.x + minX / glyphs.scale, bounds.origin.y,
                             (maxX - minX + 1) / glyphs.scale, bounds.size.height);
-    RKTUIGlyphDraws++;
+    // Reached only once an image actually exists, so the invalidation set stays limited
+    // to views that own custom pixels.
+    [RKCandidateViews addObject:view];
     objc_setAssociatedObject(view, &RKCandidateRenderedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     RKDrawGradientText(CGRectIntersection(bounds, dirtyRect), ink, ^{ [glyphs drawInRect:bounds]; });
 }
@@ -250,125 +199,33 @@ static void RKInstallNativeCandidateHook(void) {
     if (changed) for (UIView *view in RKCandidateViews) [view setNeedsDisplay];
 }
 static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t slide) {
-    os_unfair_lock_lock(&RKHookLock);
-    BOOL enqueue = !RKHookInstallQueued;
+    if (RKHookInstallQueued) return;
     RKHookInstallQueued = YES;
-    os_unfair_lock_unlock(&RKHookLock);
-    if (!enqueue) return;
     dispatch_async(dispatch_get_main_queue(), ^{
-        os_unfair_lock_lock(&RKHookLock);
         RKHookInstallQueued = NO;
-        os_unfair_lock_unlock(&RKHookLock);
         RKInstallNativeCandidateHook();
     });
 }
+
+// Native candidate labels drawn with a plain UILabel live in the registered candidate
+// containers; the container test early-outs while no candidate bar exists.
 %hook UILabel
 - (void)drawTextInRect:(CGRect)rect {
-    RKDrawCandidate(self, rect, YES, ^{
+    RKDrawCandidate(self, rect, NO, ^{
         %orig;
     });
 }
 %end
 
-// Scope custom string drawing to native candidate views. Never tint their backgrounds.
-%hook UIView
-- (void)drawLayer:(CALayer *)layer inContext:(CGContextRef)context {
-    // UIView drawing is a hot path: bail on the cheap flags before walking the
-    // ancestor chain, so non-candidate draws stay close to stock cost.
-    if (RKCandidateDrawingDepth || !RKCandidateFlag(@"CandidateGradient") ||
-        !RKNativeCandidateRegion(self)) {
-        %orig;
-        return;
-    }
-    [RKCandidateViews addObject:self];
-    NSUInteger before = RKCandidateRenderCount;
-    RKNativeDrawingScope++;
-    @try {
-        %orig;
-    } @finally {
-        RKNativeDrawingScope--;
-        if (RKCandidateRenderCount != before)
-            objc_setAssociatedObject(self, &RKCandidateRenderedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-}
-%end
-
-%hook NSString
-- (void)drawInRect:(CGRect)rect withAttributes:(NSDictionary *)attributes {
-    if (!RKNativeTextDrawingEnabled()) {
-        %orig;
-        return;
-    }
-    CGSize size = [(NSString *)self boundingRectWithSize:rect.size options:NSStringDrawingUsesLineFragmentOrigin
-                                             attributes:attributes context:nil].size;
-    RKDrawGradientText(rect, (CGRect){rect.origin, size}, ^{
-        %orig;
-    });
-}
-- (void)drawAtPoint:(CGPoint)point withAttributes:(NSDictionary *)attributes {
-    if (!RKNativeTextDrawingEnabled()) {
-        %orig;
-        return;
-    }
-    CGRect rect = {point, [(NSString *)self sizeWithAttributes:attributes]};
-    RKDrawGradientText(rect, rect, ^{
-        %orig;
-    });
-}
-- (void)drawWithRect:(CGRect)rect options:(NSStringDrawingOptions)options attributes:(NSDictionary *)attributes context:(NSStringDrawingContext *)context {
-    if (!RKNativeTextDrawingEnabled()) {
-        %orig;
-        return;
-    }
-    CGSize size = [(NSString *)self boundingRectWithSize:rect.size options:options attributes:attributes context:context].size;
-    RKDrawGradientText(rect, (CGRect){rect.origin, size}, ^{
-        %orig;
-    });
-}
-%end
-
-%hook NSAttributedString
-- (void)drawInRect:(CGRect)rect {
-    if (!RKNativeTextDrawingEnabled()) {
-        %orig;
-        return;
-    }
-    CGSize size = [(NSAttributedString *)self boundingRectWithSize:rect.size
-        options:NSStringDrawingUsesLineFragmentOrigin context:nil].size;
-    RKDrawGradientText(rect, (CGRect){rect.origin, size}, ^{
-        %orig;
-    });
-}
-- (void)drawAtPoint:(CGPoint)point {
-    if (!RKNativeTextDrawingEnabled()) {
-        %orig;
-        return;
-    }
-    CGRect rect = {point, [(NSAttributedString *)self size]};
-    RKDrawGradientText(rect, rect, ^{
-        %orig;
-    });
-}
-- (void)drawWithRect:(CGRect)rect options:(NSStringDrawingOptions)options context:(NSStringDrawingContext *)context {
-    if (!RKNativeTextDrawingEnabled()) {
-        %orig;
-        return;
-    }
-    CGSize size = [(NSAttributedString *)self boundingRectWithSize:rect.size options:options context:context].size;
-    RKDrawGradientText(rect, (CGRect){rect.origin, size}, ^{
-        %orig;
-    });
-}
-%end
-
-// WeType overrides UILabel drawing; keep its existing concrete hook.
+// WeType overrides UILabel drawing; its label class is the region proof itself.
 %hook WBTextItemLabel
 - (void)drawTextInRect:(CGRect)rect {
-    RKDrawCandidate((UILabel *)self, rect, NO, ^{
+    RKDrawCandidate((UILabel *)self, rect, YES, ^{
         %orig;
     });
 }
 %end
+
 %ctor {
     @autoreleasepool {
         RKCandidateViews = [NSHashTable weakObjectsHashTable];

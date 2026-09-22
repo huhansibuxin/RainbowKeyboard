@@ -22,24 +22,9 @@ static NSString *const RKPressLift = @"rkNeonPressLift";
 }
 @end
 
-static UIView *RKPressKeyView(UIView *node, UIView *host, CGRect frame, NSUInteger depth) {
-    if (depth > 12) return nil;
-    for (UIView *view in node.subviews) {
-        if (view.hidden || view.alpha < .01 || RKKeyboardExcludedView(view)) continue;
-        NSString *name = NSStringFromClass(view.class).lowercaseString;
-        BOOL key = [view isKindOfClass:UIButton.class] || [name containsString:@"keyview"] ||
-            [name containsString:@"keycap"] || [name containsString:@"keybutton"];
-        CGRect candidate = [view convertRect:view.bounds toView:host];
-        BOOL matches = fabs(candidate.origin.x - frame.origin.x) <= 3 &&
-            fabs(candidate.origin.y - frame.origin.y) <= 3 &&
-            fabs(candidate.size.width - frame.size.width) <= 4 &&
-            fabs(candidate.size.height - frame.size.height) <= 4;
-        if (key && matches) return view;
-        UIView *child = RKPressKeyView(view, host, frame, depth + 1);
-        if (child) return child;
-    }
-    return nil;
-}
+// Keycap lookup is now a linear match over the registered keycaps
+// (RKKeyboardKeyViewAtFrame). The previous recursive subview search, which rebuilt a
+// lowercased class name for every view it visited, is gone.
 
 static CASpringAnimation *RKPressSpring(NSString *keyPath, CGFloat start, CGFloat end) {
     CASpringAnimation *spring = [CASpringAnimation animationWithKeyPath:keyPath];
@@ -158,7 +143,7 @@ void RKShowNeonKeyPress(UIView *overlay, CGRect keyFrame, UIColor *color, CGFloa
             fabs(sourceFrame.size.height - hostFrame.size.height) <= 5;
         if (!matches) key = nil;
     }
-    if (!key) key = host ? RKPressKeyView(host, host, hostFrame, 0) : nil;
+    if (!key) key = host ? RKKeyboardKeyViewAtFrame(host, hostFrame) : nil;
     UIImage *foreground = RKPressForeground(overlay, key, face);
     RKNeonPressLayer *pulse = [RKNeonPressLayer layer];
     pulse.name = @"neonKeyPress";

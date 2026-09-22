@@ -1,31 +1,57 @@
 #import "RKKeyboardGeometry.h"
 #import "RainbowEffectView.h"
 #import <math.h>
+#import <objc/runtime.h>
+#import <string.h>
 
-BOOL RKKeyboardExcludedView(UIView *view) {
-    NSString *name = NSStringFromClass(view.class).lowercaseString;
-    for (NSString *part in @[@"candidate", @"prediction", @"suggestion", @"toolbar",
-        @"accessory", @"dock", @"clipboard", @"shortcut", @"popup", @"editingbar"])
-        if ([name containsString:part]) return YES;
-    return [view isKindOfClass:RainbowEffectView.class];
+// ---------------------------------------------------------------------------
+// Runtime registries
+//
+// Every lookup below used to recurse the view tree (exclusion mask, key frames,
+// keycap hit-test) or walk the superview chain with a class-name match on each
+// ancestor. Both are gone: RKKeyboardHooks.xm hooks the exact keyboard classes
+// and registers their live instances here, so the input path and the draw path
+// only ever touch a handful of known objects.
+//
+// All registration and lookup happens on the main thread (layout, drawing and
+// event delivery are all main-thread), so no lock is required.
+// ---------------------------------------------------------------------------
+static __weak UIView *RKKeyboardHostWeak;                        // WBKeyboardView / UIKeyboardLayoutStar
+static NSHashTable<UIView *> *RKKeyViewRegistry;                 // WBKeyView / UIKBKeyView
+static NSHashTable<UIView *> *RKCandidateContainerRegistry;      // WBTopBar / TUICandidateView / ...
+
+void RKRegisterKeyboardHost(UIView *host) {
+    if (host) RKKeyboardHostWeak = host;
 }
 
-UIView *RKKeyboardEffectHost(UIView *view) {
-    UIView *fallback = nil;
-    for (UIView *parent = view; parent && ![parent isKindOfClass:UIWindow.class]; parent = parent.superview) {
-        if (RKKeyboardExcludedView(parent)) return nil;
-        NSString *name = NSStringFromClass(parent.class).lowercaseString;
-        if ([name containsString:@"keyboardlayoutstar"]) return parent;
-        // Remote input containers also contain the dock, not just key rows.
-        BOOL container = NO;
-        for (NSString *part in @[@"inputset", @"itemcontainer", @"trackingwindow", @"placeholder", @"compatinput"])
-            container |= [name containsString:part];
-        if (container) break;
-        if (!fallback && ([name containsString:@"keyboard"] || [name containsString:@"keyplane"]) &&
-            parent.bounds.size.width > 180 && parent.bounds.size.height > 100 && parent.bounds.size.height < 500)
-            fallback = parent;
+void RKRegisterKeyView(UIView *keyView) {
+    if (!keyView) return;
+    if (!RKKeyViewRegistry) RKKeyViewRegistry = [NSHashTable weakObjectsHashTable];
+    [RKKeyViewRegistry addObject:keyView];
+}
+
+void RKRegisterCandidateContainer(UIView *container) {
+    if (!container) return;
+    if (!RKCandidateContainerRegistry) RKCandidateContainerRegistry = [NSHashTable weakObjectsHashTable];
+    [RKCandidateContainerRegistry addObject:container];
+}
+
+BOOL RKIsInCandidateContainer(UIView *view) {
+    // Zero cost while no candidate bar is on screen (the common case for every
+    // other process the tweak is injected into).
+    if (!RKCandidateContainerRegistry.count || !view) return NO;
+    for (UIView *container in RKCandidateContainerRegistry.allObjects) {
+        if (container.window && [view isDescendantOfView:container]) return YES;
     }
-    return fallback;
+    return NO;
+}
+
+// The keyboard host is registered by the exact-class hook on layout/appearance.
+// Callers still validate the touch point against host.bounds, so no ancestor walk
+// is needed to confirm ownership.
+UIView *RKKeyboardEffectHost(UIView *view) {
+    UIView *host = RKKeyboardHostWeak;
+    return (host && host.window) ? host : nil;
 }
 
 UIBezierPath *RKKeyboardKeyFacePath(CGRect keyFrame) {
@@ -34,31 +60,54 @@ UIBezierPath *RKKeyboardKeyFacePath(CGRect keyFrame) {
     return [UIBezierPath bezierPathWithRoundedRect:face cornerRadius:corner];
 }
 
-// Private selectors vary by OS release. Validate their ABI before invoking them.
-static NSInvocation *RKGetter(id object, NSString *name, const char *type) {
-    SEL selector = NSSelectorFromString(name);
-    if (![object respondsToSelector:selector]) return nil;
-    NSMethodSignature *signature = [object methodSignatureForSelector:selector];
-    if (signature.numberOfArguments != 2 || strcmp(signature.methodReturnType, type)) return nil;
-    NSInvocation *call = [NSInvocation invocationWithMethodSignature:signature];
-    call.target = object;
-    call.selector = selector;
-    [call invoke];
-    return call;
-}
+// Native keyboards still expose their key model through -keyplane.keys, which is a
+// property read rather than a subtree walk, so that path stays for them.
+typedef id (*RKIdGetter)(id, SEL);
+typedef BOOL (*RKBoolGetter)(id, SEL);
+typedef CGRect (*RKRectGetter)(id, SEL);
+enum { RKGetterId = 'i', RKGetterRect = 'r', RKGetterBool = 'b' };
 
-static id RKObject(id object, NSString *name) {
-    NSInvocation *call = RKGetter(object, name, @encode(id));
-    __unsafe_unretained id result = nil;
-    [call getReturnValue:&result];
-    return result;
-}
+static struct { Class cls; SEL selector; IMP imp; char kind; } RKGetterCache[24];
+static size_t RKGetterCount;
 
-static CGRect RKRect(id object, NSString *name) {
-    NSInvocation *call = RKGetter(object, name, @encode(CGRect));
-    CGRect result = CGRectZero;
-    [call getReturnValue:&result];
-    return result;
+// Returns a validated IMP for object's selector, or NULL when it is missing or its
+// signature does not match the expected convention. Validating keeps this as safe as
+// the old respondsToSelector + NSMethodSignature checks.
+static IMP RKGetterIMP(id object, SEL selector, char kind) {
+    if (!object || !selector) return NULL;
+    const char *type = kind == RKGetterId ? @encode(id)
+        : (kind == RKGetterRect ? @encode(CGRect) : @encode(BOOL));
+    Class cls = object_getClass(object);
+    for (size_t i = 0; i < RKGetterCount; i++) {
+        if (RKGetterCache[i].cls != cls || RKGetterCache[i].selector != selector) continue;
+        return RKGetterCache[i].kind == kind ? RKGetterCache[i].imp : NULL;
+    }
+    IMP imp = NULL;
+    if ([object respondsToSelector:selector]) {
+        NSMethodSignature *signature = [object methodSignatureForSelector:selector];
+        if (signature.numberOfArguments == 2 && !strcmp(signature.methodReturnType, type))
+            imp = [object methodForSelector:selector];
+    }
+    if (RKGetterCount < sizeof(RKGetterCache) / sizeof(RKGetterCache[0])) {
+        RKGetterCache[RKGetterCount].cls = cls;
+        RKGetterCache[RKGetterCount].selector = selector;
+        RKGetterCache[RKGetterCount].imp = imp;
+        RKGetterCache[RKGetterCount].kind = kind;
+        RKGetterCount++;
+    }
+    return imp;
+}
+static id RKCallObject(id object, SEL selector) {
+    RKIdGetter getter = (RKIdGetter)RKGetterIMP(object, selector, RKGetterId);
+    return getter ? getter(object, selector) : nil;
+}
+static BOOL RKCallBool(id object, SEL selector, BOOL fallback) {
+    RKBoolGetter getter = (RKBoolGetter)RKGetterIMP(object, selector, RKGetterBool);
+    return getter ? getter(object, selector) : fallback;
+}
+static CGRect RKCallRect(id object, SEL selector) {
+    RKRectGetter getter = (RKRectGetter)RKGetterIMP(object, selector, RKGetterRect);
+    return getter ? getter(object, selector) : CGRectZero;
 }
 
 static BOOL RKValidKeyRect(CGRect rect, CGRect bounds) {
@@ -80,41 +129,56 @@ static void RKAddKey(NSMutableArray<NSValue *> *frames, CGRect rect, CGRect boun
     if (frames.count < 100) [frames addObject:[NSValue valueWithCGRect:rect]];
 }
 
-static void RKViewKeys(UIView *node, UIView *host, NSMutableArray *frames, NSUInteger depth) {
-    if (depth > 12 || frames.count >= 100) return;
-    for (UIView *view in node.subviews) {
-        if (view.hidden || view.alpha < .01 || RKKeyboardExcludedView(view)) continue;
-        NSString *name = NSStringFromClass(view.class).lowercaseString;
-        BOOL key = [view isKindOfClass:UIButton.class] || [name containsString:@"keycap"] ||
-            [name containsString:@"keyview"] || [name containsString:@"keybutton"];
-        CGRect rect = [view convertRect:view.bounds toView:host];
-        if (key && RKValidKeyRect(rect, host.bounds)) RKAddKey(frames, rect, host.bounds);
-        else RKViewKeys(view, host, frames, depth + 1);
+// Keycaps registered by the exact-class hooks. Linear over the registered keys only
+// (tens of objects), never over the view hierarchy.
+static void RKAddRegisteredKeys(UIView *host, NSMutableArray<NSValue *> *frames) {
+    for (UIView *keyView in RKKeyViewRegistry.allObjects) {
+        if (!keyView.window || keyView.hidden || keyView.alpha < .01) continue;
+        RKAddKey(frames, [keyView convertRect:keyView.bounds toView:host], host.bounds);
     }
 }
 
 NSArray<NSValue *> *RKKeyboardKeyFrames(UIView *host) {
     NSMutableArray *frames = [NSMutableArray array];
-    id plane = RKObject(host, @"keyplane");
-    id keys = RKObject(plane, @"keys");
+    // Native keyboards expose their key model directly, so their proven path stays
+    // exactly as before: two property reads, no subtree walk.
+    SEL selKeyplane = NSSelectorFromString(@"keyplane"), selKeys = NSSelectorFromString(@"keys");
+    SEL selGhost = NSSelectorFromString(@"ghost"), selVisible = NSSelectorFromString(@"visible");
+    SEL selDisplayFrame = NSSelectorFromString(@"displayFrame"), selFrame = NSSelectorFromString(@"frame");
+    id plane = RKCallObject(host, selKeyplane);
+    id keys = RKCallObject(plane, selKeys);
     if ([keys isKindOfClass:NSArray.class] || [keys isKindOfClass:NSSet.class]) {
         for (id key in keys) {
-            BOOL ghost = NO;
-            NSInvocation *visibility = RKGetter(key, @"ghost", @encode(BOOL));
-            [visibility getReturnValue:&ghost];
-            if (ghost) continue;
-            BOOL visible = YES;
-            NSInvocation *visibleGetter = RKGetter(key, @"visible", @encode(BOOL));
-            [visibleGetter getReturnValue:&visible];
-            if (!visible) continue;
-            CGRect rect = RKRect(key, @"displayFrame");
-            if (!RKValidKeyRect(rect, host.bounds)) rect = RKRect(key, @"frame");
+            // A missing getter keeps the previous defaults: ghost NO, visible YES.
+            if (RKCallBool(key, selGhost, NO)) continue;
+            if (!RKCallBool(key, selVisible, YES)) continue;
+            CGRect rect = RKCallRect(key, selDisplayFrame);
+            if (!RKValidKeyRect(rect, host.bounds)) rect = RKCallRect(key, selFrame);
             RKAddKey(frames, rect, host.bounds);
         }
     }
-    if (frames.count < 3) {
-        [frames removeAllObjects];
-        RKViewKeys(host, host, frames, 0);
-    }
+    if (frames.count >= 3) return frames;
+    // WeType has no keyplane model: use the keycaps registered by the exact-class
+    // hook on WBKeyView (linear over registered keycaps only).
+    [frames removeAllObjects];
+    RKAddRegisteredKeys(host, frames);
     return frames;
+}
+
+// Replaces the old recursive subview search: match the pressed key frame against the
+// registered keycaps. Returns nil when nothing is close enough.
+UIView *RKKeyboardKeyViewAtFrame(UIView *host, CGRect keyFrame) {
+    if (!host || CGRectIsEmpty(keyFrame)) return nil;
+    UIView *best = nil;
+    CGFloat bestDelta = 5;
+    for (UIView *keyView in RKKeyViewRegistry.allObjects) {
+        if (!keyView.window) continue;
+        CGRect rect = [keyView convertRect:keyView.bounds toView:host];
+        CGFloat delta = MAX(MAX(fabs(rect.origin.x - keyFrame.origin.x),
+                               fabs(rect.origin.y - keyFrame.origin.y)),
+                           MAX(fabs(rect.size.width - keyFrame.size.width),
+                               fabs(rect.size.height - keyFrame.size.height)));
+        if (delta < bestDelta) { bestDelta = delta; best = keyView; }
+    }
+    return best;
 }

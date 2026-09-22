@@ -1,5 +1,5 @@
 {
     Filter = {
-        Bundles = ("com.apple.UIKit", "com.apple.UIKitCore", "com.apple.TextInputUI", "com.apple.springboard");
+        Executables = ("InputUI", "wxkb_plugin");
     };
 }

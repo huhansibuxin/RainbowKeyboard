@@ -4,3 +4,6 @@ packages/
 .theos/
 obj/
 *.deb
+
+# 第三方键盘二进制分析工作区（含 54MB 大二进制，仅本地取证用）
+.wetype/
