@@ -49,6 +49,7 @@ typedef struct {
     unsigned pathsNew;      // bezier paths built
     double colorSec;        // of armSec, the part spent building/assigning colours
     double animSec;         // of armSec, the part spent submitting animations
+    int glide;              // the AmbientGlide the press actually rendered with
 } RKProbeCounts;
 
 #if RK_PROBE_ENABLED
@@ -68,6 +69,7 @@ typedef struct {
     double gateSec;     // layout gate
     double colorSec;    // of armSec, colours
     double animSec;     // of armSec, animation submission
+    int glide;          // AmbientGlide as the renderer resolved it (not as Settings saved it)
     const char *note;   // why this press had to build, when that is known
 } RKProbePress;
 
@@ -182,10 +184,10 @@ static inline void RKProbeFlush(void) {
             RKProbeMaxPress * 1e6, RKProbeLayersTotal, RKProbePathsTotal);
     for (unsigned i = 0; i < RKProbeRingCount; i++) {
         RKProbePress *p = &RKProbeRing[i];
-        fprintf(f, "RKPERF press#%u %s keys=%u new=%u reuse=%u layers=%u paths=%u arm=%.1fus press=%.1fus gate=%.2fus col=%.1fus anim=%.1fus%s%s\n",
+        fprintf(f, "RKPERF press#%u %s keys=%u new=%u reuse=%u layers=%u paths=%u arm=%.1fus press=%.1fus gate=%.2fus col=%.1fus anim=%.1fus glide=%d%s%s\n",
                 p->index, p->cold ? "cold" : "warm", p->keys, p->groupsNew, p->groupsReused,
                 p->layersNew, p->pathsNew, p->armSec * 1e6, p->pressSec * 1e6, p->gateSec * 1e6,
-                p->colorSec * 1e6, p->animSec * 1e6,
+                p->colorSec * 1e6, p->animSec * 1e6, p->glide,
                 p->note ? " note=" : "", p->note ? p->note : "");
         RKProbeBytesWritten += 160;
     }
@@ -208,6 +210,7 @@ static inline void RKProbeRecordWave(NSInteger style, double armSec, double pres
     p->gateSec = RKProbeGateSec;
     p->colorSec = c.colorSec;
     p->animSec = c.animSec;
+    p->glide = c.glide;
     RKProbeGateSec = 0;
     p->note = RKProbePendingNote;
     RKProbePendingNote = NULL;

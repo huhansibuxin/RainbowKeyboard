@@ -28,7 +28,7 @@ static inline NSArray<NSString *> *RKDisplayColors(void) {
 static inline NSArray<NSString *> *RKDisplayKeys(void) {
     return [[[RKDisplayNumbers() arrayByAddingObjectsFromArray:RKDisplayFlags()]
         arrayByAddingObjectsFromArray:RKDisplayColors()]
-        arrayByAddingObjectsFromArray:@[@"PressBrightness"]];
+        arrayByAddingObjectsFromArray:@[@"PressBrightness", @"AmbientGlide"]];
 }
 static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[RKDisplayWordCount]) {
     memset(words, 0, RKDisplayWordCount * sizeof(uint64_t));
@@ -77,6 +77,17 @@ static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[R
         words[14] |= (uint64_t)bits << 32;
         words[1] |= UINT64_C(1) << 43;
     }
+    // Extended flags. The positional flag block is exactly full -- presence bits 21..30
+    // and value bits 31..40 meet -- so an eleventh flag cannot be appended to it without
+    // landing on the first flag's value bit. These live in the free gap above
+    // PressBrightness (bit 43), allocated as presence/value pairs from the bottom up:
+    // AmbientGlide owns 44/45, the next flag added owns 46/47, and so on. Never renumber
+    // a pair that has shipped, for the same reason the positional list is append-only.
+    id ambientGlide = prefs[@"AmbientGlide"];
+    if ([ambientGlide isKindOfClass:NSNumber.class]) {
+        words[1] |= UINT64_C(1) << 44;
+        if ([ambientGlide boolValue]) words[1] |= UINT64_C(1) << 45;
+    }
 }
 static inline uint64_t RKDisplayChecksum(const uint64_t words[RKDisplayWordCount]) {
     uint64_t hash = UINT64_C(14695981039346656037);
@@ -116,6 +127,11 @@ static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDispl
         if (!isfinite(value) || value < 0 || value > 1) return nil;
         result[@"PressBrightness"] = @(value);
     }
+    // Extended flags: see the encoder. An absent bit means "no saved value", which the
+    // renderer treats as its own default -- so a snapshot written before this key existed
+    // simply leaves the behaviour alone instead of forcing it off.
+    if (words[1] & (UINT64_C(1) << 44))
+        result[@"AmbientGlide"] = @((words[1] >> 45) & 1);
     return result;
 }
 static inline int RKDisplayToken(NSUInteger index) {

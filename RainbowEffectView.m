@@ -691,6 +691,10 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     if (!keyCount || !_keyFrameRects) return;
     double armStart = RKProbeTic();
     RKProbeCounts counts = {0};
+    // Recorded so a log line can prove which value the renderer actually resolved, rather
+    // than which value Settings saved -- those two are not the same thing when a key is
+    // missing from the cross-process wire format.
+    counts.glide = _params.ambientGlide ? 1 : 0;
     CGFloat alpha = _params.opacity;
     CGFloat brightness = _params.brightness;
     CGFloat duration = _params.duration;
