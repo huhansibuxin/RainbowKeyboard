@@ -3,6 +3,15 @@
 FOUNDATION_EXPORT NSArray<NSValue *> *RKKeyboardKeyFrames(UIView *host);
 FOUNDATION_EXPORT UIBezierPath *RKKeyboardKeyFacePath(CGRect keyFrame);
 FOUNDATION_EXPORT UIView *RKKeyboardEffectHost(UIView *view);
+
+// The view the effect should be attached to, and the rect it should occupy inside that
+// view. Normally this is the key area itself (the host, at host.bounds). When a candidate
+// bar is on screen and sits directly above the key area, the two share an ancestor, and
+// the effect is attached there instead with a frame covering both -- so the ambient glow
+// reaches the candidate row, which is where the eye is while typing, rather than stopping
+// at the top edge of the key area. Anything that does not read as that bar (wrong side,
+// wrong width, an implausible size, a different window) leaves the pair untouched.
+FOUNDATION_EXPORT UIView *RKKeyboardOverlayHost(UIView *host, CGRect *outFrame);
 FOUNDATION_EXPORT UIView *RKKeyboardKeyViewAtFrame(UIView *host, CGRect keyFrame);
 
 // Runtime registries. Exact-class hooks (RKKeyboardHooks.xm) register the live

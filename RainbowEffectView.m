@@ -505,8 +505,30 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
         RKProbeNoteGate(RKProbeTic() - probeStart);
         return NO;
     }
-    self.frame = hostBounds;
-    self.keyFrames = RKKeyboardKeyFrames(host);
+    // Where the overlay lives and how big it is there. Usually the key area itself; when a
+    // candidate bar is on screen above it, the view the two share, with a frame covering
+    // both. Resolved here and not in the gate above: this reads the candidate registry, and
+    // the gate has to stay three reads and no allocation on the typing path. A candidate bar
+    // appearing or leaving relayouts the key area, so the cheap gate above always notices it.
+    CGRect overlayFrame = hostBounds;
+    UIView *owner = RKKeyboardOverlayHost(host, &overlayFrame) ?: host;
+    if (owner != self.superview) {
+        [self removeFromSuperview];
+        [owner addSubview:self];
+    }
+    self.frame = overlayFrame;
+    // The key table is collected in the host's coordinates, so when the overlay covers more
+    // than the key area the table has to move into the overlay's own coordinates. When the
+    // two coincide the list is used as it comes: no conversion, no allocation, which is the
+    // case on every ordinary relayout.
+    NSArray<NSValue *> *frames = RKKeyboardKeyFrames(host);
+    if (owner != host) {
+        NSMutableArray<NSValue *> *converted = [NSMutableArray arrayWithCapacity:frames.count];
+        for (NSValue *value in frames)
+            [converted addObject:[NSValue valueWithCGRect:[host convertRect:value.CGRectValue toView:self]]];
+        frames = converted;
+    }
+    self.keyFrames = frames;
     _keyFramesStamp = stamp;
     _keyFramesKeyCount = keyCount;
     _keyFramesHostBounds = hostBounds;
