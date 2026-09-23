@@ -4,44 +4,6 @@
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
 #import "RKPreferences.h"
-#import <objc/runtime.h>
-// The overlay attached to a keyboard host. The association lives here rather than in
-// Tweak.xm so the layout hook (RKKeyboardHooks.xm) reaches the same view through the
-// shared accessor instead of needing its own copy of the key.
-static char RKOverlayKey;
-// A switch key's press and the key-set swap it causes are one event to the user. This bounds
-// how long that press may take -- finger down to the swap it drives -- for its light to be
-// handed to the new layout. It is a validity check on the remembered press, not a delay: the
-// pulse is drawn the moment the new key set is collected.
-static const NSTimeInterval RKSwitchPulseWindow = 1.2;
-// One swap drives layoutSubviews more than once. Within this window those extra passes are
-// the same switch, so they are ignored instead of being treated as another one.
-static const NSTimeInterval RKSwitchSettleWindow = .12;
-// Anything the keyboard installs lands at zPosition 0, so the light only has to sit above
-// that to stay visible through a key-set swap. Without it every keycap installed after the
-// overlay is appended on top of it.
-static const CGFloat RKOverlayZPosition = 1000;
-// Two keys of one row end on the same baseline to within a subpixel; this is the slack
-// allowed when picking the bottom function row out of the collected key frames.
-static const CGFloat RKFunctionRowSlack = 2;
-// The bottom row of the current key set: the keys sharing the lowest baseline. A switch key
-// (中英 / 123 / #+=) is always one of them and a letter key never is, so this rectangle is
-// all the touch path needs to skip an ordinary keystroke.
-static CGRect RKFunctionRowRect(NSArray<NSValue *> *keyFrames) {
-    CGFloat lowest = -CGFLOAT_MAX;
-    for (NSValue *value in keyFrames) {
-        CGFloat bottom = CGRectGetMaxY(value.CGRectValue);
-        if (bottom > lowest) lowest = bottom;
-    }
-    if (lowest == -CGFLOAT_MAX) return CGRectNull;
-    CGRect row = CGRectNull;
-    for (NSValue *value in keyFrames) {
-        CGRect rect = value.CGRectValue;
-        if (CGRectGetMaxY(rect) < lowest - RKFunctionRowSlack) continue;
-        row = CGRectIsNull(row) ? rect : CGRectUnion(row, rect);
-    }
-    return row;
-}
 static NSDictionary *RKReadPreferences(void) {
     return RKReadEffectivePreferences();
 }
@@ -83,9 +45,6 @@ static NSArray *RKAnimConstant(NSUInteger index) {
 @property(nonatomic) CGFloat hue;
 @property(nonatomic) CGFloat pressHue;
 @property(nonatomic) NSInteger lastStyle;
-- (CGPoint)nearestKeyCentre:(CGPoint)point;
-- (BOOL)keySetWasSwapped;
-- (void)adoptSwappedKeySetForHost:(UIView *)host;
 @end
 @implementation RainbowEffectView {
     // Cached compound "gaps" path for the gutter light. It depends only on bounds and
@@ -102,23 +61,6 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     uint64_t _keyFramesStamp;
     NSUInteger _keyFramesKeyCount;
     CGRect _keyFramesHostBounds;
-    // The bottom function row, resolved whenever the key frames are. A switch key is always
-    // in it and a letter key never is, so this one rectangle lets the touch path skip every
-    // ordinary keystroke before any class test, call or store.
-    CGRect _functionRowRect;
-    BOOL _functionRowRectValid;
-    // A 中英 / 123 / #+= press, remembered without drawing anything. Written only by those
-    // three keys, and read back once, by the swap they cause.
-    CGPoint _switchTouchPoint;
-    CFTimeInterval _switchTouchTime;
-    BOOL _switchTouchValid;
-    // Set when a swap lands before its own touch reaches the touch path -- the key set can be
-    // replaced inside the touch-down itself. The press that arrives next then draws its pulse
-    // immediately instead of waiting for a swap that has already happened.
-    CFTimeInterval _swapAwaitingPulse;
-    // When the current layout was last adopted after a swap, so the extra layout passes of
-    // that same swap are not mistaken for a second one.
-    CFTimeInterval _layoutAdoptedAt;
 }
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
@@ -126,10 +68,6 @@ static NSArray *RKAnimConstant(NSUInteger index) {
         self.backgroundColor = UIColor.clearColor;
         self.clipsToBounds = YES;
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        // Render order looks at zPosition before insertion order, so one assignment here
-        // keeps the light above the keycaps for the rest of this overlay's life -- including
-        // the ones a layout switch installs after it. Costs nothing at runtime.
-        self.layer.zPosition = RKOverlayZPosition;
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadConfiguration) name:UIApplicationDidBecomeActiveNotification object:nil];
         [self reloadConfiguration];
     }
@@ -211,9 +149,6 @@ static NSArray *RKAnimConstant(NSUInteger index) {
         return NO;
     self.frame = hostBounds;
     self.keyFrames = RKKeyboardKeyFrames(host);
-    // Resolved with the frames, so the touch path never looks a row up itself.
-    _functionRowRect = RKFunctionRowRect(self.keyFrames);
-    _functionRowRectValid = !CGRectIsNull(_functionRowRect) && !CGRectIsEmpty(_functionRowRect);
     _keyFramesStamp = stamp;
     _keyFramesKeyCount = keyCount;
     _keyFramesHostBounds = hostBounds;
@@ -366,88 +301,6 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((travel + tail + .05) * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ [pulse removeFromSuperlayer]; });
-}
-- (BOOL)pointIsInFunctionRow:(CGPoint)point {
-    return _functionRowRectValid && CGRectContainsPoint(_functionRowRect, point);
-}
-// A switch key's press is not drawn on the layout it is leaving. It is remembered instead:
-// it is one press whose light belongs to the layout being switched to, and the host's layout
-// hook draws it there. Two stores and a time read -- no drawing, no allocation.
-- (void)armSwitchKeyPulseAtPoint:(CGPoint)point {
-    _switchTouchPoint = point;
-    _switchTouchTime = CACurrentMediaTime();
-    _switchTouchValid = YES;
-    // The key set can be replaced inside the very touch that produced this call, in which
-    // case the swap ran before the touch path got here and could not see this press. Draw
-    // the pulse now, from the layout the swap already installed.
-    if (_swapAwaitingPulse && _switchTouchTime - _swapAwaitingPulse <= RKSwitchPulseWindow) {
-        _swapAwaitingPulse = 0;
-        _switchTouchValid = NO;
-        if (self.keyFrames.count)
-            [self showRippleAtPoint:[self nearestKeyCentre:point] sourceView:nil];
-    }
-}
-// The pulse for a switch key belongs to the layout it switched to, so its origin is taken
-// from the *new* key frames: the nearest key centre to where the finger was is the switch
-// key in its new position. Runs at most once per switch, over the collected keys only.
-- (CGPoint)nearestKeyCentre:(CGPoint)point {
-    CGPoint centre = point;
-    CGFloat nearest = CGFLOAT_MAX;
-    for (NSValue *value in self.keyFrames) {
-        CGRect rect = value.CGRectValue;
-        CGFloat dx = MAX(MAX(CGRectGetMinX(rect) - point.x, 0), point.x - CGRectGetMaxX(rect));
-        CGFloat dy = MAX(MAX(CGRectGetMinY(rect) - point.y, 0), point.y - CGRectGetMaxY(rect));
-        CGFloat distance = hypot(dx, dy);
-        if (distance < nearest) {
-            nearest = distance;
-            centre = CGPointMake(CGRectGetMidX(rect), CGRectGetMidY(rect));
-        }
-    }
-    return centre;
-}
-- (BOOL)keySetWasSwapped {
-    if (CACurrentMediaTime() - _layoutAdoptedAt < RKSwitchSettleWindow) return NO;
-    // Typing never changes the keycap count, so an ordinary keystroke leaves this call
-    // here: one O(1) read, nothing allocated, nothing scheduled.
-    return RKRegisteredKeyCount() != _keyFramesKeyCount;
-}
-- (void)adoptSwappedKeySetForHost:(UIView *)host {
-    if (!host) return;
-    CFTimeInterval now = CACurrentMediaTime();
-    _layoutAdoptedAt = now;
-    // The switch key's own press was never drawn on the layout it is leaving, so there is
-    // nothing to retire here -- only the new key positions to collect and one pulse to draw
-    // from the switch key's new position.
-    BOOL armed = _switchTouchValid && now - _switchTouchTime <= RKSwitchPulseWindow;
-    _switchTouchValid = NO;
-    [self updateKeyFramesForHost:host];
-    if (!self.keyFrames.count) return;
-    if (armed) {
-        _swapAwaitingPulse = 0;
-        [self showRippleAtPoint:[self nearestKeyCentre:_switchTouchPoint] sourceView:nil];
-        return;
-    }
-    // This swap ran before its own touch reached the touch path. That press arms a moment
-    // from now and draws its pulse itself; without this note it would miss the swap it
-    // caused, because the swap has already been consumed by the gate.
-    _swapAwaitingPulse = now;
-}
-RainbowEffectView *RKKeyboardEffectOverlay(UIView *host) {
-    if (!host) return nil;
-    RainbowEffectView *effect = objc_getAssociatedObject(host, &RKOverlayKey);
-    if (effect) return effect;
-    effect = [[RainbowEffectView alloc] initWithFrame:host.bounds];
-    objc_setAssociatedObject(host, &RKOverlayKey, effect, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    [host addSubview:effect];
-    return effect;
-}
-void RKKeyboardHostDidSwapKeySet(UIView *host) {
-    if (!host) return;
-    RainbowEffectView *effect = objc_getAssociatedObject(host, &RKOverlayKey);
-    // No overlay means the user has never typed on this keyboard: there is no light to
-    // carry over, and this keyboard should not grow a view just for laying out.
-    if (!effect || ![effect keySetWasSwapped]) return;
-    [effect adoptSwappedKeySetForHost:host];
 }
 - (void)showRippleAtPoint:(CGPoint)point {
     [self showRippleAtPoint:point sourceView:nil];
