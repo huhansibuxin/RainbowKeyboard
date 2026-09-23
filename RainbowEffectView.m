@@ -646,8 +646,17 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     [group.key addSublayer:group.halo];
     [group.key addSublayer:group.edge];
     [pulse.container addSublayer:group.key];
-    RKKeyWaveVariants(faceOutline, 2.6, &group.outlinePlain, &group.outerPlain, &group.framePlain);
-    RKKeyWaveVariants(faceOutline, 3.0, &group.outlineWide, &group.outerWide, &group.frameWide);
+    // The two variants go through locals: a property expression has no address to give.
+    UIBezierPath *outline = nil, *outer = nil;
+    CGRect variantFrame = CGRectZero;
+    RKKeyWaveVariants(faceOutline, 2.6, &outline, &outer, &variantFrame);
+    group.outlinePlain = outline;
+    group.outerPlain = outer;
+    group.framePlain = variantFrame;
+    RKKeyWaveVariants(faceOutline, 3.0, &outline, &outer, &variantFrame);
+    group.outlineWide = outline;
+    group.outerWide = outer;
+    group.frameWide = variantFrame;
     pulse.groups[index] = group;
     RKProbeCount(counts, groupsNew, 1);
     RKProbeCount(counts, layersNew, 4);
