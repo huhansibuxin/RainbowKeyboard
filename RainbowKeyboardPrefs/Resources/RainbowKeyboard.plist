@@ -232,6 +232,19 @@
 		</dict>
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
+			<key>label</key><string>背景霓虹跟随滑行</string>
+			<key>footerText</key><string>开启后，背景霓虹的光斑会从上一个按键的位置滑到当前按键，连续打字时像一块光跟着手指走。关闭后光斑直接出现在当前按键上、不发生位移，与更早的版本观感一致。需开启「背景霓虹扩散」；只影响背景霓虹的光斑，不影响键框与键面本身的亮灯。</string>
+		</dict>
+		<dict>
+			<key>cell</key><string>PSSwitchCell</string>
+			<key>defaults</key><string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string>
+			<key>key</key><string>AmbientGlide</string>
+			<key>label</key><string>背景霓虹跟随滑行</string>
+			<key>default</key><true/>
+		</dict>
+		<dict>
+			<key>cell</key><string>PSGroupCell</string>
 			<key>label</key><string>背景霓虹强度</string>
 			<key>footerText</key><string>只在三星风格中控制键缝与键框周围的扩散背光。调低背光更淡，以键框为主；调高像霓虹灯向外散光。需同时开启「背景霓虹扩散」与「启用扩散色带」；0 关闭背光，不关闭键框。</string>
 		</dict>

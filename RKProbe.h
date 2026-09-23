@@ -47,6 +47,8 @@ typedef struct {
     unsigned groupsReused;  // groups that were already built
     unsigned layersNew;     // layers created
     unsigned pathsNew;      // bezier paths built
+    double colorSec;        // of armSec, the part spent building/assigning colours
+    double animSec;         // of armSec, the part spent submitting animations
 } RKProbeCounts;
 
 #if RK_PROBE_ENABLED
@@ -64,6 +66,8 @@ typedef struct {
     double armSec;      // layer arming only
     double pressSec;    // the whole press path
     double gateSec;     // layout gate
+    double colorSec;    // of armSec, colours
+    double animSec;     // of armSec, animation submission
     const char *note;   // why this press had to build, when that is known
 } RKProbePress;
 
@@ -166,19 +170,22 @@ static inline void RKProbeFlush(void) {
     }
     if (!RKProbeBootWritten) RKProbeWriteBoot(f);
     unsigned n = RKProbeWarmN + RKProbeColdN;
+    // The totals are seconds and the field is microseconds -- the factor has to be here,
+    // otherwise every average prints as 0.0.
     fprintf(f, "RKPERF sum n=%u warm=%u arm=%.1fus press=%.1fus | cold=%u arm=%.1fus press=%.1fus | peak=%.1fus layers=%u paths=%u\n",
             n, RKProbeWarmN,
-            RKProbeWarmN ? RKProbeWarmArm / RKProbeWarmN : 0.0,
-            RKProbeWarmN ? RKProbeWarmPress / RKProbeWarmN : 0.0,
+            RKProbeWarmN ? RKProbeWarmArm / RKProbeWarmN * 1e6 : 0.0,
+            RKProbeWarmN ? RKProbeWarmPress / RKProbeWarmN * 1e6 : 0.0,
             RKProbeColdN,
-            RKProbeColdN ? RKProbeColdArm / RKProbeColdN : 0.0,
-            RKProbeColdN ? RKProbeColdPress / RKProbeColdN : 0.0,
-            RKProbeMaxPress, RKProbeLayersTotal, RKProbePathsTotal);
+            RKProbeColdN ? RKProbeColdArm / RKProbeColdN * 1e6 : 0.0,
+            RKProbeColdN ? RKProbeColdPress / RKProbeColdN * 1e6 : 0.0,
+            RKProbeMaxPress * 1e6, RKProbeLayersTotal, RKProbePathsTotal);
     for (unsigned i = 0; i < RKProbeRingCount; i++) {
         RKProbePress *p = &RKProbeRing[i];
-        fprintf(f, "RKPERF press#%u %s keys=%u new=%u reuse=%u layers=%u paths=%u arm=%.1fus press=%.1fus gate=%.2fus%s%s\n",
+        fprintf(f, "RKPERF press#%u %s keys=%u new=%u reuse=%u layers=%u paths=%u arm=%.1fus press=%.1fus gate=%.2fus col=%.1fus anim=%.1fus%s%s\n",
                 p->index, p->cold ? "cold" : "warm", p->keys, p->groupsNew, p->groupsReused,
                 p->layersNew, p->pathsNew, p->armSec * 1e6, p->pressSec * 1e6, p->gateSec * 1e6,
+                p->colorSec * 1e6, p->animSec * 1e6,
                 p->note ? " note=" : "", p->note ? p->note : "");
         RKProbeBytesWritten += 160;
     }
@@ -199,6 +206,8 @@ static inline void RKProbeRecordWave(NSInteger style, double armSec, double pres
     p->armSec = armSec;
     p->pressSec = pressSec;
     p->gateSec = RKProbeGateSec;
+    p->colorSec = c.colorSec;
+    p->animSec = c.animSec;
     RKProbeGateSec = 0;
     p->note = RKProbePendingNote;
     RKProbePendingNote = NULL;

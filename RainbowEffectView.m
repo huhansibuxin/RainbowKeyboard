@@ -3,6 +3,8 @@
 #import "RKNeonPress.h"
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
+#include <string.h>
+#include <stdlib.h>
 #import "RKPreferences.h"
 #import "RKProbe.h"
 static NSDictionary *RKReadPreferences(void) {
@@ -27,7 +29,7 @@ static BOOL RKIsWeTypeProcess(void) {
 // animation.
 enum { RKConstAmbientLocations, RKConstSpreadValues, RKConstSpreadKeyTimes,
        RKConstAmbientFadeValues, RKConstAmbientFadeKeyTimes, RKConstKeyFadeKeyTimes,
-       RKConstCount };
+       RKConstKeyFadeValues, RKConstCount };
 static NSArray *RKAnimConstant(NSUInteger index) {
     static NSArray *table[RKConstCount];
     static dispatch_once_t once;
@@ -38,8 +40,64 @@ static NSArray *RKAnimConstant(NSUInteger index) {
         table[RKConstAmbientFadeValues]   = @[@0, @1, @.9, @0];
         table[RKConstAmbientFadeKeyTimes] = @[@0, @.08, @.52, @1];
         table[RKConstKeyFadeKeyTimes]     = @[@0, @.12, @.38, @1];
+        // The key fade's shape without its peak. The peak depends on the press (the
+        // distance from the touch), so it is carried by the layer's own opacity instead
+        // and the animation is the same four numbers for every key, every press.
+        table[RKConstKeyFadeValues]       = @[@0, @1, @.72, @0];
     });
     return index < RKConstCount ? table[index] : nil;
+}
+// Core Animation gives every model-value write on a layer that is already in a tree an
+// implicit 0.25s animation, built on the spot from the layer's default actions. While the
+// effect rebuilt its layers on every press there was nothing to animate *from*, so this
+// never showed. The pool keeps its layers in the tree forever, so from 1.3.0 on every
+// re-armed value would have started an action: that is where the visible "the glow slides
+// from the last key to this one" came from, and it also means dozens of action objects --
+// and the transaction bookkeeping that goes with them -- were being created per keystroke
+// on layers that were supposed to be free to reuse.
+//
+// Answering NSNull for a key path means "no action", i.e. the write lands immediately.
+// The two animations this effect actually wants (the wave's own fade, and the ambient
+// bloom's travel) are added explicitly, so nothing here is lost.
+static NSDictionary *RKInstantActions(void) {
+    static NSDictionary *map;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        map = @{@"position": NSNull.null, @"bounds": NSNull.null, @"frame": NSNull.null,
+                @"opacity": NSNull.null, @"contents": NSNull.null,
+                @"path": NSNull.null, @"fillColor": NSNull.null, @"strokeColor": NSNull.null,
+                @"fillRule": NSNull.null, @"lineWidth": NSNull.null,
+                @"shadowColor": NSNull.null, @"shadowOpacity": NSNull.null,
+                @"shadowRadius": NSNull.null, @"shadowOffset": NSNull.null,
+                @"shadowPath": NSNull.null,
+                @"colors": NSNull.null, @"locations": NSNull.null,
+                @"startPoint": NSNull.null, @"endPoint": NSNull.null,
+                @"cornerRadius": NSNull.null, @"transform": NSNull.null};
+    });
+    return map;
+}
+static void RKDisableImplicitAnimations(CALayer *layer) {
+    layer.actions = RKInstantActions();
+}
+// The travel of the ambient bloom from the previous press's centre to this one's. Only
+// used when the user has asked for it (「背景霓虹跟随滑行」); the duration and curve match
+// what Core Animation's implicit action used to give, so switching it on preserves the
+// look the pooled build first produced by accident.
+static const CFTimeInterval RKAmbientGlideDuration = .25;
+// An opaque +1 CGColor for an HSB triple. Built through UIColor so the colour space stays
+// whatever the system picks for a hue -- the wide-gamut space on these devices, which
+// hand-rolled sRGB would not reproduce -- but returned as the CGColor alone, so the alpha
+// variants downstream are copies rather than a UIColor each.
+static CGColorRef RKHueColor(CGFloat hue, CGFloat saturation, CGFloat brightness) {
+    CGColorRef color = [UIColor colorWithHue:hue saturation:saturation brightness:brightness alpha:1].CGColor;
+    return CGColorRetain(color);
+}
+// An alpha variant as a +1 CGColor. -copyWithAlpha returns NULL for a colour space that
+// carries no alpha, and the result is handed to an array -- which would raise on a nil --
+// so a failed copy falls back to the opaque colour rather than to nothing.
+static CGColorRef RKCopiedAlpha(CGColorRef base, CGFloat alpha) {
+    CGColorRef copy = CGColorCreateCopyWithAlpha(base, alpha);
+    return copy ?: CGColorRetain(base);
 }
 // Everything the drawing path needs, resolved once per configuration change instead of
 // being looked up in two dictionaries on every keystroke. The old code spent roughly 42
@@ -57,6 +115,7 @@ typedef struct {
     BOOL keyboardEnabled;          // WeChatKeyboard or NativeKeyboard, whichever this process is
     BOOL ambientGlow;
     BOOL backgroundFeedback;
+    BOOL ambientGlide;             // let the ambient bloom travel from press to press
     NSInteger style;
     NSInteger colorMode;
     CGFloat opacity;
@@ -108,9 +167,16 @@ typedef struct {
 // ---------------------------------------------------------------------------
 @interface RKKeyWaveGroup : NSObject
 @property(nonatomic,strong) CALayer *key;
+// The key's opacity is the press's peak for this key; the fade animation lives on this
+// layer instead, so the animation is one shared constant curve rather than four freshly
+// boxed numbers per key per press.
+@property(nonatomic,strong) CALayer *fader;
 @property(nonatomic,strong) CAShapeLayer *halo;
 @property(nonatomic,strong) CAGradientLayer *edge;
 @property(nonatomic,strong) CAShapeLayer *rim;
+// Kept and rewritten in place: -colors copies whatever array it is handed, so building a
+// new two-element array on every press only adds an allocation.
+@property(nonatomic,strong) NSMutableArray *edgeColors;
 @property(nonatomic,strong) CAKeyframeAnimation *fade;
 // Two geometry variants: the key under the finger is drawn with a 3pt rim instead of
 // 2.6pt, which moves its frames and its outline by half a point.
@@ -127,6 +193,9 @@ typedef struct {
 @property(nonatomic,strong) CALayer *ambient;
 @property(nonatomic,strong) NSMutableArray<CALayer *> *fields;
 @property(nonatomic,strong) NSMutableArray<CAGradientLayer *> *blooms;
+// Rewritten in place per press; -colors copies what it is given, so the buffer is only
+// there to save the two five-element array allocations a press used to cost.
+@property(nonatomic,strong) NSMutableArray *bloomColorBuffer;
 @property(nonatomic,strong) NSMutableArray *groups;   // index-aligned with keyFrames; NSNull until lit
 @property(nonatomic) CFTimeInterval activeUntil;      // when nothing of this pulse still draws
 @end
@@ -155,14 +224,25 @@ static void RKKeyWaveVariants(UIBezierPath *faceOutline, CGFloat rimWidth,
 
 // Puts a variant on its layers. Frames and paths are only touched when the variant
 // actually changes, because re-assigning an identical path makes a shape layer redraw.
+// Everything that is a function of the variant - the frames, the outline paths, the rim
+// width and the shadow's outline - is written here and nowhere else, so the press path
+// never has to.
 static void RKInstallKeyWaveVariant(RKKeyWaveGroup *group, char variant) {
     if (group.installedVariant == variant) return;
     BOOL wide = variant == 2;
     group.key.frame = wide ? group.frameWide : group.framePlain;
-    group.halo.frame = group.key.bounds;
-    group.edge.frame = group.key.bounds;
-    group.rim.frame = group.key.bounds;
+    group.fader.frame = group.key.bounds;
+    group.halo.frame = group.fader.bounds;
+    group.edge.frame = group.fader.bounds;
+    group.rim.frame = group.fader.bounds;
     group.halo.path = (wide ? group.outlineWide : group.outlinePlain).CGPath;
+    // Without a shadow path the halo's shadow has no outline to use, so the layer (and
+    // its transparent surroundings) is re-rasterised offscreen on every frame it is
+    // visible. The shape is already known, so hand it over: same blur, no per-frame
+    // offscreen pass. This is a battery cost, not a main-thread one.
+    group.halo.shadowPath = group.halo.path;
+    // 2.6pt plain / 3.0pt under the finger, doubled because the halo is a centred stroke.
+    group.halo.lineWidth = (wide ? 3.0 : 2.6) * 2;
     group.rim.path = (wide ? group.outerWide : group.outerPlain).CGPath;
     group.installedVariant = variant;
 }
@@ -236,6 +316,10 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     // since every pooled frame is expressed in this view's coordinates).
     NSMutableArray<RKWavePulse *> *_wavePulses;
     CGRect _poolBounds;
+    // self.keyFrames as a flat C array. Both passes over the key table run on the press
+    // path, between the touch and the frame being drawn, so unboxing is worth avoiding.
+    CGRect *_keyFrameRects;
+    NSUInteger _keyFrameRectCount;
 }
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
@@ -261,6 +345,7 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
         (__bridge const void *)self, (__bridge CFStringRef)RKPreferencesChangedNotification, NULL);
     if (_gutterPath) CGPathRelease(_gutterPath);
+    if (_keyFrameRects) free(_keyFrameRects);
 }
 - (void)reloadConfiguration {
     self.config = RKReadPreferences();
@@ -275,6 +360,9 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     p.keyboardEnabled = [self flag:weType ? @"WeChatKeyboard" : @"NativeKeyboard"];
     p.ambientGlow = [self flag:@"AmbientGlow"];
     p.backgroundFeedback = [self flag:@"BackgroundFeedback"];
+    // Absent means on, which is what -flag: already answers, so an install that has never
+    // seen the switch keeps the travel the pooled build introduced.
+    p.ambientGlide = [self flag:@"AmbientGlide"];
     p.style = (NSInteger)[self number:@"EffectStyle" fallback:0 low:0 high:2];
     p.colorMode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
     p.opacity = [self number:@"Opacity" fallback:.65 low:0 high:1];
@@ -294,6 +382,10 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     p.backgroundStrengthWide = [self number:@"BackgroundStrength" fallback:.28 low:0 high:.6];
     p.backgroundDurationWide = [self number:@"BackgroundDuration" fallback:.65 low:.1 high:1.5];
     p.ambientStrength = [self number:@"AmbientStrength" fallback:.85 low:0 high:1];
+    // Only a real change drops the pool. -refreshConfigurationIfStale re-resolves at most
+    // once a second, so dropping unconditionally here would make the first press after
+    // every second a cold one. Comparing is a few dozen bytes of memcmp once a second.
+    if (memcmp(&_params, &p, sizeof(p)) != 0) [self discardWavePool];
     _params = p;
     _configResolvedAt = CFAbsoluteTimeGetCurrent();
 }
@@ -376,6 +468,14 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
 - (void)setKeyFrames:(NSArray<NSValue *> *)keyFrames {
     if ([_keyFrames isEqualToArray:keyFrames]) return;
     _keyFrames = [keyFrames copy];
+    // Rebuild the flat table alongside it. The two must never drift: every hot read uses
+    // the C array, the cached-path cache and the settings page read the array.
+    if (_keyFrameRects) { free(_keyFrameRects); _keyFrameRects = NULL; }
+    _keyFrameRectCount = _keyFrames.count;
+    if (_keyFrameRectCount) {
+        _keyFrameRects = malloc(sizeof(CGRect) * _keyFrameRectCount);
+        for (NSUInteger i = 0; i < _keyFrameRectCount; i++) _keyFrameRects[i] = _keyFrames[i].CGRectValue;
+    }
     _gutterPathValid = NO;
     // The pool is indexed by position in this array and holds this layout's geometry, so
     // a new key set means a new pool.
@@ -420,6 +520,7 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     RKWavePulse *pulse = [RKWavePulse new];
     pulse.container = [CALayer layer];
     pulse.container.name = @"rkWavePulse";
+    RKDisableImplicitAnimations(pulse.container);
     pulse.container.frame = self.bounds;
     // No pulse mask here: the old code masked the pulse only to preserve black key faces,
     // and that feature is gone -- -preservesBlackFaces is a constant NO, so the branch that
@@ -488,20 +589,25 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
         return;
     }
     CGFloat brightness = _params.brightness;
+    BOOL justBuilt = NO;
     if (!pulse.ambient) {
+        justBuilt = YES;
         pulse.ambient = [CALayer layer];
         pulse.ambient.name = @"keyboardAmbientGlow";
+        RKDisableImplicitAnimations(pulse.ambient);
         pulse.ambient.frame = self.bounds;
         [pulse.container addSublayer:pulse.ambient];
         // Solid black mode has backlighting only; the optional wash belongs to other themes.
         for (NSUInteger pass = [self preservesBlackFaces] ? 1 : 0; pass < 2; pass++) {
             CALayer *field = [CALayer layer];
             field.name = pass ? @"gutterLight" : @"keyFaceWash";
+            RKDisableImplicitAnimations(field);
             field.frame = self.bounds;
             [pulse.ambient addSublayer:field];
             if (pass) field.mask = [self gutterMaskForField:field];
             CAGradientLayer *bloom = [CAGradientLayer layer];
             bloom.type = kCAGradientLayerRadial;
+            RKDisableImplicitAnimations(bloom);
             bloom.startPoint = CGPointMake(.5, .5);
             bloom.endPoint = CGPointMake(1, 1);
             bloom.locations = RKAnimConstant(RKConstAmbientLocations);
@@ -513,20 +619,57 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
         }
     }
     CGRect bloomFrame = CGRectMake(origin.x - radius, origin.y - radius, radius * 2, radius * 2);
+    CGPoint bloomCentre = CGPointMake(origin.x, origin.y);
+    // Three base colours for the press, not six: both blooms tint the same hues and differ
+    // only in how much of them is allowed to show. Returning a +1 CGColor keeps the colour
+    // space the system chose for the hue instead of routing it back through UIColor.
+    CGColorRef inner = RKHueColor(hue, [self neonSaturation:.82], brightness);
+    CGColorRef middle = RKHueColor(mode == 1 ? hue : fmod(hue + .13, 1), [self neonSaturation:.75], brightness);
+    CGColorRef outer = RKHueColor(mode == 1 ? hue : fmod(hue + .25, 1), [self neonSaturation:.9], brightness);
     for (NSUInteger pass = 0; pass < pulse.blooms.count; pass++) {
         CAGradientLayer *bloom = pulse.blooms[pass];
-        if (!CGRectEqualToRect(bloom.frame, bloomFrame)) bloom.frame = bloomFrame;
+        if (!CGRectEqualToRect(bloom.frame, bloomFrame)) {
+            // The bloom is re-centred on the key that was just pressed. With implicit
+            // actions disabled the write lands at once -- that is what "no travel" looks
+            // like, and it is exactly what the build before the pool did (it rebuilt the
+            // bloom instead of moving one, so there was never an old centre to animate
+            // from). With travel on, the move is re-created as an explicit animation that
+            // resumes from wherever the last one had got to, so fast typing keeps the
+            // continuous follow the pooled build produced.
+            CGPoint previous = bloom.position;
+            if ([bloom animationForKey:@"ambientGlide"]) {
+                CALayer *shown = bloom.presentationLayer;
+                if (shown) previous = shown.position;
+            }
+            bloom.frame = bloomFrame;
+            if (!justBuilt && _params.ambientGlide) {
+                CABasicAnimation *glide = [CABasicAnimation animationWithKeyPath:@"position"];
+                glide.fromValue = [NSValue valueWithCGPoint:previous];
+                glide.toValue = [NSValue valueWithCGPoint:bloomCentre];
+                glide.duration = RKAmbientGlideDuration;
+                glide.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionDefault];
+                [bloom addAnimation:glide forKey:@"ambientGlide"];
+            }
+        }
         CGFloat level = alpha * (pass ? 1 : .24);
-        UIColor *inner = [UIColor colorWithHue:hue saturation:[self neonSaturation:.82] brightness:brightness alpha:1];
-        UIColor *middle = [UIColor colorWithHue:mode == 1 ? hue : fmod(hue + .13, 1)
-                                    saturation:[self neonSaturation:.75] brightness:brightness alpha:1];
-        UIColor *outer = [UIColor colorWithHue:mode == 1 ? hue : fmod(hue + .25, 1)
-                                   saturation:[self neonSaturation:.9] brightness:brightness alpha:1];
-        bloom.colors = @[(id)[inner colorWithAlphaComponent:level * .22].CGColor,
-            (id)[inner colorWithAlphaComponent:level * .6].CGColor,
-            (id)[middle colorWithAlphaComponent:level].CGColor,
-            (id)[outer colorWithAlphaComponent:level * .5].CGColor,
-            (id)[outer colorWithAlphaComponent:0].CGColor];
+        NSMutableArray *colors = pulse.bloomColorBuffer;
+        if (!colors) {
+            colors = [NSMutableArray arrayWithCapacity:5];
+            for (NSUInteger i = 0; i < 5; i++) [colors addObject:NSNull.null];
+            pulse.bloomColorBuffer = colors;
+        }
+        CGColorRef ramp[5] = {
+            RKCopiedAlpha(inner, level * .22),
+            RKCopiedAlpha(inner, level * .6),
+            RKCopiedAlpha(middle, level),
+            RKCopiedAlpha(outer, level * .5),
+            RKCopiedAlpha(outer, 0),
+        };
+        for (NSUInteger i = 0; i < 5; i++) {
+            colors[i] = (__bridge id)ramp[i];
+            CGColorRelease(ramp[i]);
+        }
+        bloom.colors = colors;
         CAKeyframeAnimation *spread = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
         spread.values = RKAnimConstant(RKConstSpreadValues);
         spread.keyTimes = RKAnimConstant(RKConstSpreadKeyTimes);
@@ -538,10 +681,14 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
         fade.duration = duration;
         [bloom addAnimation:fade forKey:@"ambientFade"];
     }
+    CGColorRelease(inner);
+    CGColorRelease(middle);
+    CGColorRelease(outer);
 }
 - (void)showKeyWaveAtPoint:(CGPoint)point hue:(CGFloat)hue mode:(NSInteger)mode
                  startedAt:(double)startedAt {
-    if (!self.keyFrames.count) return;
+    const NSUInteger keyCount = _keyFrameRectCount;
+    if (!keyCount || !_keyFrameRects) return;
     double armStart = RKProbeTic();
     RKProbeCounts counts = {0};
     CGFloat alpha = _params.opacity;
@@ -550,63 +697,78 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     CGFloat travel = _params.backgroundDurationKeyWave;
     CGFloat spread = _params.spread;
     CGFloat reach = _params.backgroundRadius * spread / 2;
-    CGFloat softness = _params.softness;
     CGFloat band = _params.backgroundBand;
     CGFloat strength = _params.backgroundStrengthKeyWave;
     CGFloat core = _params.core;
     BOOL propagate = _params.backgroundFeedback;
     CGRect pressed = CGRectNull;
+    NSUInteger pressedIndex = NSNotFound;
     CGFloat nearest = CGFLOAT_MAX;
-    for (NSValue *value in self.keyFrames) {
-        CGRect rect = value.CGRectValue;
+    for (NSUInteger i = 0; i < keyCount; i++) {
+        CGRect rect = _keyFrameRects[i];
         CGFloat dx = MAX(MAX(CGRectGetMinX(rect) - point.x, 0), point.x - CGRectGetMaxX(rect));
         CGFloat dy = MAX(MAX(CGRectGetMinY(rect) - point.y, 0), point.y - CGRectGetMaxY(rect));
         CGFloat distance = hypot(dx, dy);
-        if (distance < nearest) { nearest = distance; pressed = rect; }
+        if (distance < nearest) { nearest = distance; pressed = rect; pressedIndex = i; }
     }
     // Ignore touches in padding / language-switch strips outside the actual keys.
-    if (CGRectIsNull(pressed) || nearest > 14) return;
+    if (pressedIndex == NSNotFound || nearest > 14) return;
     CGPoint origin = CGPointMake(CGRectGetMidX(pressed), CGRectGetMidY(pressed));
     RKWavePulse *pulse = [self wavePulseForArmingWithLimit:MAX((NSUInteger)1, _params.maxEffects)];
     CFTimeInterval now = [pulse.container convertTime:CACurrentMediaTime() fromLayer:nil];
     CGFloat tail = duration * (.45 + band);
     [self armAmbientOnPulse:pulse origin:origin radius:reach hue:hue mode:mode
                    duration:travel + tail counts:&counts];
-    NSUInteger index = 0;
-    for (NSValue *value in self.keyFrames) {
-        CGRect rect = value.CGRectValue;
-        NSUInteger keyIndex = index++;
-        BOOL touched = CGRectEqualToRect(rect, pressed);
+    double colorSec = 0, animSec = 0;
+    for (NSUInteger keyIndex = 0; keyIndex < keyCount; keyIndex++) {
+        CGRect rect = _keyFrameRects[keyIndex];
+        BOOL touched = keyIndex == pressedIndex;
         CGFloat distance = hypot(CGRectGetMidX(rect) - origin.x, CGRectGetMidY(rect) - origin.y);
         if ((!propagate && !touched) || distance > reach) continue;
         CGFloat progress = MIN(1, distance / reach);
         CGFloat keyHue = mode == 1 ? hue : fmod(hue + progress * .24, 1);
-        UIColor *first = [UIColor colorWithHue:keyHue saturation:[self neonSaturation:.78] brightness:brightness alpha:1];
-        UIColor *last = [UIColor colorWithHue:mode == 1 ? hue : fmod(keyHue + .12, 1)
-                                 saturation:[self neonSaturation:.9] brightness:brightness alpha:1];
-        CGFloat rimWidth = touched ? 3.0 : 2.6;
         // Geometry: reused if this key has been lit before, built once if not. Everything
-        // below this line is a value write on layers that already exist.
+        // below this line is a value write on layers that already exist, and with the
+        // implicit actions disabled each write lands without building a default animation.
         RKKeyWaveGroup *group = [self keyWaveGroupInPulse:pulse index:keyIndex rect:rect counts:&counts];
         RKInstallKeyWaveVariant(group, touched ? 2 : 1);
-        group.halo.fillColor = [self preservesBlackFaces] ? UIColor.clearColor.CGColor :
-            [first colorWithAlphaComponent:touched ? core * .45 : strength * .12].CGColor;
-        group.halo.strokeColor = [first colorWithAlphaComponent:.7].CGColor;
-        group.halo.lineWidth = rimWidth * 2;
-        group.halo.shadowColor = first.CGColor;
-        group.halo.shadowRadius = softness * .6;
-        group.halo.shadowOpacity = .8;
-        group.edge.colors = @[(id)first.CGColor, (id)last.CGColor];
-
-        CGFloat peak = alpha * (1 - progress * .42);
+        double colorStart = RKProbeTic();
+        // The rim width, the shadow's radius and its outline are functions of the variant
+        // or the configuration, so they are written where those are. What is left here is
+        // the hue, and each alpha variant is a copy of one CGColor rather than another
+        // UIColor plus the CGColor that comes out of it.
+        CGColorRef first = RKHueColor(keyHue, [self neonSaturation:.78], brightness);
+        CGColorRef last = RKHueColor(mode == 1 ? hue : fmod(keyHue + .12, 1), [self neonSaturation:.9], brightness);
+        if ([self preservesBlackFaces]) {
+            group.halo.fillColor = UIColor.clearColor.CGColor;
+        } else {
+            CGColorRef fill = RKCopiedAlpha(first, touched ? core * .45 : strength * .12);
+            group.halo.fillColor = fill;
+            CGColorRelease(fill);
+        }
+        CGColorRef stroke = RKCopiedAlpha(first, .7);
+        group.halo.strokeColor = stroke;
+        CGColorRelease(stroke);
+        group.halo.shadowColor = first;
+        group.edgeColors[0] = (__bridge id)first;
+        group.edgeColors[1] = (__bridge id)last;
+        group.edge.colors = group.edgeColors;
+        CGColorRelease(first);
+        CGColorRelease(last);
+        colorSec += RKProbeTic() - colorStart;
+        // The fade's shape and duration are constants or configuration, set when the group
+        // was built; only the start time moves per key. The peak rides on the layer's own
+        // opacity, which is why the animation can be one shared curve.
+        group.key.opacity = alpha * (1 - progress * .42);
+        double animStart = RKProbeTic();
         CAKeyframeAnimation *fade = group.fade;
-        fade.values = @[@0, @(peak), @(peak * .72), @0];
-        fade.keyTimes = RKAnimConstant(RKConstKeyFadeKeyTimes);
-        fade.duration = tail;
         fade.beginTime = now + progress * travel;
-        [group.key addAnimation:fade forKey:@"keyWave"];
+        [group.fader addAnimation:fade forKey:@"keyWave"];
+        animSec += RKProbeTic() - animStart;
         counts.keys++;
     }
+    counts.colorSec = colorSec;
+    counts.animSec = animSec;
     // Nothing is torn down here any more: the pulse stays in the tree (invisible, its
     // model opacity is 0) and the next press re-arms it. Removing it, and rebuilding it
     // for the press after that, was most of what a keystroke used to cost.
@@ -614,10 +776,11 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     double armEnd = RKProbeTic();
     RKProbeRecordWave(0, armEnd - armStart, armEnd - startedAt, counts);
 }
-// One key's four layers, built on first use and kept afterwards. Both rim-width variants
+// One key's layers, built on first use and kept afterwards. Both rim-width variants
 // are built together, because which one is used depends on whether this key ends up being
-// the one under the finger. The halo's blur and the rim's fill rule are set once here:
-// they come from the configuration, not from the press.
+// the one under the finger. Everything that does not depend on the press -- the shadow's
+// blur and outline, the rim's fill rule, the fade's shape and start value -- is set once
+// here, so the press path only writes what actually moves.
 - (RKKeyWaveGroup *)keyWaveGroupInPulse:(RKWavePulse *)pulse index:(NSUInteger)index
                                    rect:(CGRect)rect counts:(RKProbeCounts *)counts {
     while (pulse.groups.count <= index) [pulse.groups addObject:NSNull.null];
@@ -631,20 +794,44 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     group.key = [CALayer layer];
     group.key.name = @"keyWave";
     group.key.opacity = 0;
+    RKDisableImplicitAnimations(group.key);
+    // Everything visual sits under this one, which carries the fade. The key above it
+    // holds the press's peak as its opacity, so the fade itself is a constant curve and
+    // the press has no per-key animation values to build.
+    group.fader = [CALayer layer];
+    group.fader.name = @"keyWaveFade";
+    // It is the layer the fade plays on, so its own value has to be the "off" state: the
+    // animation is removed when it finishes, and whatever the model holds then is what the
+    // key shows. (A layer's opacity defaults to 1, so leaving this out would leave every
+    // key that was ever lit visibly glowing for good.)
+    group.fader.opacity = 0;
+    RKDisableImplicitAnimations(group.fader);
     group.halo = [CAShapeLayer layer];
     group.halo.shadowOffset = CGSizeZero;
+    group.halo.shadowOpacity = .8;
+    // Configuration, not press: set once here, and again only if the configuration
+    // changes and the pool is rebuilt.
+    group.halo.shadowRadius = _params.softness * .6;
+    RKDisableImplicitAnimations(group.halo);
     group.edge = [CAGradientLayer layer];
     group.edge.startPoint = CGPointZero;
     group.edge.endPoint = CGPointMake(1, 1);
+    RKDisableImplicitAnimations(group.edge);
     group.rim = [CAShapeLayer layer];
     // A filled outer ring keeps its full visible width after the black-face
     // exclusion mask; a centered stroke would lose its inner half.
     group.rim.fillRule = kCAFillRuleEvenOdd;
     group.rim.fillColor = UIColor.whiteColor.CGColor;
+    RKDisableImplicitAnimations(group.rim);
     group.edge.mask = group.rim;
+    group.edgeColors = [NSMutableArray arrayWithObjects:NSNull.null, NSNull.null, nil];
     group.fade = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
-    [group.key addSublayer:group.halo];
-    [group.key addSublayer:group.edge];
+    group.fade.values = RKAnimConstant(RKConstKeyFadeValues);
+    group.fade.keyTimes = RKAnimConstant(RKConstKeyFadeKeyTimes);
+    group.fade.duration = _params.duration * (.45 + _params.backgroundBand);
+    [group.fader addSublayer:group.halo];
+    [group.fader addSublayer:group.edge];
+    [group.key addSublayer:group.fader];
     [pulse.container addSublayer:group.key];
     // The two variants go through locals: a property expression has no address to give.
     UIBezierPath *outline = nil, *outer = nil;
@@ -659,7 +846,7 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     group.frameWide = variantFrame;
     pulse.groups[index] = group;
     RKProbeCount(counts, groupsNew, 1);
-    RKProbeCount(counts, layersNew, 4);
+    RKProbeCount(counts, layersNew, 5);   // key, fader, halo, edge, rim
     RKProbeCount(counts, pathsNew, 5);   // the face outline plus inner/outer per variant
     return group;
 }

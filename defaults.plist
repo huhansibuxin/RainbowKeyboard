@@ -2,6 +2,7 @@
     Enabled = 1;
     EffectStyle = 0;
     AmbientGlow = 1;
+    AmbientGlide = 1;
     AmbientStrength = 0.85;
     ColorMode = 0;
     NeonSaturation = 0.72;
