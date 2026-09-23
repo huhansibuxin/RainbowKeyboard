@@ -6,7 +6,6 @@
 #include <string.h>
 #include <stdlib.h>
 #import "RKPreferences.h"
-#import "RKProbe.h"
 static NSDictionary *RKReadPreferences(void) {
     return RKReadEffectivePreferences();
 }
@@ -281,12 +280,10 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
 - (void)discardWavePool;
 - (RKWavePulse *)wavePulseForArmingWithLimit:(NSUInteger)limit;
 - (void)armAmbientOnPulse:(RKWavePulse *)pulse origin:(CGPoint)origin radius:(CGFloat)radius
-                      hue:(CGFloat)hue mode:(NSInteger)mode duration:(CGFloat)duration
-                   counts:(RKProbeCounts *)counts;
+                      hue:(CGFloat)hue mode:(NSInteger)mode duration:(CGFloat)duration;
 - (RKKeyWaveGroup *)keyWaveGroupInPulse:(RKWavePulse *)pulse index:(NSUInteger)index
-                                   rect:(CGRect)rect counts:(RKProbeCounts *)counts;
-- (void)showKeyWaveAtPoint:(CGPoint)point hue:(CGFloat)hue mode:(NSInteger)mode
-                 startedAt:(double)startedAt;
+                                   rect:(CGRect)rect;
+- (void)showKeyWaveAtPoint:(CGPoint)point hue:(CGFloat)hue mode:(NSInteger)mode;
 @end
 @implementation RainbowEffectView {
     // Cached compound "gaps" path for the gutter light. It depends only on bounds and
@@ -483,8 +480,7 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     for (CALayer *pulse in self.layer.sublayers.copy) [pulse removeFromSuperlayer];
 }
 - (BOOL)updateKeyFramesForHost:(UIView *)host {
-    double probeStart = RKProbeTic();
-    if (!host) { RKProbeNoteGate(RKProbeTic() - probeStart); return NO; }
+    if (!host) return NO;
     // Three O(1) reads and no allocation, on every keystroke. This gate is the whole reason
     // the layout stamp can be bumped on every host layout pass: the stamp changing means the
     // frames must be re-collected, the stamp standing still means this keystroke -- during
@@ -502,7 +498,6 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     NSUInteger keyCount = RKRegisteredKeyCount();
     if (_keyFramesStampValid && _keyFramesStamp == stamp &&
         _keyFramesKeyCount == keyCount && CGRectEqualToRect(_keyFramesHostBounds, hostBounds)) {
-        RKProbeNoteGate(RKProbeTic() - probeStart);
         return NO;
     }
     // Where the overlay lives and how big it is there. Usually the key area itself; when a
@@ -533,7 +528,6 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     _keyFramesKeyCount = keyCount;
     _keyFramesHostBounds = hostBounds;
     _keyFramesStampValid = YES;
-    RKProbeNoteGate(RKProbeTic() - probeStart);
     return YES;
 }
 // A pulse is one wave container plus everything it drew. Created on demand, then kept and
@@ -557,8 +551,6 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     if (!_wavePulses.count) return;
     for (RKWavePulse *pulse in _wavePulses) [pulse.container removeFromSuperlayer];
     [_wavePulses removeAllObjects];
-    // Tells the probe why the press that follows had to build its layers.
-    RKProbeNoteNote("pool-drop");
 }
 // Picks the pulse this press draws into. While the pool has room, the press gets a pulse
 // of its own -- which is what the old code did, since it only ever dropped a pulse once the
@@ -596,8 +588,7 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
 // the key-gutter mask never does; the branch is left in place so the picture stays
 // recognisable against the old code.
 - (void)armAmbientOnPulse:(RKWavePulse *)pulse origin:(CGPoint)origin radius:(CGFloat)radius
-                      hue:(CGFloat)hue mode:(NSInteger)mode duration:(CGFloat)duration
-                   counts:(RKProbeCounts *)counts {
+                      hue:(CGFloat)hue mode:(NSInteger)mode duration:(CGFloat)duration {
     CGFloat strength = _params.ambientStrength;
     CGFloat alpha = _params.opacity * strength;
     BOOL wanted = _params.ambientGlow && _params.backgroundFeedback && alpha > 0;
@@ -637,7 +628,6 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
             [field addSublayer:bloom];
             [pulse.fields addObject:field];
             [pulse.blooms addObject:bloom];
-            RKProbeCount(counts, layersNew, 2);
         }
     }
     CGRect bloomFrame = CGRectMake(origin.x - radius, origin.y - radius, radius * 2, radius * 2);
@@ -707,16 +697,9 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     CGColorRelease(middle);
     CGColorRelease(outer);
 }
-- (void)showKeyWaveAtPoint:(CGPoint)point hue:(CGFloat)hue mode:(NSInteger)mode
-                 startedAt:(double)startedAt {
+- (void)showKeyWaveAtPoint:(CGPoint)point hue:(CGFloat)hue mode:(NSInteger)mode {
     const NSUInteger keyCount = _keyFrameRectCount;
     if (!keyCount || !_keyFrameRects) return;
-    double armStart = RKProbeTic();
-    RKProbeCounts counts = {0};
-    // Recorded so a log line can prove which value the renderer actually resolved, rather
-    // than which value Settings saved -- those two are not the same thing when a key is
-    // missing from the cross-process wire format.
-    counts.glide = _params.ambientGlide ? 1 : 0;
     CGFloat alpha = _params.opacity;
     CGFloat brightness = _params.brightness;
     CGFloat duration = _params.duration;
@@ -744,8 +727,7 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     CFTimeInterval now = [pulse.container convertTime:CACurrentMediaTime() fromLayer:nil];
     CGFloat tail = duration * (.45 + band);
     [self armAmbientOnPulse:pulse origin:origin radius:reach hue:hue mode:mode
-                   duration:travel + tail counts:&counts];
-    double colorSec = 0, animSec = 0;
+                   duration:travel + tail];
     for (NSUInteger keyIndex = 0; keyIndex < keyCount; keyIndex++) {
         CGRect rect = _keyFrameRects[keyIndex];
         BOOL touched = keyIndex == pressedIndex;
@@ -756,9 +738,8 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
         // Geometry: reused if this key has been lit before, built once if not. Everything
         // below this line is a value write on layers that already exist, and with the
         // implicit actions disabled each write lands without building a default animation.
-        RKKeyWaveGroup *group = [self keyWaveGroupInPulse:pulse index:keyIndex rect:rect counts:&counts];
+        RKKeyWaveGroup *group = [self keyWaveGroupInPulse:pulse index:keyIndex rect:rect];
         RKInstallKeyWaveVariant(group, touched ? 2 : 1);
-        double colorStart = RKProbeTic();
         // The rim width, the shadow's radius and its outline are functions of the variant
         // or the configuration, so they are written where those are. What is left here is
         // the hue, and each alpha variant is a copy of one CGColor rather than another
@@ -781,26 +762,18 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
         group.edge.colors = group.edgeColors;
         CGColorRelease(first);
         CGColorRelease(last);
-        colorSec += RKProbeTic() - colorStart;
         // The fade's shape and duration are constants or configuration, set when the group
         // was built; only the start time moves per key. The peak rides on the layer's own
         // opacity, which is why the animation can be one shared curve.
         group.key.opacity = alpha * (1 - progress * .42);
-        double animStart = RKProbeTic();
         CAKeyframeAnimation *fade = group.fade;
         fade.beginTime = now + progress * travel;
         [group.fader addAnimation:fade forKey:@"keyWave"];
-        animSec += RKProbeTic() - animStart;
-        counts.keys++;
     }
-    counts.colorSec = colorSec;
-    counts.animSec = animSec;
     // Nothing is torn down here any more: the pulse stays in the tree (invisible, its
     // model opacity is 0) and the next press re-arms it. Removing it, and rebuilding it
     // for the press after that, was most of what a keystroke used to cost.
     pulse.activeUntil = now + travel + tail + .05;
-    double armEnd = RKProbeTic();
-    RKProbeRecordWave(0, armEnd - armStart, armEnd - startedAt, counts);
 }
 // One key's layers, built on first use and kept afterwards. Both rim-width variants
 // are built together, because which one is used depends on whether this key ends up being
@@ -808,13 +781,10 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
 // blur and outline, the rim's fill rule, the fade's shape and start value -- is set once
 // here, so the press path only writes what actually moves.
 - (RKKeyWaveGroup *)keyWaveGroupInPulse:(RKWavePulse *)pulse index:(NSUInteger)index
-                                   rect:(CGRect)rect counts:(RKProbeCounts *)counts {
+                                   rect:(CGRect)rect {
     while (pulse.groups.count <= index) [pulse.groups addObject:NSNull.null];
     id existing = pulse.groups[index];
-    if (existing != NSNull.null) {
-        RKProbeCount(counts, groupsReused, 1);
-        return existing;
-    }
+    if (existing != NSNull.null) return existing;
     UIBezierPath *faceOutline = RKKeyboardKeyFacePath(rect);
     RKKeyWaveGroup *group = [RKKeyWaveGroup new];
     group.key = [CALayer layer];
@@ -871,16 +841,12 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     group.outerWide = outer;
     group.frameWide = variantFrame;
     pulse.groups[index] = group;
-    RKProbeCount(counts, groupsNew, 1);
-    RKProbeCount(counts, layersNew, 5);   // key, fader, halo, edge, rim
-    RKProbeCount(counts, pathsNew, 5);   // the face outline plus inner/outer per variant
     return group;
 }
 - (void)showRippleAtPoint:(CGPoint)point {
     [self showRippleAtPoint:point sourceView:nil];
 }
 - (void)showRippleAtPoint:(CGPoint)point sourceView:(UIView *)sourceView {
-    double pressStart = RKProbeTic();
     // Push-driven: the configuration is re-resolved by RKPreferencesChangedCallback, and
     // this call is only the fallback for a push missed while this extension was suspended.
     // On the ordinary path it is one float compare, where the old code took a lock and
@@ -911,7 +877,7 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
         // The wave pool owns its own capacity -- it re-arms a finished pulse, or the one
         // that finishes soonest -- so the generic eviction below is skipped here. Counting
         // pooled layers as if they were live waves would evict the pool itself.
-        [self showKeyWaveAtPoint:point hue:hue mode:mode startedAt:pressStart];
+        [self showKeyWaveAtPoint:point hue:hue mode:mode];
         return;
     }
     while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
