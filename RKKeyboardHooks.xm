@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import "RKKeyboardGeometry.h"
+#import "RainbowEffectView.h"
 
 // Exact-class hooks that populate the runtime registries in RKKeyboardGeometry.m.
 //
@@ -26,6 +27,10 @@
 - (void)layoutSubviews {
     %orig;
     RKRegisterKeyboardHost(RKViewSelf);
+    // A key-set swap driven by the 中英 / 123 / #+= buttons reaches this file and nowhere
+    // else: it replaces every keycap while producing no touch event of its own. Returns
+    // after two O(1) reads unless the set truly moved, so typing pays nothing.
+    RKKeyboardHostDidSwapKeySet(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
@@ -37,6 +42,9 @@
 - (void)layoutSubviews {
     %orig;
     RKRegisterKeyboardHost(RKViewSelf);
+    // Same reason as WBKeyboardView above: the native layout also swaps its whole key set
+    // (123 / #+=) without a touch reaching the effect.
+    RKKeyboardHostDidSwapKeySet(RKViewSelf);
 }
 - (void)didMoveToWindow {
     %orig;
