@@ -264,15 +264,18 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
 }
 - (BOOL)updateKeyFramesForHost:(UIView *)host {
     if (!host) return NO;
-    // Three O(1) reads and no allocation, on every keystroke. The stamp now moves only
-    // when the key set really changed -- the host's bounds changed, or keycaps the registry
-    // had not seen before arrived -- and the registered count moves whenever a different
-    // set is installed; either one changing means the frames must be re-collected, neither
-    // changing means this keystroke reuses them as they are. Bounds stay in the gate for
-    // rotation and for keyboards that resize when the candidate bar appears.
-    // The caller uses a YES here to re-raise the overlay, which is also why a key set that
-    // changed without any of these signals would look like the 17.9 failure: stale origin,
-    // or a light hidden under the freshly installed keycaps.
+    // Three O(1) reads and no allocation, on every keystroke. This gate is the whole reason
+    // the layout stamp can be bumped on every host layout pass: the stamp changing means the
+    // frames must be re-collected, the stamp standing still means this keystroke -- during
+    // which the host never laid out -- reuses them as they are. Bounds and the registered
+    // count stay in the gate as independent corroboration (rotation, candidate bar appearing,
+    // a key set installed without a host layout).
+    // Do not try to make the stamp itself conditional (1.2.0 did): on the WeType keyboard both
+    // key sets' keycaps stay registered across a switch, so neither "an unseen keycap arrived"
+    // nor "the count moved" fires when returning to the nine-key layout -- the frames would
+    // keep the retired layout's geometry, which is the 17.9 failure.
+    // The caller also reads a YES here to re-raise the overlay, so a missed change looks like
+    // a stale origin, or a light hidden under the freshly installed keycaps.
     CGRect hostBounds = host.bounds;
     uint64_t stamp = RKKeyboardLayoutStamp();
     NSUInteger keyCount = RKRegisteredKeyCount();

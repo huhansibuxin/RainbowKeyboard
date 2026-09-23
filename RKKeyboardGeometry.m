@@ -19,28 +19,26 @@
 static __weak UIView *RKKeyboardHostWeak;                        // WBKeyboardView / UIKeyboardLayoutStar
 static NSHashTable<UIView *> *RKKeyViewRegistry;                 // WBKeyView / UIKBKeyView
 static NSHashTable<UIView *> *RKCandidateContainerRegistry;      // WBTopBar / TUICandidateView / ...
-static uint64_t RKLayoutStamp = 1;                               // bumped only when the key set moves
-static CGRect RKLastHostBounds;                                  // bounds the stamp was last bumped for
-static BOOL RKLastHostBoundsValid;
+static uint64_t RKLayoutStamp = 1;                               // bumped on every host layout pass
 
-// The stamp answers exactly one question: "may the cached key-frame table still be
-// reused?" It is therefore bumped by the two things that actually replace or move the
-// keys, and by nothing else:
-//   * the host's bounds changing (rotation, candidate bar appearing),
-//   * a keycap registering that was not registered before (a different key set was
-//     installed -- a nine-key <-> full-layout switch creates new keycaps).
+// The stamp answers exactly one question: "may the cached key-frame table still be reused?"
 //
-// It used to be bumped on *every* host layout pass, which meant any relayout -- even one
-// that moved nothing -- invalidated the table and made the very next keystroke re-collect
-// all of it. The host is still registered on every pass; only the stamp is conditional.
+// It is bumped on *every* host layout pass, and 1.2.0 proved that has to stay unconditional.
+// That version narrowed it to "the host's bounds changed, or a keycap registered that the
+// registry had not seen before", on the theory that a relayout moving nothing must not
+// invalidate the table. On the WeType keyboard that narrowed pair goes stale while the keys
+// really do change: both key sets' keycaps are registered, and switching back to the nine-key
+// layout reuses the already-registered ones -- so nothing new registers and the registered
+// count does not move either. Symptom on device, reported as 17.9 coming back: nine-key ->
+// English -> back to nine-key, and the ripple keeps the *English* key geometry.
+//
+// A host layout pass is the one event present for every swap, so nothing else is needed
+// here. Whether this relayout actually moved anything is deliberately not asked: it cannot
+// be answered without collecting the table, which is exactly the cost the gate exists to
+// avoid.
 void RKRegisterKeyboardHost(UIView *host) {
     if (!host) return;
-    CGRect bounds = host.bounds;
-    if (!RKLastHostBoundsValid || !CGRectEqualToRect(bounds, RKLastHostBounds)) {
-        RKLastHostBounds = bounds;
-        RKLastHostBoundsValid = YES;
-        RKLayoutStamp++;
-    }
+    RKLayoutStamp++;
     // A keyboard that keeps a second, hidden host instance for the other layout must
     // not take the pointer over from the one that is actually on screen.
     if (!host.window || host.hidden || host.alpha < .01) return;
@@ -54,14 +52,7 @@ NSUInteger RKRegisteredKeyCount(void) { return RKKeyViewRegistry.count; }
 void RKRegisterKeyView(UIView *keyView) {
     if (!keyView) return;
     if (!RKKeyViewRegistry) RKKeyViewRegistry = [NSHashTable weakObjectsHashTable];
-    // A keycap this table has not seen before means a different key set is being
-    // installed, which is the one registration event the stamp must react to. Repeat
-    // registrations -- a keycap relaying out, re-entering the window -- are ignored, so
-    // ordinary typing cannot invalidate the table. (A key set that reuses the very same
-    // keycap objects is still caught by the registered count in the key-frame gate.)
-    if ([RKKeyViewRegistry containsObject:keyView]) return;
     [RKKeyViewRegistry addObject:keyView];
-    RKLayoutStamp++;
 }
 
 void RKRegisterCandidateContainer(UIView *container) {
