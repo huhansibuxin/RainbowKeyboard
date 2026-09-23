@@ -4,14 +4,24 @@ FOUNDATION_EXPORT NSArray<NSValue *> *RKKeyboardKeyFrames(UIView *host);
 FOUNDATION_EXPORT UIBezierPath *RKKeyboardKeyFacePath(CGRect keyFrame);
 FOUNDATION_EXPORT UIView *RKKeyboardEffectHost(UIView *view);
 
-// The view the effect should be attached to, and the rect it should occupy inside that
-// view. Normally this is the key area itself (the host, at host.bounds). When a candidate
-// bar is on screen and sits directly above the key area, the two share an ancestor, and
-// the effect is attached there instead with a frame covering both -- so the ambient glow
-// reaches the candidate row, which is where the eye is while typing, rather than stopping
-// at the top edge of the key area. Anything that does not read as that bar (wrong side,
-// wrong width, an implausible size, a different window) leaves the pair untouched.
+// Where the effect should be attached, and the rect it should occupy there.
+//
+// WeType offers exactly two candidate hosts, and they are the two its own view tree already
+// has: WBKeyboardView (the key panel alone) and WBMainInputView (the keyboard body, which
+// holds both the top bar -- the candidate row with its buttons -- and the key panel). The
+// body is registered by an exact-class hook like everything else in this file's registry, so
+// choosing it costs a weak read and never a walk up the superview chain. With a body
+// registered the overlay spans the whole keyboard, which is what lets the ambient glow reach
+// the candidate row; with none -- the native keyboard -- it stays on the key area.
+//
+// The window, the hidden/alpha state and an implausible size ratio are all re-checked here,
+// because the weak reference can briefly point at the outgoing body while a layout swap is
+// still in flight.
 FOUNDATION_EXPORT UIView *RKKeyboardOverlayHost(UIView *host, CGRect *outFrame);
+
+// The keyboard body: the container holding both the candidate bar and the key panel
+// (WBMainInputView on WeType). Registered from that class's layout pass, like the host.
+FOUNDATION_EXPORT void RKRegisterKeyboardBody(UIView *body);
 FOUNDATION_EXPORT UIView *RKKeyboardKeyViewAtFrame(UIView *host, CGRect keyFrame);
 
 // Runtime registries. Exact-class hooks (RKKeyboardHooks.xm) register the live

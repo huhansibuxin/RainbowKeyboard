@@ -20,7 +20,8 @@
 #define RKViewSelf ((UIView *)self)
 
 // ---------------------------------------------------------------------------
-// Keyboard host: the key area only (candidate bar and toolbars are separate views).
+// Keyboard host: the key area (candidate bar and toolbars are separate views), and the
+// keyboard body, which contains both -- the body is what lets the overlay reach the bar.
 // ---------------------------------------------------------------------------
 %hook WBKeyboardView                 // WeType: key panel container
 - (void)layoutSubviews {
@@ -41,6 +42,21 @@
 - (void)didMoveToWindow {
     %orig;
     if (RKViewSelf.window) RKRegisterKeyboardHost(RKViewSelf);
+}
+%end
+
+// The keyboard body: the container that holds both the candidate bar and the key panel.
+// Registering it is what lets the overlay span the whole keyboard instead of stopping at
+// the key panel's top edge. WeType's body is WBMainInputView; the native keyboard has no
+// equivalent registered here, so it keeps the key area as its overlay host.
+%hook WBMainInputView
+- (void)layoutSubviews {
+    %orig;
+    RKRegisterKeyboardBody(RKViewSelf);
+}
+- (void)didMoveToWindow {
+    %orig;
+    if (RKViewSelf.window) RKRegisterKeyboardBody(RKViewSelf);
 }
 %end
 

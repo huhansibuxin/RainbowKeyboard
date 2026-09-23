@@ -17,6 +17,7 @@
 // event delivery are all main-thread), so no lock is required.
 // ---------------------------------------------------------------------------
 static __weak UIView *RKKeyboardHostWeak;                        // WBKeyboardView / UIKeyboardLayoutStar
+static __weak UIView *RKKeyboardBodyWeak;                        // WBMainInputView: top bar + key panel
 static NSHashTable<UIView *> *RKKeyViewRegistry;                 // WBKeyView / UIKBKeyView
 static NSHashTable<UIView *> *RKCandidateContainerRegistry;      // WBTopBar / TUICandidateView / ...
 static uint64_t RKLayoutStamp = 1;                               // bumped on every host layout pass
@@ -43,6 +44,15 @@ void RKRegisterKeyboardHost(UIView *host) {
     // not take the pointer over from the one that is actually on screen.
     if (!host.window || host.hidden || host.alpha < .01) return;
     RKKeyboardHostWeak = host;
+}
+
+// The keyboard body, when the keyboard has one (WeType's WBMainInputView). Same liveness
+// rule as the host: a body kept off screen for the other layout must not take over from the
+// one the user is looking at.
+void RKRegisterKeyboardBody(UIView *body) {
+    if (!body) return;
+    if (!body.window || body.hidden || body.alpha < .01) return;
+    RKKeyboardBodyWeak = body;
 }
 
 uint64_t RKKeyboardLayoutStamp(void) { return RKLayoutStamp; }
@@ -228,63 +238,25 @@ NSArray<NSValue *> *RKKeyboardKeyFrames(UIView *host) {
     return frames;
 }
 
-// The largest candidate container currently on screen. Several of the hooked classes nest
-// (on WeType WBTopBar holds WBCandidateView, which holds prediction cells), so size picks
-// the outer bar rather than one of its children. The same liveness test the keycaps get is
-// applied, so a bar left behind by a retired layout cannot win on size.
-static UIView *RKLiveCandidateBar(void) {
-    UIView *best = nil;
-    CGFloat bestArea = 0;
-    for (UIView *container in RKCandidateContainerRegistry) {
-        if (!container.window || container.hidden || container.alpha < .01) continue;
-        CGRect bounds = container.bounds;
-        CGFloat area = bounds.size.width * bounds.size.height;
-        if (!isfinite(area) || area <= bestArea) continue;
-        bestArea = area;
-        best = container;
-    }
-    return best;
-}
-
-// The deepest view that is an ancestor of both. The shorter chain goes into a set first, so
-// the cost is the depth of the keyboard's view tree -- single digits -- and this only runs
-// when the key-frame table is being rebuilt, never per keystroke.
-static UIView *RKCommonAncestorView(UIView *a, UIView *b) {
-    if (!a || !b || a.window != b.window) return nil;
-    NSMutableSet<UIView *> *chain = [NSMutableSet setWithCapacity:8];
-    for (UIView *node = a; node; node = node.superview) [chain addObject:node];
-    for (UIView *node = b; node; node = node.superview)
-        if ([chain containsObject:node]) return node;
-    return nil;
-}
-
 UIView *RKKeyboardOverlayHost(UIView *host, CGRect *outFrame) {
     if (outFrame) *outFrame = host ? host.bounds : CGRectZero;
     if (!host) return nil;
-    UIView *bar = RKLiveCandidateBar();
-    if (!bar || !host.superview) return host;
-    UIView *ancestor = RKCommonAncestorView(host, bar);
-    // Sharing the window as an ancestor is not an ownership signal. Attaching the overlay
-    // at the window would let it cover unrelated UI, so that case keeps the key area.
-    if (!ancestor || ancestor == ancestor.window || ancestor.hidden || ancestor.alpha < .01)
-        return host;
-    CGRect keys = [host convertRect:host.bounds toView:ancestor];
-    CGRect candidates = [bar convertRect:bar.bounds toView:ancestor];
-    if (CGRectIsEmpty(keys) || CGRectIsEmpty(candidates)) return host;
-    // The bar has to read as the keyboard's own candidate row: above the keys, and spanning
-    // them. A floating prediction bubble, or a bar parked in a corner, fails both tests.
-    BOOL above = CGRectGetMaxY(candidates) <= CGRectGetMinY(keys) + 4;
-    BOOL spans = CGRectGetMinX(candidates) <= CGRectGetMinX(keys) + 24 &&
-                 CGRectGetMaxX(candidates) >= CGRectGetMaxX(keys) - 24;
-    if (!above || !spans) return host;
-    // A container caught mid-layout can report bounds that would stretch the glow across
-    // most of the screen; refusing those keeps a bad measurement from becoming a bad overlay.
-    if (candidates.size.width > keys.size.width * 1.5 ||
-        candidates.size.height > keys.size.height + 200) return host;
-    CGRect merged = CGRectUnion(keys, candidates);
-    if (merged.size.height > keys.size.height * 2) return host;
-    if (outFrame) *outFrame = merged;
-    return ancestor;
+    UIView *body = RKKeyboardBodyWeak;
+    // The body has to be on screen and genuinely contain the key area. The weak reference can
+    // briefly point at the outgoing body while a layout swap is in flight, and attaching there
+    // would park the overlay on a view that is no longer the keyboard.
+    if (!body || !body.window || body.hidden || body.alpha < .01 || body == host) return host;
+    // A containment check, not a search: the body came from the exact-class registry, so this
+    // only confirms the reference still points at an ancestor of the keys we were handed.
+    if (![host isDescendantOfView:body]) return host;
+    CGRect rect = body.bounds;
+    if (CGRectIsEmpty(rect)) return host;
+    // A body spanning the whole input set rather than the keyboard would drag the glow off the
+    // keys, so an implausible ratio falls back to the key area.
+    if (rect.size.width > host.bounds.size.width * 1.6 ||
+        rect.size.height > host.bounds.size.height * 3) return host;
+    if (outFrame) *outFrame = rect;
+    return body;
 }
 
 // Replaces the old recursive subview search: match the pressed key frame against the
