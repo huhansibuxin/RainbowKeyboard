@@ -11,8 +11,20 @@
 //  averaged separately and written to one line, so a single line carries both sides of
 //  the comparison: warm layers=0 with a small arm time, next to the cold arm time.
 //
-//  Written to rkperf.log inside this keyboard extension's own container:
+//  Written to rkperf.log inside the keyboard extension's own sandbox. The container UUID
+//  is not stable, and a keyboard extension may be given only its own container, so the
+//  location is resolved at runtime rather than hard-coded: TMPDIR first, then the home
+//  container's Documents / Library/Caches / tmp, then /tmp as a last resort. Every candidate
+//  is opened for append until one succeeds; the winner is recorded in the first line.
+//
 //      find /rootfs/var/mobile/Containers/Data/PluginKitPlugin -name rkperf.log
+//      grep RKPERF "$(find /rootfs/var/mobile/Containers/Data/PluginKitPlugin -name rkperf.log | head -1)"
+//
+//  The file opens with a "boot" line carrying the pid and the resolved path. That line is
+//  written when the dylib loads, before any keystroke, so its presence answers a question
+//  the press lines cannot: whether this code is in the process at all. No boot line means
+//  the dylib never loaded (stale keyboard process, or an inject filter that did not match);
+//  a boot line with no press lines means it loaded but the press path never ran.
 //
 //  Timing only covers work this tweak does synchronously. The file write happens after
 //  the clock is read and is not charged to anything.
@@ -42,6 +54,8 @@ typedef struct {
 #import <Foundation/Foundation.h>
 #import <QuartzCore/QuartzCore.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 
 typedef struct {
     unsigned index;
@@ -69,15 +83,65 @@ static unsigned RKProbeLayersTotal, RKProbePathsTotal;
 static double RKProbeGateSec;
 static const char *RKProbePendingNote;
 static unsigned long RKProbeBytesWritten;
+static int RKProbeBootWritten;
 
+// Resolves once, then costs a pointer compare on every later call. Candidates are tried in
+// order and the first that opens for append wins; that path is reused for the whole run so
+// the presses all land in one file. Nothing is written here -- this only decides where.
 static inline const char *RKProbePath(void) {
     static char path[1024];
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSString *tmp = NSTemporaryDirectory();
-        snprintf(path, sizeof(path), "%s/rkperf.log", tmp.UTF8String ?: "/tmp");
-    });
+    static int resolved;
+    if (resolved) return path;
+    resolved = 1;
+    const char *tmp = getenv("TMPDIR");
+    const char *home = getenv("HOME");
+    char cand[6][1024];
+    const char *list[6];
+    unsigned n = 0;
+    if (tmp && tmp[0]) {
+        snprintf(cand[n], sizeof(cand[0]), "%s/rkperf.log", tmp);
+        list[n] = cand[n]; n++;
+    }
+    if (home && home[0]) {
+        snprintf(cand[n], sizeof(cand[0]), "%s/Documents/rkperf.log", home);
+        list[n] = cand[n]; n++;
+        snprintf(cand[n], sizeof(cand[0]), "%s/Library/Caches/rkperf.log", home);
+        list[n] = cand[n]; n++;
+        snprintf(cand[n], sizeof(cand[0]), "%s/tmp/rkperf.log", home);
+        list[n] = cand[n]; n++;
+    }
+    snprintf(cand[n], sizeof(cand[0]), "/tmp/rkperf.log");
+    list[n] = cand[n]; n++;
+    for (unsigned i = 0; i < n; i++) {
+        FILE *probe = fopen(list[i], "a");
+        if (probe) {
+            fclose(probe);
+            snprintf(path, sizeof(path), "%s", list[i]);
+            return path;
+        }
+    }
+    // Nothing was writable. Keep the first candidate so the failure is still nameable.
+    snprintf(path, sizeof(path), "%s", list[0]);
     return path;
+}
+
+// One line that proves the dylib is in this process, written at load time -- that is the
+// point of it. A press line can only appear after a keystroke reaches the wave path, so on
+// its own it cannot distinguish "not injected" from "injected but idle".
+static inline void RKProbeWriteBoot(FILE *f) {
+    fprintf(f, "RKPERF boot pid=%d home=%s tmp=%s log=%s\n",
+            (int)getpid(),
+            (getenv("HOME") && getenv("HOME")[0]) ? getenv("HOME") : "?",
+            (getenv("TMPDIR") && getenv("TMPDIR")[0]) ? getenv("TMPDIR") : "?",
+            RKProbePath());
+    RKProbeBootWritten = 1;
+}
+
+__attribute__((constructor)) static void RKProbeOnLoad(void) {
+    FILE *f = fopen(RKProbePath(), "a");
+    if (!f) return;   // Sandbox may not be live this early; the first flush retries.
+    RKProbeWriteBoot(f);
+    fclose(f);
 }
 
 // Wall clock used for the measurements. Cheaper than CFAbsoluteTimeGetCurrent and
@@ -96,9 +160,11 @@ static inline void RKProbeFlush(void) {
         fclose(f);
         f = fopen(path, "w");
         RKProbeBytesWritten = 0;
+        RKProbeBootWritten = 0;   // the truncation dropped the load record; it goes back in below
         if (!f) return;
         fprintf(f, "RKPERF rotated (previous file exceeded %u bytes)\n", RK_PROBE_MAX_BYTES);
     }
+    if (!RKProbeBootWritten) RKProbeWriteBoot(f);
     unsigned n = RKProbeWarmN + RKProbeColdN;
     fprintf(f, "RKPERF sum n=%u warm=%u arm=%.1fus press=%.1fus | cold=%u arm=%.1fus press=%.1fus | peak=%.1fus layers=%u paths=%u\n",
             n, RKProbeWarmN,

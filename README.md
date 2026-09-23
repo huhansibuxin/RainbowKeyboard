@@ -1,7 +1,19 @@
 # RainbowKeyboard
 
 彩虹键盘光效越狱插件。`1.3.0` 把扩散光效的图层改为**复用**（不再每次按键现建约四十层），
-并内置度量以证明省了多少。
+并内置度量以证明省了多少。`1.3.1` 修正诊断日志的落盘位置，并新增一行启动自检。
+
+## 1.3.1 诊断日志落盘修正（行为与 1.3.0 相同）
+
+**问题**：1.3.0 的日志路径取自 `NSTemporaryDirectory()`，实机没有落到文件。键盘扩展只被
+授予**自己的容器**，而容器 UUID 每次安装或重启都可能变化 —— 写死或只试一个位置都可能落空。
+
+**做法**：
+- 运行时依次尝试容器内的若干位置（`$TMPDIR` → 容器 `Documents` → 容器 `Library/Caches`
+  → 容器 `tmp` → 系统 `/tmp`），逐个以追加方式打开，**取第一个能写的**，整轮沿用同一路径。
+- 新增**启动自检行**：dylib 载入时立即写入首行，记进程号与实际采用路径。按键记录只能在
+  一次按键真正走到扩散光效绘制路径之后出现，单凭它分不清「插件没进这个进程」与「进了但
+  没触发」；自检行在日志轮转后会自动补回。
 
 ## 1.3.0 扩散光效图层复用（含诊断）
 
@@ -28,11 +40,26 @@ Core Animation 提交，而不是算术。
 另每若干次汇总一行平均值，冷热两桶并列 —— 冷按键付的是旧开销，热按键是现在的开销，
 一行就能对照出来。
 
-日志在键盘扩展自身沙盒的临时目录（`RK_PROBE_ENABLED` 置 0 即整段移除，不留痕迹）：
+日志写在键盘扩展**自己的沙盒容器**里（`RK_PROBE_ENABLED` 置 0 即整段移除，不留痕迹）。
+路径在运行时解析：容器 UUID 每次安装或重启都可能变，而扩展只被授予自己的容器，
+所以依次尝试 `$TMPDIR`、容器 `Documents`、容器 `Library/Caches`、容器 `tmp`，
+取第一个能写的。文件首行是**启动自检**，在 dylib 载入时即写入：
+
+```
+RKPERF boot pid=96124 home=/private/var/mobile/Containers/Data/PluginKitPlugin/<UUID> \
+  tmp=/private/var/mobile/Containers/Data/PluginKitPlugin/<UUID>/tmp log=<实际路径>
+```
+
+**有自检行** = 插件确实进了这个进程；**只有自检行、没有按键行** = 加载成功但按键没走到
+扩散光效路径；**连文件都没有** = 插件没进这个进程（键盘进程是旧的，或注入过滤没命中）。
 
 ```sh
+# 找文件（容器 UUID 每次都可能不同，永远用 find 定位，不要记死路径）
 find /rootfs/var/mobile/Containers/Data/PluginKitPlugin -name rkperf.log
-cat "$(find /rootfs/var/mobile/Containers/Data/PluginKitPlugin -name rkperf.log | head -1)"
+# 看冷热对照的汇总行
+grep "RKPERF sum" "$(find /rootfs/var/mobile/Containers/Data/PluginKitPlugin -name rkperf.log | head -1)"
+# 看首次启动自检
+grep "RKPERF boot" "$(find /rootfs/var/mobile/Containers/Data/PluginKitPlugin -name rkperf.log | head -1)"
 ```
 
 **如实更正 1.2.0 第 3 项**：键缝遮罩层的两个调用点都被 `preservesBlackFaces` 把门，
