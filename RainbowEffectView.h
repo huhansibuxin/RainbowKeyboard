@@ -10,9 +10,14 @@
 // bounds stay identical, so the effect kept spreading from the retired key centres.
 // The gate is now the layout stamp plus the registered keycap count (both O(1)).
 - (BOOL)updateKeyFramesForHost:(UIView *)host;
-// Remembers the touch that may turn out to be a switch-key press (中英 / 123 / #+=).
-// Costs two stores per touch, so an ordinary keystroke still just draws its pulse.
-- (void)noteSwitchCandidateTouchAtPoint:(CGPoint)point;
+// The bottom function row of the current key layout, in overlay coordinates. A switch key
+// (中英 / 123 / #+=) always lives there and a letter key never does, so the touch path rules
+// out every ordinary keystroke with one rectangle test and nothing else.
+- (BOOL)pointIsInFunctionRow:(CGPoint)point;
+// Remembers a switch key's press without drawing anything. Two stores, no allocation. The
+// light belongs to the layout the key switches to, and RKKeyboardHostDidSwapKeySet draws it
+// there once the new key set is in place.
+- (void)armSwitchKeyPulseAtPoint:(CGPoint)point;
 - (void)reloadConfiguration;
 - (void)showRippleAtPoint:(CGPoint)point;
 - (void)showRippleAtPoint:(CGPoint)point sourceView:(UIView *)sourceView;
@@ -28,8 +33,8 @@ FOUNDATION_EXPORT RainbowEffectView *RKKeyboardEffectOverlay(UIView *host);
 // This is the only place that can notice a 中英 / 123 / #+= switch. Those keys replace the
 // whole key set while host.bounds stays identical, and the swap produces no touch of its
 // own, so the touch path can neither see it nor keep up with it. The three switch keys are
-// therefore handled here end to end: the light they would have drawn on the layout they are
-// leaving is dropped, and one pulse is drawn on the new layout instead.
+// handled across both: the touch path drops the light they would have drawn on the layout
+// they are leaving, and this hook draws one pulse on the new layout instead.
 //
 // The gate is the registered keycap count, which moves when the key set is swapped and
 // stays put while typing -- so an ordinary keystroke costs two O(1) reads and returns.
