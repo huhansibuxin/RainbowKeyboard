@@ -2,9 +2,27 @@
 #import "RKKeyboardGeometry.h"
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
+#include <string.h>
 
 static NSString *const RKPressScale = @"rkNeonPressScale";
 static NSString *const RKPressLift = @"rkNeonPressLift";
+
+// ---------------------------------------------------------------------------
+// Extracted-glyph cache.
+//
+// Extraction is the expensive half of a 轻弹 press: the keycap is rendered to a bitmap
+// and then every pixel of that bitmap is walked to separate ink from the flat key face.
+// The answer depends on nothing but those pixels and their size, so a repeat press of a
+// key whose freshly rendered pixels are byte-for-byte identical can reuse the previous
+// answer. The comparison is the whole bitmap (~25 KB memcmp), which makes the reuse exact
+// rather than a heuristic: identical pixels cannot produce a different foreground.
+//
+// That exactness is what makes it safe without knowing anything about the key's private
+// model. A case change (shift) and a 中/英 switch alter the glyph pixels, and the frame
+// changing alters the crop, so none of them can be served a stale glyph.
+// ---------------------------------------------------------------------------
+static NSMapTable<UIView *, NSDictionary *> *RKPressForegroundCache;
+static const NSUInteger RKPressForegroundCacheLimit = 8;
 
 @interface RKNeonPressLayer : CALayer
 @property(nonatomic) CGRect keyFrame;
@@ -78,6 +96,16 @@ static UIImage *RKPressForeground(UIView *overlay, UIView *keyView, CGRect face)
     CGColorSpaceRelease(space);
     if (!context) { free(pixels); return nil; }
     CGContextDrawImage(context, CGRectMake(0, 0, width, height), source.CGImage);
+    size_t byteCount = width * height * 4;
+    NSDictionary *cachedEntry = RKPressForegroundCache ? [RKPressForegroundCache objectForKey:keyView] : nil;
+    NSData *cachedBitmap = cachedEntry[@"bitmap"];
+    if (cachedBitmap.length == byteCount && memcmp(cachedBitmap.bytes, pixels, byteCount) == 0) {
+        // Same key, same pixels, same size: the previous extraction still describes it.
+        CGContextRelease(context);
+        free(pixels);
+        id cachedImage = cachedEntry[@"image"];
+        return cachedImage == NSNull.null ? nil : cachedImage;
+    }
     // Infer the flat key-face color from four inset corners, not the glyph center.
     CGFloat background[3];
     for (NSUInteger c = 0; c < 3; c++) {
@@ -92,18 +120,31 @@ static UIImage *RKPressForeground(UIView *overlay, UIView *keyView, CGRect face)
         background[c] = (samples[1] + samples[2]) / 2;
     }
     BOOL lightInk = (background[0] + background[1] + background[2]) / 3 < .5;
+    // The per-pixel pass below visits only the pixels that can carry ink. A pixel whose
+    // every channel sits closer to the key face than the .035 cutoff ends up fully
+    // transparent with all-zero RGB -- which is exactly what calloc already left in the
+    // buffer -- so it is skipped rather than given three divisions and three stores. Most
+    // of a keycap is flat key face, so this is where the loop's work used to go. The
+    // result is unchanged: a channel below the cutoff contributes a difference under .035,
+    // which can neither become the maximum nor survive the cutoff itself.
+    CGFloat denominator[3], cutoff[3];
+    for (NSUInteger c = 0; c < 3; c++) {
+        denominator[c] = MAX(.05, lightInk ? 1 - background[c] : background[c]);
+        cutoff[c] = .035 * denominator[c];
+    }
     NSUInteger ink = 0;
     for (size_t i = 0; i < width * height; i++) {
         uint8_t *pixel = pixels + i * 4;
         CGFloat alpha = 0;
         for (NSUInteger c = 0; c < 3; c++) {
             CGFloat value = pixel[c] / 255.0;
-            CGFloat difference = lightInk ? (value - background[c]) / MAX(.05, 1 - background[c]) :
-                (background[c] - value) / MAX(.05, background[c]);
-            alpha = MAX(alpha, difference);
+            CGFloat delta = lightInk ? value - background[c] : background[c] - value;
+            if (delta < cutoff[c]) continue;   // never lifts alpha, or pulls it down
+            CGFloat difference = delta / denominator[c];
+            if (difference > alpha) alpha = difference;
         }
+        if (alpha <= 0) continue;
         alpha = MIN(1, alpha);
-        if (alpha < .035) alpha = 0;
         if (alpha > .1) ink++;
         for (NSUInteger c = 0; c < 3; c++)
             pixel[c] = (uint8_t)lround(MIN(alpha, MAX(0, pixel[c] / 255.0 - background[c] * (1 - alpha))) * 255);
@@ -115,6 +156,12 @@ static UIImage *RKPressForeground(UIView *overlay, UIView *keyView, CGRect face)
     if (image) CGImageRelease(image);
     CGContextRelease(context);
     free(pixels);
+    // Keep the bitmap that produced this answer, not the answer alone: those bytes are
+    // what proves on the next press that the answer is still valid.
+    if (!RKPressForegroundCache) RKPressForegroundCache = [NSMapTable weakToStrongObjectsMapTable];
+    if (RKPressForegroundCache.count >= RKPressForegroundCacheLimit) [RKPressForegroundCache removeAllObjects];
+    [RKPressForegroundCache setObject:@{@"bitmap": [NSData dataWithBytes:pixels length:byteCount],
+        @"image": foreground ?: (id)NSNull.null} forKey:keyView];
     return foreground;
 }
 

@@ -40,6 +40,66 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     });
     return index < RKConstCount ? table[index] : nil;
 }
+// Everything the drawing path needs, resolved once per configuration change instead of
+// being looked up in two dictionaries on every keystroke. The old code spent roughly 42
+// resolved reads per keystroke -- each one a lookup in the 自用 table plus a lookup in the
+// live configuration, an -isKindOfClass:/respondsToSelector: probe and an unboxing -- on
+// values that only move when the user moves a slider. Measured on the drawing path, that
+// was the largest purely wasted cost left. Now the drawing path reads plain floats.
+//
+// Two parameters keep two entries because their call sites disagree on the *literal*
+// fallback (used only when the key is absent from the configuration): the wide-band
+// pass of the 鲜艳彩虹 style wants a wider, slower band than the key-wave pass.
+typedef struct {
+    BOOL enabled;
+    BOOL rippleEnabled;
+    BOOL keyboardEnabled;          // WeChatKeyboard or NativeKeyboard, whichever this process is
+    BOOL ambientGlow;
+    BOOL backgroundFeedback;
+    NSInteger style;
+    NSInteger colorMode;
+    CGFloat opacity;
+    CGFloat brightness;
+    CGFloat neonSaturation;        // the 0...1 factor the call sites multiply their base by
+    CGFloat hue;                   // the fixed hue, used when colorMode == 1
+    CGFloat duration;
+    CGFloat spread;
+    CGFloat softness;
+    CGFloat core;
+    NSUInteger maxEffects;
+    CGFloat pressBrightness;
+    CGFloat backgroundRadius;
+    CGFloat backgroundBand;
+    CGFloat backgroundStrengthKeyWave;   // key-wave pass, literal fallback .18
+    CGFloat backgroundDurationKeyWave;   // key-wave pass, literal fallback .4
+    CGFloat backgroundStrengthWide;      // wide-band pass, literal fallback .28
+    CGFloat backgroundDurationWide;      // wide-band pass, literal fallback .65
+    CGFloat ambientStrength;
+} RKRenderParams;
+
+// The Settings process posts this whenever anything is saved (RKPreferences.h and
+// RKCandidateTransport.h both end in notify_post of this name). Subscribing to it turns
+// the per-keystroke "has the configuration changed?" probe -- one lock plus two notify
+// round-trips -- into a push that only happens when there is actually something to apply.
+static NSString * const RKPreferencesChangedNotification = @"com.minis.rainbowkeyboard.changed";
+
+// A notification can still be missed, because this keyboard extension may be suspended
+// while the user is in Settings, and a resumed extension is not re-initialised. So the
+// configuration is additionally re-checked on a slow floor. That floor is a "how stale
+// may the applied look get" bound, not a poll: at most one check per second, on a path
+// that runs around ten times a second.
+static const CFTimeInterval RKConfigRefreshFloor = 1;
+
+static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *observer,
+                                         CFStringRef name, const void *object,
+                                         CFDictionaryRef userInfo) {
+    // The observer is this view and is not retained by the notification centre; the weak
+    // reference makes a callback that races with teardown a no-op instead of a dangling
+    // message.
+    __weak RainbowEffectView *view = (__bridge RainbowEffectView *)observer;
+    dispatch_async(dispatch_get_main_queue(), ^{ [view reloadConfiguration]; });
+}
+
 @interface RainbowEffectView ()
 @property(nonatomic,strong) NSDictionary *config;
 @property(nonatomic) CGFloat hue;
@@ -61,6 +121,15 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     uint64_t _keyFramesStamp;
     NSUInteger _keyFramesKeyCount;
     CGRect _keyFramesHostBounds;
+    // The resolved render parameters, and when they were last resolved (see
+    // RKConfigRefreshFloor).
+    RKRenderParams _params;
+    CFTimeInterval _configResolvedAt;
+    // One shared mask layer for the gutter light instead of a new CAShapeLayer per
+    // keystroke. The compound path it draws was already cached; the layer was not, so
+    // every press allocated a shape layer identical to the one before it.
+    CAShapeLayer *_gutterMaskLayer;
+    __weak CALayer *_gutterMaskHost;   // the field it is currently attached to as mask
 }
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
@@ -69,15 +138,64 @@ static NSArray *RKAnimConstant(NSUInteger index) {
         self.clipsToBounds = YES;
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadConfiguration) name:UIApplicationDidBecomeActiveNotification object:nil];
+        // Push, not poll: the configuration is re-resolved when Settings says it changed,
+        // so a keystroke never has to ask. Delivered immediately and cross-process.
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+            (__bridge const void *)self, RKPreferencesChangedCallback,
+            (__bridge CFStringRef)RKPreferencesChangedNotification, NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
         [self reloadConfiguration];
     }
     return self;
 }
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+    CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge const void *)self, (__bridge CFStringRef)RKPreferencesChangedNotification, NULL);
     if (_gutterPath) CGPathRelease(_gutterPath);
 }
-- (void)reloadConfiguration { self.config = RKReadPreferences(); }
+- (void)reloadConfiguration {
+    self.config = RKReadPreferences();
+    // Resolve everything once, here. Each field is the same value, with the same literal
+    // fallback and the same clamp, that its call site used to look up for itself, so this
+    // is a move and not a change. Two fields are resolved twice because their call sites
+    // disagree on the literal fallback; see RKRenderParams.
+    RKRenderParams p = (RKRenderParams){0};
+    BOOL weType = RKIsWeTypeProcess();
+    p.enabled = [self flag:@"Enabled"];
+    p.rippleEnabled = [self flag:@"RippleEnabled"];
+    p.keyboardEnabled = [self flag:weType ? @"WeChatKeyboard" : @"NativeKeyboard"];
+    p.ambientGlow = [self flag:@"AmbientGlow"];
+    p.backgroundFeedback = [self flag:@"BackgroundFeedback"];
+    p.style = (NSInteger)[self number:@"EffectStyle" fallback:0 low:0 high:2];
+    p.colorMode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
+    p.opacity = [self number:@"Opacity" fallback:.65 low:0 high:1];
+    p.brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
+    p.neonSaturation = [self number:@"NeonSaturation" fallback:.72 low:0 high:1];
+    p.hue = [self number:@"Hue" fallback:.55 low:0 high:1];
+    p.duration = [self number:@"Duration" fallback:.55 low:.15 high:1.2];
+    p.spread = [self number:@"Spread" fallback:2 low:.5 high:3];
+    p.softness = [self number:@"Softness" fallback:8 low:0 high:24];
+    p.core = [self number:@"CoreStrength" fallback:.5 low:0 high:1];
+    p.maxEffects = (NSUInteger)[self number:@"MaxEffects" fallback:4 low:1 high:8];
+    p.pressBrightness = [self number:@"PressBrightness" fallback:1 low:0 high:1];
+    p.backgroundRadius = [self number:@"BackgroundRadius" fallback:180 low:60 high:360];
+    p.backgroundBand = [self number:@"BackgroundBand" fallback:.55 low:.2 high:.85];
+    p.backgroundStrengthKeyWave = [self number:@"BackgroundStrength" fallback:.18 low:0 high:.6];
+    p.backgroundDurationKeyWave = [self number:@"BackgroundDuration" fallback:.4 low:.1 high:1.5];
+    p.backgroundStrengthWide = [self number:@"BackgroundStrength" fallback:.28 low:0 high:.6];
+    p.backgroundDurationWide = [self number:@"BackgroundDuration" fallback:.65 low:.1 high:1.5];
+    p.ambientStrength = [self number:@"AmbientStrength" fallback:.85 low:0 high:1];
+    _params = p;
+    _configResolvedAt = CFAbsoluteTimeGetCurrent();
+}
+// Called from the keystroke path, where it almost always just compares one float and
+// returns. A real re-resolution happens only when the settings-changed push arrives, or
+// at most once a second as the fallback for a push that was missed while suspended.
+- (void)refreshConfigurationIfStale {
+    if (CFAbsoluteTimeGetCurrent() - _configResolvedAt < RKConfigRefreshFloor) return;
+    [self reloadConfiguration];
+}
 - (CGFloat)number:(NSString *)key fallback:(CGFloat)fallback low:(CGFloat)low high:(CGFloat)high {
     // The literal shipped fallback yields to the frozen 自用 tuning for any key that table
     // defines, so a keyboard process which cannot reach the saved plist -- or a fresh
@@ -91,7 +209,8 @@ static NSArray *RKAnimConstant(NSUInteger index) {
 }
 - (BOOL)flag:(NSString *)key { return !self.config[key] || [self.config[key] boolValue]; }
 - (CGFloat)neonSaturation:(CGFloat)base {
-    return base * [self number:@"NeonSaturation" fallback:.72 low:0 high:1];
+    // Already resolved: no dictionary lookup left on this path.
+    return base * _params.neonSaturation;
 }
 - (BOOL)preservesBlackFaces {
     // 自定义键帽与底色已移除，键帽一律使用系统原生配色，不再保留黑色键面。
@@ -110,12 +229,21 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     _gutterPathValid = (built != NULL);
     return _gutterPath;
 }
-- (CAShapeLayer *)keyGutterMask {
-    CAShapeLayer *mask = [CAShapeLayer layer];
-    mask.frame = self.bounds;
-    mask.path = [self keyGutterPath];
-    mask.fillRule = kCAFillRuleEvenOdd;
-    return mask;
+// One shared layer, refitted and re-pathed on each use. The compound path itself is
+// already cached by -keyGutterPath; wrapping a brand-new CAShapeLayer around that same
+// path on every keystroke was all that remained of the per-press allocation here.
+- (CAShapeLayer *)gutterMaskForField:(CALayer *)field {
+    if (!_gutterMaskLayer) {
+        _gutterMaskLayer = [CAShapeLayer layer];
+        _gutterMaskLayer.fillRule = kCAFillRuleEvenOdd;
+    }
+    // A layer can mask only one layer at a time, so take it off whichever field used it
+    // last before handing it to this one.
+    if (_gutterMaskHost && _gutterMaskHost != field) _gutterMaskHost.mask = nil;
+    _gutterMaskLayer.frame = self.bounds;
+    _gutterMaskLayer.path = [self keyGutterPath];
+    _gutterMaskHost = field;
+    return _gutterMaskLayer;
 }
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -136,11 +264,15 @@ static NSArray *RKAnimConstant(NSUInteger index) {
 }
 - (BOOL)updateKeyFramesForHost:(UIView *)host {
     if (!host) return NO;
-    // Three O(1) reads and no allocation. The host is laid out again when it swaps key
-    // sets, and the registered keycap count moves when a different set is installed;
-    // either changing means the frames must be re-collected, neither changing means
-    // this keystroke can reuse them. Bounds stay in the gate for rotation and for
-    // keyboards that resize when the candidate bar appears.
+    // Three O(1) reads and no allocation, on every keystroke. The stamp now moves only
+    // when the key set really changed -- the host's bounds changed, or keycaps the registry
+    // had not seen before arrived -- and the registered count moves whenever a different
+    // set is installed; either one changing means the frames must be re-collected, neither
+    // changing means this keystroke reuses them as they are. Bounds stay in the gate for
+    // rotation and for keyboards that resize when the candidate bar appears.
+    // The caller uses a YES here to re-raise the overlay, which is also why a key set that
+    // changed without any of these signals would look like the 17.9 failure: stale origin,
+    // or a light hidden under the freshly installed keycaps.
     CGRect hostBounds = host.bounds;
     uint64_t stamp = RKKeyboardLayoutStamp();
     NSUInteger keyCount = RKRegisteredKeyCount();
@@ -157,11 +289,11 @@ static NSArray *RKAnimConstant(NSUInteger index) {
 }
 - (void)addAmbientGlowToPulse:(CALayer *)pulse origin:(CGPoint)origin radius:(CGFloat)radius
                          hue:(CGFloat)hue mode:(NSInteger)mode duration:(CGFloat)duration {
-    if (![self flag:@"AmbientGlow"] || ![self flag:@"BackgroundFeedback"]) return;
-    CGFloat strength = [self number:@"AmbientStrength" fallback:.85 low:0 high:1];
-    CGFloat alpha = [self number:@"Opacity" fallback:.65 low:0 high:1] * strength;
+    if (!_params.ambientGlow || !_params.backgroundFeedback) return;
+    CGFloat strength = _params.ambientStrength;
+    CGFloat alpha = _params.opacity * strength;
     if (alpha <= 0) return;
-    CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
+    CGFloat brightness = _params.brightness;
     CALayer *ambient = [CALayer layer];
     ambient.name = @"keyboardAmbientGlow";
     ambient.frame = self.bounds;
@@ -173,7 +305,7 @@ static NSArray *RKAnimConstant(NSUInteger index) {
         field.name = pass ? @"gutterLight" : @"keyFaceWash";
         field.frame = self.bounds;
         [ambient addSublayer:field];
-        if (pass) field.mask = [self keyGutterMask];
+        if (pass) field.mask = [self gutterMaskForField:field];
         CAGradientLayer *bloom = [CAGradientLayer layer];
         bloom.type = kCAGradientLayerRadial;
         bloom.frame = CGRectMake(origin.x - radius, origin.y - radius, radius * 2, radius * 2);
@@ -207,17 +339,17 @@ static NSArray *RKAnimConstant(NSUInteger index) {
 }
 - (void)showKeyWaveAtPoint:(CGPoint)point hue:(CGFloat)hue mode:(NSInteger)mode {
     if (!self.keyFrames.count) return;
-    CGFloat alpha = [self number:@"Opacity" fallback:.65 low:0 high:1];
-    CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
-    CGFloat duration = [self number:@"Duration" fallback:.55 low:.15 high:1.2];
-    CGFloat travel = [self number:@"BackgroundDuration" fallback:.4 low:.1 high:1.5];
-    CGFloat spread = [self number:@"Spread" fallback:2 low:.5 high:3];
-    CGFloat reach = [self number:@"BackgroundRadius" fallback:180 low:60 high:360] * spread / 2;
-    CGFloat softness = [self number:@"Softness" fallback:8 low:0 high:24];
-    CGFloat band = [self number:@"BackgroundBand" fallback:.55 low:.2 high:.85];
-    CGFloat strength = [self number:@"BackgroundStrength" fallback:.18 low:0 high:.6];
-    CGFloat core = [self number:@"CoreStrength" fallback:.5 low:0 high:1];
-    BOOL propagate = [self flag:@"BackgroundFeedback"];
+    CGFloat alpha = _params.opacity;
+    CGFloat brightness = _params.brightness;
+    CGFloat duration = _params.duration;
+    CGFloat travel = _params.backgroundDurationKeyWave;
+    CGFloat spread = _params.spread;
+    CGFloat reach = _params.backgroundRadius * spread / 2;
+    CGFloat softness = _params.softness;
+    CGFloat band = _params.backgroundBand;
+    CGFloat strength = _params.backgroundStrengthKeyWave;
+    CGFloat core = _params.core;
+    BOOL propagate = _params.backgroundFeedback;
     CGRect pressed = CGRectNull;
     CGFloat nearest = CGFLOAT_MAX;
     for (NSValue *value in self.keyFrames) {
@@ -234,7 +366,7 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     pulse.frame = self.bounds;
     // Clip the entire wave, including blurred shadows and overlapping presses,
     // so no colored pixels bleed through an opaque key face.
-    if ([self preservesBlackFaces]) pulse.mask = [self keyGutterMask];
+    if ([self preservesBlackFaces]) pulse.mask = [self gutterMaskForField:pulse];
     [self.layer addSublayer:pulse];
     CFTimeInterval now = [pulse convertTime:CACurrentMediaTime() fromLayer:nil];
     CGFloat tail = duration * (.45 + band);
@@ -306,28 +438,31 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     [self showRippleAtPoint:point sourceView:nil];
 }
 - (void)showRippleAtPoint:(CGPoint)point sourceView:(UIView *)sourceView {
-    [self reloadConfiguration];
-    BOOL weType = RKIsWeTypeProcess();
-    if (![self flag:@"Enabled"] || ![self flag:@"RippleEnabled"] || ![self flag:weType ? @"WeChatKeyboard" : @"NativeKeyboard"]) {
+    // Push-driven: the configuration is re-resolved by RKPreferencesChangedCallback, and
+    // this call is only the fallback for a push missed while this extension was suspended.
+    // On the ordinary path it is one float compare, where the old code took a lock and
+    // made two notify round-trips on every keystroke.
+    [self refreshConfigurationIfStale];
+    if (!_params.enabled || !_params.rippleEnabled || !_params.keyboardEnabled) {
         for (CALayer *l in self.layer.sublayers.copy) [l removeFromSuperlayer];
         return;
     }
-    NSInteger style = (NSInteger)[self number:@"EffectStyle" fallback:0 low:0 high:2];
+    NSInteger style = _params.style;
     if (style != self.lastStyle) {
         for (CALayer *layer in self.layer.sublayers.copy) [layer removeFromSuperlayer];
         self.lastStyle = style;
     }
-    CGFloat alpha = [self number:@"Opacity" fallback:.65 low:0 high:1];
-    CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
-    CGFloat duration = [self number:@"Duration" fallback:.55 low:.15 high:1.2];
-    CGFloat spread = [self number:@"Spread" fallback:2 low:.5 high:3];
-    CGFloat softness = [self number:@"Softness" fallback:8 low:0 high:24];
-    CGFloat core = [self number:@"CoreStrength" fallback:.5 low:0 high:1];
-    NSUInteger limit = (NSUInteger)[self number:@"MaxEffects" fallback:4 low:1 high:8];
+    CGFloat alpha = _params.opacity;
+    CGFloat brightness = _params.brightness;
+    CGFloat duration = _params.duration;
+    CGFloat spread = _params.spread;
+    CGFloat softness = _params.softness;
+    CGFloat core = _params.core;
+    NSUInteger limit = _params.maxEffects;
     while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
-    NSInteger mode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
+    NSInteger mode = _params.colorMode;
     self.hue = fmod(self.hue + .137, 1);
-    CGFloat hue = mode == 1 ? [self number:@"Hue" fallback:.55 low:0 high:1] : (mode == 2 ? point.x / MAX(1,self.bounds.size.width) : self.hue);
+    CGFloat hue = mode == 1 ? _params.hue : (mode == 2 ? point.x / MAX(1,self.bounds.size.width) : self.hue);
     if (style == 2) {
         for (NSValue *value in self.keyFrames) {
             if (!CGRectContainsPoint(value.CGRectValue, point)) continue;
@@ -335,7 +470,7 @@ static NSArray *RKAnimConstant(NSUInteger index) {
             // 「亮色模式」（彩色/单色）已移除：轻弹固定使用逐次换色的鲜艳纯色。
             UIColor *color = [UIColor colorWithHue:self.pressHue saturation:1 brightness:1 alpha:1];
             RKShowNeonKeyPress(self, value.CGRectValue, color,
-                [self number:@"PressBrightness" fallback:1 low:0 high:1],
+                _params.pressBrightness,
                 duration, UIAccessibilityIsReduceMotionEnabled(), sourceView);
             break;
         }
@@ -353,11 +488,11 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     // A wide radial band travels outward from this touch. It shares the
     // keyboard exclusion mask and has no whole-keyboard solid background.
     CGFloat waveTime = duration;
-    if ([self flag:@"BackgroundFeedback"]) {
-        CGFloat reach = [self number:@"BackgroundRadius" fallback:180 low:60 high:360];
-        CGFloat width = [self number:@"BackgroundBand" fallback:.55 low:.2 high:.85];
-        CGFloat strength = [self number:@"BackgroundStrength" fallback:.28 low:0 high:.6];
-        waveTime = [self number:@"BackgroundDuration" fallback:.65 low:.1 high:1.5];
+    if (_params.backgroundFeedback) {
+        CGFloat reach = _params.backgroundRadius;
+        CGFloat width = _params.backgroundBand;
+        CGFloat strength = _params.backgroundStrengthWide;
+        waveTime = _params.backgroundDurationWide;
         CAGradientLayer *wave = [CAGradientLayer layer];
         wave.type = kCAGradientLayerRadial;
         wave.frame = CGRectMake(point.x-reach,point.y-reach,reach*2,reach*2);

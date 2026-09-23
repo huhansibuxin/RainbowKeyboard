@@ -19,14 +19,28 @@
 static __weak UIView *RKKeyboardHostWeak;                        // WBKeyboardView / UIKeyboardLayoutStar
 static NSHashTable<UIView *> *RKKeyViewRegistry;                 // WBKeyView / UIKBKeyView
 static NSHashTable<UIView *> *RKCandidateContainerRegistry;      // WBTopBar / TUICandidateView / ...
-static uint64_t RKLayoutStamp = 1;                               // bumped on every host layout
+static uint64_t RKLayoutStamp = 1;                               // bumped only when the key set moves
+static CGRect RKLastHostBounds;                                  // bounds the stamp was last bumped for
+static BOOL RKLastHostBoundsValid;
 
+// The stamp answers exactly one question: "may the cached key-frame table still be
+// reused?" It is therefore bumped by the two things that actually replace or move the
+// keys, and by nothing else:
+//   * the host's bounds changing (rotation, candidate bar appearing),
+//   * a keycap registering that was not registered before (a different key set was
+//     installed -- a nine-key <-> full-layout switch creates new keycaps).
+//
+// It used to be bumped on *every* host layout pass, which meant any relayout -- even one
+// that moved nothing -- invalidated the table and made the very next keystroke re-collect
+// all of it. The host is still registered on every pass; only the stamp is conditional.
 void RKRegisterKeyboardHost(UIView *host) {
     if (!host) return;
-    // The host is laid out again whenever the key set is replaced -- a nine-key to
-    // full-layout switch does exactly that while leaving host.bounds identical. This
-    // counter is the signal that a bounds comparison alone could never see.
-    RKLayoutStamp++;
+    CGRect bounds = host.bounds;
+    if (!RKLastHostBoundsValid || !CGRectEqualToRect(bounds, RKLastHostBounds)) {
+        RKLastHostBounds = bounds;
+        RKLastHostBoundsValid = YES;
+        RKLayoutStamp++;
+    }
     // A keyboard that keeps a second, hidden host instance for the other layout must
     // not take the pointer over from the one that is actually on screen.
     if (!host.window || host.hidden || host.alpha < .01) return;
@@ -40,7 +54,14 @@ NSUInteger RKRegisteredKeyCount(void) { return RKKeyViewRegistry.count; }
 void RKRegisterKeyView(UIView *keyView) {
     if (!keyView) return;
     if (!RKKeyViewRegistry) RKKeyViewRegistry = [NSHashTable weakObjectsHashTable];
+    // A keycap this table has not seen before means a different key set is being
+    // installed, which is the one registration event the stamp must react to. Repeat
+    // registrations -- a keycap relaying out, re-entering the window -- are ignored, so
+    // ordinary typing cannot invalidate the table. (A key set that reuses the very same
+    // keycap objects is still caught by the registered count in the key-frame gate.)
+    if ([RKKeyViewRegistry containsObject:keyView]) return;
     [RKKeyViewRegistry addObject:keyView];
+    RKLayoutStamp++;
 }
 
 void RKRegisterCandidateContainer(UIView *container) {
@@ -53,7 +74,9 @@ BOOL RKIsInCandidateContainer(UIView *view) {
     // Zero cost while no candidate bar is on screen (the common case for every
     // other process the tweak is injected into).
     if (!RKCandidateContainerRegistry.count || !view) return NO;
-    for (UIView *container in RKCandidateContainerRegistry.allObjects) {
+    // Enumerating the table directly, never -allObjects: that helper allocates a fresh
+    // array of the whole registry on every call.
+    for (UIView *container in RKCandidateContainerRegistry) {
         if (container.window && [view isDescendantOfView:container]) return YES;
     }
     return NO;
@@ -166,9 +189,12 @@ static BOOL RKKeyViewIsLive(UIView *keyView, UIView *host) {
 // (tens of objects), never over the view hierarchy. requireLive selects the strict
 // test above; the loose pass keeps the original self-only test and is used only when
 // the strict one would leave the effect with no keys at all.
+//
+// The table is enumerated directly: -allObjects allocates a fresh array of the whole
+// registry on every call, and this runs once per key-frame collection.
 static void RKAddRegisteredKeys(UIView *host, NSMutableArray<NSValue *> *frames,
                                 BOOL requireLive) {
-    for (UIView *keyView in RKKeyViewRegistry.allObjects) {
+    for (UIView *keyView in RKKeyViewRegistry) {
         if (requireLive) {
             if (!RKKeyViewIsLive(keyView, host)) continue;
         } else if (!keyView.window || keyView.hidden || keyView.alpha < .01) continue;
@@ -217,7 +243,7 @@ UIView *RKKeyboardKeyViewAtFrame(UIView *host, CGRect keyFrame) {
     if (!host || CGRectIsEmpty(keyFrame)) return nil;
     UIView *best = nil;
     CGFloat bestDelta = 5;
-    for (UIView *keyView in RKKeyViewRegistry.allObjects) {
+    for (UIView *keyView in RKKeyViewRegistry) {
         if (!RKKeyViewIsLive(keyView, host)) continue;
         CGRect rect = [keyView convertRect:keyView.bounds toView:host];
         CGFloat delta = MAX(MAX(fabs(rect.origin.x - keyFrame.origin.x),
