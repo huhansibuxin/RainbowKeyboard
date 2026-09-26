@@ -8,6 +8,11 @@
 static NSHashTable *RKRegisteredHosts(void);
 static NSHashTable *RKRegisteredKeyViews(void);
 
+// 布局代际戳（2.1.4）：宿主每次 layoutSubviews 钩子触发 RKRegisterKeyboardHost 时
+// 递增。WeType 切换布局复用已注册键帽（无新注册、注册数不动、keyplane/bounds 不变），
+// 只有 host layout pass 是每次切换必然出现的唯一事件——见 RKKeyboardLayoutStamp()。
+static uint64_t RKBLayoutStamp = 0;
+
 #pragma mark - 类名特征缓存（P0-1：每个 Class 只做一次字符串分析）
 
 static NSMapTable *RKFeatureCache(void) {
@@ -324,6 +329,10 @@ static NSHashTable *RKRegisteredKeyViews(void) {
 }
 
 void RKRegisterKeyboardHost(UIView *host) {
+    // 无条件递增：上游 1.2.1 原样。一个为另一布局保留的隐藏宿主实例布局时同样
+    // 说明键盘内部在动，stamp 变化只令调用方多收一次帧，不会误伤正确性。
+    // （是否真的动了键位不在此判定——那需要收帧才能回答，正是这道门要避免的成本。）
+    RKBLayoutStamp++;
     if (host) [RKRegisteredHosts() addObject:host];
 }
 
@@ -338,6 +347,10 @@ void RKRegisterKeyView(UIView *keyView) {
 void RKRegisterCandidateContainer(UIView *container) {
     (void)container; // 预留：排除判定走 RKKeyboardExcludedView。
 }
+
+uint64_t RKKeyboardLayoutStamp(void) { return RKBLayoutStamp; }
+
+NSUInteger RKRegisteredKeyCount(void) { return RKRegisteredKeyViews().count; }
 
 UIView *RKKeyboardRegisteredKeyViewAtFrame(UIView *host, CGRect frameInHost) {
     UIView *best = nil;

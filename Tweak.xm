@@ -7,6 +7,8 @@ static char RKOverlayKey;
 static char RKOverlayBoundsKey;
 static char RKPendingPressKey;
 static char RKGeometryTimeKey;
+static char RKLayoutStampKey;   // 上次收帧时的 host 布局代际戳
+static char RKRegCountKey;      // 上次收帧时的注册键帽数
 @interface RKPendingPress : NSObject
 @property(nonatomic) CGPoint point;
 @property(nonatomic) CFTimeInterval time, lastRendered;
@@ -87,10 +89,24 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
             // Identity alone misses in-place keyplane changes and view-based keyboards.
             // Always observe identity, and periodically revalidate real key rectangles.
             BOOL layoutChanged = RKKeyboardLayoutChanged(liveHost);
+            // 布局代际戳门（2.1.4）：WeType 切换布局（九键↔全键盘/中英）时两套键帽都
+            // 保持注册——无新注册事件、注册数不动、keyplane/keys 指针与 bounds 也不变，
+            // 上面的判定全部漏报，keyFrames 停在旧布局帧上（上游 1.2.0 的 17.9 教训）。
+            // host layout pass 是每次切换必然出现的唯一事件：宿主布局钩子递增 stamp，
+            // 这里发现 stamp 或注册数变化即强制重收帧。
+            uint64_t stamp = RKKeyboardLayoutStamp();
+            NSUInteger regCount = RKRegisteredKeyCount();
+            uint64_t lastStamp = (uint64_t)[objc_getAssociatedObject(liveHost, &RKLayoutStampKey) longLongValue];
+            NSUInteger lastRegCount = (NSUInteger)[objc_getAssociatedObject(liveHost, &RKRegCountKey) unsignedIntegerValue];
+            BOOL stampChanged = stamp != lastStamp || regCount != lastRegCount;
             CFTimeInterval lastScan = [objc_getAssociatedObject(liveHost, &RKGeometryTimeKey) doubleValue];
-            BOOL scan = geometryChanged || layoutChanged || !effect.keyFrames.count || now - lastScan >= .2;
+            BOOL scan = geometryChanged || layoutChanged || stampChanged || !effect.keyFrames.count || now - lastScan >= .2;
             NSArray<NSValue *> *liveKeyFrames = scan ? RKKeyboardKeyFrames(liveHost) : effect.keyFrames;
-            if (scan) objc_setAssociatedObject(liveHost, &RKGeometryTimeKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            if (scan) {
+                objc_setAssociatedObject(liveHost, &RKGeometryTimeKey, @(now), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(liveHost, &RKLayoutStampKey, @(stamp), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                objc_setAssociatedObject(liveHost, &RKRegCountKey, @(regCount), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
             BOOL keyGeometryChanged = ![effect.keyFrames isEqualToArray:liveKeyFrames];
             if (geometryChanged || keyGeometryChanged) {
                 RKClearEffectLayers(effect);

@@ -29,9 +29,6 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 @end
 @interface RainbowEffectView ()
 @property(nonatomic,strong) NSDictionary *config;
-@property(nonatomic,strong) UIImage *underlightMaskImage;
-@property(nonatomic) CGRect underlightMaskBounds;
-@property(nonatomic) BOOL underlightMaskIncludesNativeFaces;
 @property(nonatomic) CGFloat hue;
 @property(nonatomic) CGFloat pressHue;
 @property(nonatomic,strong) CALayer *fastFeedback;
@@ -41,12 +38,9 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 @property(nonatomic,strong) NSArray<NSValue *> *cachedCenters;
 @property(nonatomic,strong) NSArray<RKKeyWaveGeometry *> *cachedWaveGeometries;
 @property(nonatomic) CGRect cachedGeometryBounds;
-@property(nonatomic) NSUInteger underlightMaskKeyCount; // 建罩时键位数（2.1.3 一致性校验）
-@property(nonatomic) CGRect underlightMaskKeyUnion;     // 建罩时键位 union
 @property(nonatomic,strong) NSMutableArray<CALayer *> *pulsePool;
 @property(nonatomic,weak) UIView *nativeScanAnchor;          // 原生判定缓存的失效锚点
 @property(nonatomic) BOOL nativeGlowCacheValid, nativeGlowResult;
-@property(nonatomic) BOOL nativeNineKeyCacheValid, nativeNineKeyResult;
 @end
 @implementation RainbowEffectView
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -88,9 +82,21 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     return NO; // 纯黑键盘引擎已随 2.1.0 移除，无黑色键面需要保留。
 }
 - (CAShapeLayer *)keyGutterMask {
+    // 2.1.4：波纹/扩散/流光底韵共用键缝遮罩，even-odd path 实现，精确复刻
+    // 2.1.3 位图遮罩的语义（观感零变化），只是不再持有第二份失效语义：
+    //  - 显示区域 = 键位 union 外扩(3,4) 与 bounds 的交集——bed 之外不亮；
+    //  - WeType/未知键盘：整个键位 frame 挖空（光只在键与键的间隙，键帽不亮）；
+    //  - 原生键盘：bed 全亮不挖键面（原生键波自带键帽发光）。
+    // path 由 bounds + keyFrames + 原生判定唯一决定，失效只由 setKeyFrames
+    // 与自身 bounds 变化驱动——键位表修对（Tweak.xm 布局代际戳门），遮罩就对。
     if (!self.cachedGutterPath || !CGRectEqualToRect(self.cachedGeometryBounds, self.bounds)) {
-        UIBezierPath *gaps = [UIBezierPath bezierPathWithRect:self.bounds];
-        for (UIBezierPath *face in self.cachedFacePaths) [gaps appendPath:face];
+        CGRect bed = CGRectNull;
+        for (NSValue *value in self.keyFrames) bed = CGRectUnion(bed,value.CGRectValue);
+        CGRect lit = CGRectIsNull(bed) ? CGRectZero : CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds);
+        UIBezierPath *gaps = [UIBezierPath bezierPathWithRect:lit];
+        if (![self usesNativeKeycapGlow]) {
+            for (NSValue *value in self.keyFrames) [gaps appendPath:[UIBezierPath bezierPathWithRect:value.CGRectValue]];
+        }
         self.cachedGutterPath = gaps;
         self.cachedGeometryBounds = self.bounds;
     }
@@ -156,7 +162,6 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 - (void)setKeyFrames:(NSArray<NSValue *> *)keyFrames {
     if ([_keyFrames isEqualToArray:keyFrames]) return;
     _keyFrames = [keyFrames copy];
-    self.underlightMaskImage = nil;
     NSMutableArray *faces = [NSMutableArray arrayWithCapacity:_keyFrames.count];
     NSMutableArray *centers = [NSMutableArray arrayWithCapacity:_keyFrames.count];
     NSMutableArray *geometries = [NSMutableArray arrayWithCapacity:_keyFrames.count * 2];
@@ -185,9 +190,11 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     self.cachedFacePaths = faces;
     self.cachedCenters = centers;
     self.cachedWaveGeometries = geometries;
+    // 键缝遮罩 path 由 keyFrames 派生，必须一起失效。
+    // （2.1.4 修复：此前 cachedGutterPath 未随键位变化失效，是遮罩过期的一处隐患。）
     self.cachedGutterPath = nil;
     self.cachedGeometryBounds = CGRectNull;
-    self.nativeGlowCacheValid = self.nativeNineKeyCacheValid = NO; // 键位数变了，九键判定需重算
+    self.nativeGlowCacheValid = NO; // 键位数变了，原生判定需重算
     for (CALayer *pulse in self.layer.sublayers.copy) [pulse removeFromSuperlayer];
     [self drainPulsePool];
 }
@@ -254,34 +261,6 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     self.nativeScanAnchor = self.superview;
     self.nativeGlowCacheValid = YES;
     self.nativeGlowResult = result;
-    return result;
-}
-
-// Conservative native nine-key detection: never change WeType's mask.
-- (BOOL)usesNativeNineKeyBed {
-    if ([NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"]) return NO;
-    // 与 usesNativeKeycapGlow 同理缓存；结果还依赖键位数，键位表变更时失效。
-    if (self.nativeNineKeyCacheValid && self.nativeScanAnchor == self.superview) return self.nativeNineKeyResult;
-    BOOL native = NO;
-    for (UIView *v = self.superview; v && ![v isKindOfClass:UIWindow.class]; v = v.superview) {
-        if (RKClassFeatures(v.class) & RKFeatureLayoutStar) { native = YES; break; }
-    }
-    BOOL result = NO;
-    if (native && self.keyFrames.count >= 9 && self.keyFrames.count <= 25) {
-        CGFloat width = self.bounds.size.width;
-        if (width > 0) {
-            NSUInteger broadKeys = 0;
-            for (NSValue *value in self.keyFrames) {
-                CGRect r = value.CGRectValue;
-                if (r.size.width >= width*.14 && r.size.width <= width*.30 &&
-                    r.size.height >= 25 && r.size.height <= 85) broadKeys++;
-            }
-            result = broadKeys >= 8;
-        }
-    }
-    self.nativeScanAnchor = self.superview;
-    self.nativeNineKeyCacheValid = YES;
-    self.nativeNineKeyResult = result;
     return result;
 }
 
@@ -390,60 +369,6 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     }
 }
 
-- (CALayer *)waveUnderCapMask {
-    CGFloat screenScale = self.window.screen.scale;
-    if (screenScale <= 0) screenScale = 2;
-    // Native: let the existing wave illuminate both the bed and key faces.
-    // WeType/unknown: retain the original face cut-outs and all animation values.
-    BOOL nativeFaces = [self usesNativeKeycapGlow];
-    // 键位一致性校验（2.1.3）：布局切换后注册表可能短暂混合新旧键位，
-    // 遮罩若按错位帧缓存会只亮出几条缝。每次调用轻量重算键位 union 与数量，
-    // 与建罩时不一致立即重建——观感漂移窗口压缩到一次按键以内。
-    CGRect keyUnion = CGRectNull;
-    for (NSValue *value in self.keyFrames) keyUnion = CGRectUnion(keyUnion,value.CGRectValue);
-    BOOL keyMismatch = self.underlightMaskImage &&
-        (self.underlightMaskKeyCount != self.keyFrames.count ||
-         !CGRectEqualToRect(self.underlightMaskKeyUnion, keyUnion));
-    if (keyMismatch) self.underlightMaskImage = nil;
-    if (!self.underlightMaskImage || self.underlightMaskIncludesNativeFaces != nativeFaces ||
-        !CGRectEqualToRect(self.underlightMaskBounds,self.bounds) ||
-        self.underlightMaskImage.scale != screenScale) {
-        UIGraphicsBeginImageContextWithOptions(self.bounds.size, NO, screenScale);
-        CGContextRef context = UIGraphicsGetCurrentContext();
-        if (!context) { UIGraphicsEndImageContext(); return nil; }
-        CGContextTranslateCTM(context,-self.bounds.origin.x,-self.bounds.origin.y);
-        CGRect bed = CGRectNull;
-        for (NSValue *value in self.keyFrames) bed = CGRectUnion(bed,value.CGRectValue);
-        [[UIColor whiteColor] setFill];
-        UIRectFill(CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds));
-        CGContextSetBlendMode(context,kCGBlendModeClear);
-        BOOL nativeNine = [self usesNativeNineKeyBed];
-        if (!nativeFaces) for (NSValue *value in self.keyFrames) {
-            if (nativeNine) {
-                // Native hit cells can tile the whole bed, including gutters.
-                // Use the project's inset key-face model (2pt vertical,
-                // up to 2.5pt horizontal), keeping the central face opaque.
-                UIBezierPath *face = RKKeyboardKeyFacePath(value.CGRectValue);
-                CGContextAddPath(context,face.CGPath);
-                CGContextFillPath(context);
-            } else {
-                CGContextFillRect(context,value.CGRectValue);
-            }
-        }
-        self.underlightMaskImage = UIGraphicsGetImageFromCurrentImageContext();
-        UIGraphicsEndImageContext();
-        self.underlightMaskBounds = self.bounds;
-        self.underlightMaskIncludesNativeFaces = nativeFaces;
-        self.underlightMaskKeyCount = self.keyFrames.count;
-        self.underlightMaskKeyUnion = keyUnion;
-    }
-    if (!self.underlightMaskImage) return nil;
-    CALayer *mask = [CALayer layer];
-    mask.frame = self.bounds;
-    mask.contentsScale = screenScale;
-    mask.contents = (__bridge id)self.underlightMaskImage.CGImage;
-    return mask;
-}
 // Both effects live in the exposed keyboard bed. Neither outlines keycaps.
 - (void)showBedEffectAtPoint:(CGPoint)point style:(NSInteger)style {
     CGRect pressed = CGRectNull;
@@ -455,8 +380,12 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
     // 扩散与波纹同款光域：键面挖空、只在键缝里透光（键帽不亮）。
     // 样式差异只在内容——波纹=缝里的环形波，扩散=缝里的径向光团。
-    CALayer *mask = [self waveUnderCapMask];
-    if (!mask) return;
+    // 2.1.4：遮罩回归 even-odd path 方案（keyGutterMask）。此前的位图遮罩
+    // 依赖 keyFrames 正确且及时更新，而 WeType 切换布局复用已注册键帽、
+    // 计数与并集都不动，位图按旧键位缓存导致竖缝无光；path 遮罩同样只
+    // 依赖 keyFrames，但配合 Tweak.xm 的布局代际戳门保证键位表先修对，
+    // 且自身不再持有第二份缓存语义（失效完全由 setKeyFrames 驱动）。
+    CAShapeLayer *mask = [self keyGutterMask];
     CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
     CGFloat alpha = [self number:@"Opacity" fallback:.65 low:0 high:1];
     if (brightness <= 0 || alpha <= 0) return;
@@ -582,40 +511,6 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     if (brightness <= 0 || opacity <= 0) return;
     CGFloat screenScale = self.window.screen.scale;
     if (screenScale <= 0) screenScale = 2;
-    // Native: let the existing wave illuminate both the bed and key faces.
-    // WeType/unknown: retain the original face cut-outs and all animation values.
-    BOOL nativeFaces = [self usesNativeKeycapGlow];
-    if (!self.underlightMaskImage || self.underlightMaskIncludesNativeFaces != nativeFaces ||
-        !CGRectEqualToRect(self.underlightMaskBounds,self.bounds) ||
-        self.underlightMaskImage.scale != screenScale) {
-        UIGraphicsBeginImageContextWithOptions(self.bounds.size, NO, screenScale);
-        CGContextRef context = UIGraphicsGetCurrentContext();
-        if (!context) { UIGraphicsEndImageContext(); return; }
-        CGContextTranslateCTM(context,-self.bounds.origin.x,-self.bounds.origin.y);
-        CGRect bed = CGRectNull;
-        for (NSValue *value in self.keyFrames) bed = CGRectUnion(bed,value.CGRectValue);
-        [[UIColor whiteColor] setFill];
-        UIRectFill(CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds));
-        CGContextSetBlendMode(context,kCGBlendModeClear);
-        BOOL nativeNine = [self usesNativeNineKeyBed];
-        if (!nativeFaces) for (NSValue *value in self.keyFrames) {
-            if (nativeNine) {
-                // Native hit cells can tile the whole bed, including gutters.
-                // Use the project's inset key-face model (2pt vertical,
-                // up to 2.5pt horizontal), keeping the central face opaque.
-                UIBezierPath *face = RKKeyboardKeyFacePath(value.CGRectValue);
-                CGContextAddPath(context,face.CGPath);
-                CGContextFillPath(context);
-            } else {
-                CGContextFillRect(context,value.CGRectValue);
-            }
-        }
-        self.underlightMaskImage = UIGraphicsGetImageFromCurrentImageContext();
-        UIGraphicsEndImageContext();
-        self.underlightMaskBounds = self.bounds;
-        self.underlightMaskIncludesNativeFaces = nativeFaces;
-    }
-    if (!self.underlightMaskImage) return;
     BOOL fast = NO; // 智能降档已随 2.1.0 移除，特效参数不再被运行时砍。
     BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
     NSUInteger limit = fast ? 1 : 2;
@@ -626,11 +521,9 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
         (mode == 2 ? point.x/MAX(1,self.bounds.size.width) : self.hue);
     UIColor *color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:brightness alpha:1];
     CALayer *pulse = [self recycledPulseNamed:@"RKExpandingUnderlight"];
-    CALayer *mask = [CALayer layer];
-    mask.frame = self.bounds;
-    mask.contentsScale = screenScale;
-    mask.contents = (__bridge id)self.underlightMaskImage.CGImage;
-    pulse.mask = mask;
+    // 2.1.4：与波纹/扩散统一回归 even-odd path 遮罩（keyGutterMask），
+    // 位图遮罩随 2.1.3 一并退役——失效语义单一，键位表更新即重建。
+    pulse.mask = [self keyGutterMask];
     // Launch from just underneath the pressed key, rather than its letter.
     CGPoint origin = CGPointMake(CGRectGetMidX(pressed),CGRectGetMaxY(pressed)+1);
     CGFloat reach = MIN(210,MAX(105,[self number:@"BackgroundRadius" fallback:180 low:60 high:360]));

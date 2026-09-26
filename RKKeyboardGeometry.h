@@ -42,6 +42,15 @@ FOUNDATION_EXPORT void RKRegisterKeyboardBody(UIView *body);
 FOUNDATION_EXPORT void RKRegisterKeyView(UIView *keyView);
 FOUNDATION_EXPORT void RKRegisterCandidateContainer(UIView *container);
 
+// ---- 布局代际戳（2.1.4，回归上游 1.2.1 机制）----
+// WeType 键盘切换布局（九键 ↔ 全键盘 / 中英）时两套键帽的视图都保持注册，切换只是
+// 复用已注册键帽——没有新注册事件、注册数不动、keyplane/keys 指针与 bounds 也常常
+// 不变（上游 1.2.0 的 17.9 教训）。host 的 layout pass 是每次布局切换必然出现的唯一
+// 事件：RKRegisterKeyboardHost 在宿主布局钩子里递增 stamp，调用方发现 stamp 变化即
+// 强制重收键位帧，不依赖任何"看起来变了"的启发式判定。
+FOUNDATION_EXPORT uint64_t RKKeyboardLayoutStamp(void);
+FOUNDATION_EXPORT NSUInteger RKRegisteredKeyCount(void);
+
 // 注册表键帽查帧：在已登记键帽（弱引用集）里找与 hostFrame 匹配的键视图，
 // 容差与 RKNeonPress 的递归兜底一致（origin ±3pt、尺寸 ±4pt）。零递归。
 FOUNDATION_EXPORT UIView *RKKeyboardRegisteredKeyViewAtFrame(UIView *host, CGRect frameInHost);
