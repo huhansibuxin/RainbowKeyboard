@@ -95,6 +95,8 @@ static inline NSDictionary *RKReadUncachedEffectivePreferences(void) {
     uint64_t before = 0, after = 0;
     if (token >= 0) notify_get_state(token, &before);
     NSMutableDictionary *transport = [RKReceiveColorState() mutableCopy] ?: [NSMutableDictionary dictionary];
+    NSDictionary *palette = RKReceiveKeyboardPalette();
+    if (palette) [transport addEntriesFromDictionary:palette];
     if (token >= 0) notify_get_state(token, &after);
     return RKResolvePreferencesSnapshot(stored, transport, before, after);
 }
@@ -138,11 +140,23 @@ static inline BOOL RKPublishPreferences(NSDictionary *values) {
         return full;
     }
     BOOL colors = RKPublishColorState(values);
-    BOOL committed = colors &&
+    BOOL palette = RKPublishKeyboardPalette(values);
+    BOOL committed = colors && palette &&
         notify_set_state(token, RKPreferencesRevision(values)) == NOTIFY_STATUS_OK;
     if (!committed) notify_set_state(token, 0);
     notify_post("com.minis.rainbowkeyboard.changed");
     return full && committed;
+}
+
+static inline NSDictionary *RKPreferencesDiagnostic(void) {
+    NSDictionary *stored = RKReadStoredPreferences(), *transport = RKReceiveDisplaySnapshot();
+    NSDictionary *effective = RKReadEffectivePreferences();
+    return @{@"transportVersion":@2, @"snapshotAvailable":@(transport != nil),
+        @"storedRevision":@(RKPreferencesRevision(stored)),
+        @"receivedRevision":@(RKPreferencesRevision(transport)),
+        @"effectiveRevision":@(RKPreferencesRevision(effective)),
+        @"keyboardBackground":RKKeyboardRGB(effective[@"KeyboardBackgroundColor"]),
+        @"keycap":RKKeyboardRGB(effective[@"KeycapColor"])};
 }
 
 static inline void RKRestorePreferencesRelay(void) {
@@ -185,40 +199,4 @@ static inline BOOL RKSavePreferences(NSMutableDictionary *values) {
     // Never publish defaults or stale readback before persistence has completed.
     RKPublishPreferences(values);
     return YES;
-}
-
-// One specific tuning, frozen. Two consumers share this single definition: the settings
-// bundle offers it as the 自用 preset, and the renderer uses it as its built-in fallback
-// for every parameter listed here. Single-sourcing it means a keyboard process that
-// cannot reach the saved plist -- or a fresh install -- still renders the same look,
-// instead of dropping to a different set of numbers. Parameters absent from the table
-// keep their own literal fallback at the call site (their built-in value already equals
-// what this tuning wants, or they only matter in a mode this tuning does not use).
-//
-// These are the owner's live values copied verbatim, trailing digits included: they were
-// read straight out of the device plist, and rounding them would change the look this
-// preset exists to reproduce.
-static inline NSDictionary<NSString *, NSNumber *> *RKPresetSelfUseTable(void) {
-    static NSDictionary *table;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        table = @{@"Opacity":@0.6,
-            @"Brightness":@0.8033448457717896,
-            @"NeonSaturation":@0.7006920576095581,
-            @"Duration":@0.2959342300891876,
-            @"Spread":@1.5020183324813843,
-            @"Softness":@5,
-            @"CoreStrength":@0.6,
-            @"MaxEffects":@2.99826979637146,
-            @"BackgroundStrength":@0.30484429001808167,
-            @"BackgroundRadius":@126.26296997070312,
-            @"BackgroundBand":@0.29783737659454346,
-            @"AmbientStrength":@0.85,
-            @"BackgroundDuration":@0.4,
-            @"Hue":@0.32814300060272217,
-            @"PressBrightness":@0.9013840556144714,
-            @"EffectStyle":@0,
-            @"ColorMode":@0};
-    });
-    return table;
 }

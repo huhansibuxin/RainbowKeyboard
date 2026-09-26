@@ -30,7 +30,6 @@
     CandidateGradient = 1;
     CandidateNative = 1;
     CandidateWeType = 1;
-    KeyboardLock = 0;
     CandidateStart = (0, 0.65, 1);
     CandidateEnd = (0.85, 0.15, 1);
 }
