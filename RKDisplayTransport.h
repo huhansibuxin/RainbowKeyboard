@@ -12,31 +12,22 @@ static inline NSArray<NSString *> *RKDisplayNumbers(void) {
         @"BackgroundDuration", @"BackgroundRadius", @"BackgroundBand", @"ColorMode",
         @"Hue", @"EffectStyle", @"Preset"];
 }
-// The flag list is a POSITIONAL wire format: the array index is the bit number in
-// words[1] (presence 21+i, value 31+i). Never delete or reorder an element. A
-// removed setting must leave a tombstone slot behind, otherwise every later flag
-// shifts one bit and states left in notifyd by an already-running process get
-// decoded as a different flag -- dropping "PureBlackKeyboard" made WeChatKeyboard
-// read the old NativeKeyboard bit, which turned the keyboard gate off entirely.
 static inline NSArray<NSString *> *RKDisplayFlags(void) {
-    return @[@"CandidateGradient", @"CandidateNative", @"CandidateWeType", @"RKLegacySlot3",
+    return @[@"CandidateGradient", @"CandidateNative", @"CandidateWeType", @"PureBlackKeyboard",
         @"Enabled", @"NativeKeyboard", @"WeChatKeyboard", @"RippleEnabled", @"AmbientGlow", @"BackgroundFeedback"];
 }
 static inline NSArray<NSString *> *RKDisplayColors(void) {
-    return @[@"CandidateStart", @"CandidateEnd"];
+    return @[@"CandidateStart", @"CandidateEnd", @"KeyboardBackgroundColor", @"KeycapColor"];
 }
 static inline NSArray<NSString *> *RKDisplayKeys(void) {
     return [[[RKDisplayNumbers() arrayByAddingObjectsFromArray:RKDisplayFlags()]
         arrayByAddingObjectsFromArray:RKDisplayColors()]
-        arrayByAddingObjectsFromArray:@[@"PressBrightness", @"AmbientGlide",
-            @"BedGlow", @"LightPop"]];
+        arrayByAddingObjectsFromArray:@[@"PressColorMode", @"PressBrightness", @"PressColor", @"Theme", @"SmartPerformance", @"KeyboardLock"]];
 }
 static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[RKDisplayWordCount]) {
     memset(words, 0, RKDisplayWordCount * sizeof(uint64_t));
     words[0] = [prefs[@"RKSettingsRevision"] unsignedLongLongValue];
-    // Snapshot magic doubles as a layout revision. Bumping it makes any state left
-    // behind by an older layout unusable, so a format change can never be misread.
-    words[1] = UINT64_C(0xD2) << 56;
+    words[1] = UINT64_C(0xD1) << 56;
     NSArray *numbers = RKDisplayNumbers(), *flags = RKDisplayFlags(), *colors = RKDisplayColors();
     for (NSUInteger i = 0; i < numbers.count; i++) {
         id value = prefs[numbers[i]];
@@ -70,6 +61,29 @@ static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[R
         if ([value boolValue]) words[1] |= UINT64_C(1) << (31 + i);
     }
     // Optional extension in v2's unused bits. Older clients ignore these fields.
+    // Theme uses spare bits 45..49, leaving existing snapshot fields intact.
+    id smart = prefs[@"SmartPerformance"];
+    if ([smart isKindOfClass:NSNumber.class]) {
+        words[1] |= UINT64_C(1) << 50;
+        if ([smart boolValue]) words[1] |= UINT64_C(1) << 51;
+    }
+    id lock = prefs[@"KeyboardLock"];
+    if ([lock isKindOfClass:NSNumber.class]) {
+        words[1] |= UINT64_C(1) << 52;
+        if ([lock boolValue]) words[1] |= UINT64_C(1) << 53;
+    }
+    id theme = prefs[@"Theme"];
+    if ([theme isKindOfClass:NSNumber.class] && isfinite([theme doubleValue]) &&
+        [theme doubleValue] == [theme integerValue] &&
+        [theme integerValue] >= 0 && [theme integerValue] <= 9) {
+        words[1] |= UINT64_C(1) << 45;
+        words[1] |= (uint64_t)[theme integerValue] << 46;
+    }
+    id mode = prefs[@"PressColorMode"];
+    if ([mode isKindOfClass:NSNumber.class] && isfinite([mode doubleValue])) {
+        words[1] |= UINT64_C(1) << 41;
+        if ([mode integerValue] == 1) words[1] |= UINT64_C(1) << 42;
+    }
     id brightness = prefs[@"PressBrightness"];
     if ([brightness isKindOfClass:NSNumber.class] && isfinite([brightness doubleValue])) {
         float value = MIN(1, MAX(0, [brightness doubleValue]));
@@ -78,27 +92,16 @@ static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[R
         words[14] |= (uint64_t)bits << 32;
         words[1] |= UINT64_C(1) << 43;
     }
-    // Extended flags. The positional flag block is exactly full -- presence bits 21..30
-    // and value bits 31..40 meet -- so an eleventh flag cannot be appended to it without
-    // landing on the first flag's value bit. These live in the free gap above
-    // PressBrightness (bit 43), allocated as presence/value pairs from the bottom up:
-    // AmbientGlide owns 44/45, BedGlow owns 46/47, LightPop owns 48/49, and so on.
-    // Never renumber a pair that has shipped, for the same reason the positional list
-    // is append-only.
-    id ambientGlide = prefs[@"AmbientGlide"];
-    if ([ambientGlide isKindOfClass:NSNumber.class]) {
-        words[1] |= UINT64_C(1) << 44;
-        if ([ambientGlide boolValue]) words[1] |= UINT64_C(1) << 45;
-    }
-    id bedGlow = prefs[@"BedGlow"];
-    if ([bedGlow isKindOfClass:NSNumber.class]) {
-        words[1] |= UINT64_C(1) << 46;
-        if ([bedGlow boolValue]) words[1] |= UINT64_C(1) << 47;
-    }
-    id lightPop = prefs[@"LightPop"];
-    if ([lightPop isKindOfClass:NSNumber.class]) {
-        words[1] |= UINT64_C(1) << 48;
-        if ([lightPop boolValue]) words[1] |= UINT64_C(1) << 49;
+    id pressColor = prefs[@"PressColor"];
+    if ([pressColor isKindOfClass:NSArray.class] && [pressColor count] == 3) {
+        BOOL valid = YES;
+        for (id component in pressColor)
+            valid &= [component isKindOfClass:NSNumber.class] && isfinite([component doubleValue]);
+        if (valid) {
+            words[1] |= UINT64_C(1) << 44;
+            for (NSUInteger c = 0; c < 3; c++)
+                words[2 + c] |= (uint64_t)llround(MIN(1, MAX(0, [pressColor[c] doubleValue])) * 65535) << 48;
+        }
     }
 }
 static inline uint64_t RKDisplayChecksum(const uint64_t words[RKDisplayWordCount]) {
@@ -112,7 +115,7 @@ static inline uint64_t RKDisplayChecksum(const uint64_t words[RKDisplayWordCount
     return (hash & UINT64_C(0x7FFFFFFFFFFFFFFF)) | 1;
 }
 static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDisplayWordCount], uint64_t checksum) {
-    if ((words[1] >> 56) != 0xD2 || !checksum || checksum == UINT64_MAX ||
+    if ((words[1] >> 56) != 0xD1 || !checksum || checksum == UINT64_MAX ||
         RKDisplayChecksum(words) != checksum) return nil;
     NSMutableDictionary *result = [@{@"RKSettingsRevision":@(words[0])} mutableCopy];
     NSArray *numbers = RKDisplayNumbers(), *flags = RKDisplayFlags(), *colors = RKDisplayColors();
@@ -132,6 +135,15 @@ static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDispl
     }
     for (NSUInteger i = 0; i < flags.count; i++)
         if (words[1] & (UINT64_C(1) << (21 + i))) result[flags[i]] = @((words[1] >> (31 + i)) & 1);
+    if (words[1] & (UINT64_C(1) << 50)) result[@"SmartPerformance"] = @((words[1] >> 51) & 1);
+    if (words[1] & (UINT64_C(1) << 52)) result[@"KeyboardLock"] = @((words[1] >> 53) & 1);
+
+    if (words[1] & (UINT64_C(1) << 45)) {
+        NSUInteger theme = (words[1] >> 46) & 15;
+        if (theme > 9) return nil;
+        result[@"Theme"] = @(theme);
+    }
+    if (words[1] & (UINT64_C(1) << 41)) result[@"PressColorMode"] = @((words[1] >> 42) & 1);
     if (words[1] & (UINT64_C(1) << 43)) {
         uint32_t bits = (uint32_t)(words[14] >> 32);
         float value;
@@ -139,15 +151,9 @@ static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDispl
         if (!isfinite(value) || value < 0 || value > 1) return nil;
         result[@"PressBrightness"] = @(value);
     }
-    // Extended flags: see the encoder. An absent bit means "no saved value", which the
-    // renderer treats as its own default -- so a snapshot written before this key existed
-    // simply leaves the behaviour alone instead of forcing it off.
     if (words[1] & (UINT64_C(1) << 44))
-        result[@"AmbientGlide"] = @((words[1] >> 45) & 1);
-    if (words[1] & (UINT64_C(1) << 46))
-        result[@"BedGlow"] = @((words[1] >> 47) & 1);
-    if (words[1] & (UINT64_C(1) << 48))
-        result[@"LightPop"] = @((words[1] >> 49) & 1);
+        result[@"PressColor"] = @[@((words[2] >> 48) / 65535.0),
+            @((words[3] >> 48) / 65535.0), @((words[4] >> 48) / 65535.0)];
     return result;
 }
 static inline int RKDisplayToken(NSUInteger index) {
@@ -156,7 +162,7 @@ static inline int RKDisplayToken(NSUInteger index) {
     dispatch_once(&once, ^{
         for (NSUInteger i = 0; i <= RKDisplayWordCount; i++) {
             tokens[i] = -1;
-            NSString *name = [NSString stringWithFormat:@"com.minis.rainbowkeyboard.snapshot.v3.%lu", (unsigned long)i];
+            NSString *name = [NSString stringWithFormat:@"com.minis.rainbowkeyboard.snapshot.v2.%lu", (unsigned long)i];
             int token = -1;
             if (notify_register_check(name.UTF8String, &token) == NOTIFY_STATUS_OK) tokens[i] = token;
         }

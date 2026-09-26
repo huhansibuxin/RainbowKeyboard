@@ -2,27 +2,53 @@
 #import "RKKeyboardGeometry.h"
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
-#include <string.h>
 
 static NSString *const RKPressScale = @"rkNeonPressScale";
 static NSString *const RKPressLift = @"rkNeonPressLift";
 
-// ---------------------------------------------------------------------------
-// Extracted-glyph cache.
-//
-// Extraction is the expensive half of a 轻弹 press: the keycap is rendered to a bitmap
-// and then every pixel of that bitmap is walked to separate ink from the flat key face.
-// The answer depends on nothing but those pixels and their size, so a repeat press of a
-// key whose freshly rendered pixels are byte-for-byte identical can reuse the previous
-// answer. The comparison is the whole bitmap (~25 KB memcmp), which makes the reuse exact
-// rather than a heuristic: identical pixels cannot produce a different foreground.
-//
-// That exactness is what makes it safe without knowing anything about the key's private
-// model. A case change (shift) and a 中/英 switch alter the glyph pixels, and the frame
-// changing alters the crop, so none of them can be served a stale glyph.
-// ---------------------------------------------------------------------------
-static NSMapTable<UIView *, NSDictionary *> *RKPressForegroundCache;
-static const NSUInteger RKPressForegroundCacheLimit = 8;
+// Glyph extraction is relatively expensive (view hierarchy render + pixel pass).
+// Keyboard key views are reused for many presses, so keep a small weak-key cache.
+static UIImage *RKPressForegroundUncached(UIView *overlay, UIView *keyView, CGRect face);
+
+static NSMapTable<UIView *, NSMutableDictionary<NSString *, UIImage *> *> *RKNeonForegroundCache(void) {
+    static NSMapTable *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSMapTable weakToStrongObjectsMapTable];
+    });
+    return cache;
+}
+
+static NSString *RKNeonForegroundCacheKey(UIView *keyView, CGRect face) {
+    NSString *label = keyView.accessibilityLabel ?: @"";
+    if ([keyView isKindOfClass:UIButton.class]) {
+        NSString *title = [(UIButton *)keyView currentTitle];
+        if (title.length) label = [label stringByAppendingFormat:@"|%@", title];
+    }
+    return [NSString stringWithFormat:@"%@|%.2f,%.2f,%.2f,%.2f", label,
+            face.origin.x, face.origin.y, face.size.width, face.size.height];
+}
+
+static UIImage *RKCachedPressForeground(UIView *overlay, UIView *keyView, CGRect face) {
+    if (!keyView) return nil;
+    NSMapTable *cache = RKNeonForegroundCache();
+    NSMutableDictionary *entries = [cache objectForKey:keyView];
+    if (!entries) {
+        entries = [NSMutableDictionary dictionary];
+        [cache setObject:entries forKey:keyView];
+    }
+    NSString *cacheKey = RKNeonForegroundCacheKey(keyView, face);
+    UIImage *cached = entries[cacheKey];
+    if (cached) return cached;
+    UIImage *image = RKPressForegroundUncached(overlay, keyView, face);
+    if (image) {
+        // P1-6: 4 条缓存在上档/符号切换时过早整体失效，导致反复整键快照+像素扫描；
+        // 放宽到 8 条减少重复快照，命中结果与原来完全一致。
+        if (entries.count >= 8) [entries removeAllObjects];
+        entries[cacheKey] = image;
+    }
+    return image;
+}
 
 @interface RKNeonPressLayer : CALayer
 @property(nonatomic) CGRect keyFrame;
@@ -40,9 +66,24 @@ static const NSUInteger RKPressForegroundCacheLimit = 8;
 }
 @end
 
-// Keycap lookup is now a linear match over the registered keycaps
-// (RKKeyboardKeyViewAtFrame). The previous recursive subview search, which rebuilt a
-// lowercased class name for every view it visited, is gone.
+static UIView *RKPressKeyView(UIView *node, UIView *host, CGRect frame, NSUInteger depth) {
+    if (depth > 12) return nil;
+    for (UIView *view in node.subviews) {
+        if (view.hidden || view.alpha < .01 || RKKeyboardExcludedView(view)) continue;
+        NSUInteger features = RKClassFeatures(view.class);
+        BOOL key = [view isKindOfClass:UIButton.class] ||
+            (features & (RKFeatureKeyview | RKFeatureKeycap | RKFeatureKeybutton)) != 0;
+        CGRect candidate = [view convertRect:view.bounds toView:host];
+        BOOL matches = fabs(candidate.origin.x - frame.origin.x) <= 3 &&
+            fabs(candidate.origin.y - frame.origin.y) <= 3 &&
+            fabs(candidate.size.width - frame.size.width) <= 4 &&
+            fabs(candidate.size.height - frame.size.height) <= 4;
+        if (key && matches) return view;
+        UIView *child = RKPressKeyView(view, host, frame, depth + 1);
+        if (child) return child;
+    }
+    return nil;
+}
 
 static CASpringAnimation *RKPressSpring(NSString *keyPath, CGFloat start, CGFloat end) {
     CASpringAnimation *spring = [CASpringAnimation animationWithKeyPath:keyPath];
@@ -56,7 +97,7 @@ static CASpringAnimation *RKPressSpring(NSString *keyPath, CGFloat start, CGFloa
     return spring;
 }
 
-static UIImage *RKPressForeground(UIView *overlay, UIView *keyView, CGRect face) {
+static UIImage *RKPressForegroundUncached(UIView *overlay, UIView *keyView, CGRect face) {
     UIView *host = overlay.superview;
     if (!host.window) return nil;
     CGRect crop = [overlay convertRect:face toView:host];
@@ -96,16 +137,6 @@ static UIImage *RKPressForeground(UIView *overlay, UIView *keyView, CGRect face)
     CGColorSpaceRelease(space);
     if (!context) { free(pixels); return nil; }
     CGContextDrawImage(context, CGRectMake(0, 0, width, height), source.CGImage);
-    size_t byteCount = width * height * 4;
-    NSDictionary *cachedEntry = RKPressForegroundCache ? [RKPressForegroundCache objectForKey:keyView] : nil;
-    NSData *cachedBitmap = cachedEntry[@"bitmap"];
-    if (cachedBitmap.length == byteCount && memcmp(cachedBitmap.bytes, pixels, byteCount) == 0) {
-        // Same key, same pixels, same size: the previous extraction still describes it.
-        CGContextRelease(context);
-        free(pixels);
-        id cachedImage = cachedEntry[@"image"];
-        return cachedImage == NSNull.null ? nil : cachedImage;
-    }
     // Infer the flat key-face color from four inset corners, not the glyph center.
     CGFloat background[3];
     for (NSUInteger c = 0; c < 3; c++) {
@@ -120,31 +151,18 @@ static UIImage *RKPressForeground(UIView *overlay, UIView *keyView, CGRect face)
         background[c] = (samples[1] + samples[2]) / 2;
     }
     BOOL lightInk = (background[0] + background[1] + background[2]) / 3 < .5;
-    // The per-pixel pass below visits only the pixels that can carry ink. A pixel whose
-    // every channel sits closer to the key face than the .035 cutoff ends up fully
-    // transparent with all-zero RGB -- which is exactly what calloc already left in the
-    // buffer -- so it is skipped rather than given three divisions and three stores. Most
-    // of a keycap is flat key face, so this is where the loop's work used to go. The
-    // result is unchanged: a channel below the cutoff contributes a difference under .035,
-    // which can neither become the maximum nor survive the cutoff itself.
-    CGFloat denominator[3], cutoff[3];
-    for (NSUInteger c = 0; c < 3; c++) {
-        denominator[c] = MAX(.05, lightInk ? 1 - background[c] : background[c]);
-        cutoff[c] = .035 * denominator[c];
-    }
     NSUInteger ink = 0;
     for (size_t i = 0; i < width * height; i++) {
         uint8_t *pixel = pixels + i * 4;
         CGFloat alpha = 0;
         for (NSUInteger c = 0; c < 3; c++) {
             CGFloat value = pixel[c] / 255.0;
-            CGFloat delta = lightInk ? value - background[c] : background[c] - value;
-            if (delta < cutoff[c]) continue;   // never lifts alpha, or pulls it down
-            CGFloat difference = delta / denominator[c];
-            if (difference > alpha) alpha = difference;
+            CGFloat difference = lightInk ? (value - background[c]) / MAX(.05, 1 - background[c]) :
+                (background[c] - value) / MAX(.05, background[c]);
+            alpha = MAX(alpha, difference);
         }
-        if (alpha <= 0) continue;
         alpha = MIN(1, alpha);
+        if (alpha < .035) alpha = 0;
         if (alpha > .1) ink++;
         for (NSUInteger c = 0; c < 3; c++)
             pixel[c] = (uint8_t)lround(MIN(alpha, MAX(0, pixel[c] / 255.0 - background[c] * (1 - alpha))) * 255);
@@ -156,12 +174,6 @@ static UIImage *RKPressForeground(UIView *overlay, UIView *keyView, CGRect face)
     if (image) CGImageRelease(image);
     CGContextRelease(context);
     free(pixels);
-    // Keep the bitmap that produced this answer, not the answer alone: those bytes are
-    // what proves on the next press that the answer is still valid.
-    if (!RKPressForegroundCache) RKPressForegroundCache = [NSMapTable weakToStrongObjectsMapTable];
-    if (RKPressForegroundCache.count >= RKPressForegroundCacheLimit) [RKPressForegroundCache removeAllObjects];
-    [RKPressForegroundCache setObject:@{@"bitmap": [NSData dataWithBytes:pixels length:byteCount],
-        @"image": foreground ?: (id)NSNull.null} forKey:keyView];
     return foreground;
 }
 
@@ -178,9 +190,14 @@ void RKShowNeonKeyPress(UIView *overlay, CGRect keyFrame, UIColor *color, CGFloa
 
     CGRect face = RKKeyboardKeyFacePath(keyFrame).bounds;
     // Keep this tiny, transient glyph image in memory only; never capture/store input text.
+    UIView *key = nil;
+    UIImage *foreground = nil;
+    // Lightweight/smart path does not snapshot, scan pixels, traverse keys,
+    // or transform the input method's own key layers.
+    if (!reduceMotion) {
     UIView *host = overlay.superview;
     CGRect hostFrame = [overlay convertRect:keyFrame toView:host];
-    UIView *key = sourceView;
+    key = sourceView;
     if (key && !key.window) key = nil;
     if (key) {
         CGRect sourceFrame = [key convertRect:key.bounds toView:host];
@@ -190,8 +207,9 @@ void RKShowNeonKeyPress(UIView *overlay, CGRect keyFrame, UIColor *color, CGFloa
             fabs(sourceFrame.size.height - hostFrame.size.height) <= 5;
         if (!matches) key = nil;
     }
-    if (!key) key = host ? RKKeyboardKeyViewAtFrame(host, hostFrame) : nil;
-    UIImage *foreground = RKPressForeground(overlay, key, face);
+    if (!key) key = host ? RKPressKeyView(host, host, hostFrame, 0) : nil;
+    foreground = RKCachedPressForeground(overlay, key, face);
+    }
     RKNeonPressLayer *pulse = [RKNeonPressLayer layer];
     pulse.name = @"neonKeyPress";
     pulse.frame = overlay.bounds;
@@ -229,11 +247,7 @@ void RKShowNeonKeyPress(UIView *overlay, CGRect keyFrame, UIColor *color, CGFloa
     }
     CAKeyframeAnimation *fade = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
     fade.values = @[@(peak), @(peak), @(peak * .65), @0];
-    // Constant, so it is shared instead of rebuilt (with its four NSNumbers) per press.
-    static NSArray *keyTimes;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ keyTimes = @[@0, @.35, @.65, @1]; });
-    fade.keyTimes = keyTimes;
+    fade.keyTimes = @[@0, @.35, @.65, @1];
     fade.duration = duration;
     [cap addAnimation:fade forKey:@"neonPressFade"];
 

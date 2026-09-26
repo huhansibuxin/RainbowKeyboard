@@ -1,96 +1,129 @@
 #import "RKKeyboardGeometry.h"
 #import "RainbowEffectView.h"
-#import <math.h>
+#import "RKPreferences.h"
 #import <objc/runtime.h>
-#import <string.h>
+#import <math.h>
 
-// ---------------------------------------------------------------------------
-// Runtime registries
-//
-// Every lookup below used to recurse the view tree (exclusion mask, key frames,
-// keycap hit-test) or walk the superview chain with a class-name match on each
-// ancestor. Both are gone: RKKeyboardHooks.xm hooks the exact keyboard classes
-// and registers their live instances here, so the input path and the draw path
-// only ever touch a handful of known objects.
-//
-// All registration and lookup happens on the main thread (layout, drawing and
-// event delivery are all main-thread), so no lock is required.
-// ---------------------------------------------------------------------------
-static __weak UIView *RKKeyboardHostWeak;                        // WBKeyboardView / UIKeyboardLayoutStar
-static __weak UIView *RKKeyboardBodyWeak;                        // WBMainInputView: top bar + key panel
-static NSHashTable<UIView *> *RKKeyViewRegistry;                 // WBKeyView / UIKBKeyView
-static NSHashTable<UIView *> *RKCandidateContainerRegistry;      // WBTopBar / TUICandidateView / ...
-static uint64_t RKLayoutStamp = 1;                               // bumped on every host layout pass
+#pragma mark - 类名特征缓存（P0-1：每个 Class 只做一次字符串分析）
 
-// The stamp answers exactly one question: "may the cached key-frame table still be reused?"
-//
-// It is bumped on *every* host layout pass, and 1.2.0 proved that has to stay unconditional.
-// That version narrowed it to "the host's bounds changed, or a keycap registered that the
-// registry had not seen before", on the theory that a relayout moving nothing must not
-// invalidate the table. On the WeType keyboard that narrowed pair goes stale while the keys
-// really do change: both key sets' keycaps are registered, and switching back to the nine-key
-// layout reuses the already-registered ones -- so nothing new registers and the registered
-// count does not move either. Symptom on device, reported as 17.9 coming back: nine-key ->
-// English -> back to nine-key, and the ripple keeps the *English* key geometry.
-//
-// A host layout pass is the one event present for every swap, so nothing else is needed
-// here. Whether this relayout actually moved anything is deliberately not asked: it cannot
-// be answered without collecting the table, which is exactly the cost the gate exists to
-// avoid.
-void RKRegisterKeyboardHost(UIView *host) {
-    if (!host) return;
-    RKLayoutStamp++;
-    // A keyboard that keeps a second, hidden host instance for the other layout must
-    // not take the pointer over from the one that is actually on screen.
-    if (!host.window || host.hidden || host.alpha < .01) return;
-    RKKeyboardHostWeak = host;
+static NSMapTable *RKFeatureCache(void) {
+    static NSMapTable *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsObjectPointerPersonality | NSPointerFunctionsWeakMemory
+                                      valueOptions:NSPointerFunctionsStrongMemory];
+    });
+    return cache;
 }
 
-// The keyboard body, when the keyboard has one (WeType's WBMainInputView). Same liveness
-// rule as the host: a body kept off screen for the other layout must not take over from the
-// one the user is looking at.
-void RKRegisterKeyboardBody(UIView *body) {
-    if (!body) return;
-    if (!body.window || body.hidden || body.alpha < .01) return;
-    RKKeyboardBodyWeak = body;
+NSUInteger RKClassFeatures(Class cls) {
+    NSNumber *cached = [RKFeatureCache() objectForKey:cls];
+    if (cached) return cached.unsignedIntegerValue;
+    NSString *name = NSStringFromClass(cls).lowercaseString;
+    NSUInteger features = RKFeatureNone;
+    if ([name containsString:@"keycap"]) features |= RKFeatureKeycap;
+    if ([name containsString:@"keyview"]) features |= RKFeatureKeyview;
+    if ([name containsString:@"keybutton"]) features |= RKFeatureKeybutton;
+    if ([name hasSuffix:@"key"]) features |= RKFeatureSuffixKey;
+    for (NSString *part in @[@"candidate", @"prediction", @"suggestion", @"toolbar",
+                             @"accessory", @"dock", @"clipboard", @"shortcut", @"popup", @"editingbar"])
+        if ([name containsString:part]) { features |= RKFeatureExcluded; break; }
+    for (NSString *part in @[@"candidate", @"prediction", @"suggestion"])
+        if ([name containsString:part]) { features |= RKFeatureCandidateArea; break; }
+    if ([name containsString:@"keyboardlayoutstar"]) features |= RKFeatureLayoutStar;
+    for (NSString *part in @[@"inputset", @"itemcontainer", @"trackingwindow", @"placeholder", @"compatinput"])
+        if ([name containsString:part]) { features |= RKFeatureInputContainer; break; }
+    if ([name containsString:@"keyboard"] || [name containsString:@"keyplane"]) features |= RKFeatureKeyboardish;
+    if (([name hasPrefix:@"uikb"] && [name containsString:@"candidate"]) ||
+        [name hasPrefix:@"uikeyboardcandidate"] || [name hasPrefix:@"tuicandidate"] ||
+        [name hasPrefix:@"tuiinlinecandidate"] || [name hasPrefix:@"tuiprediction"] ||
+        [name hasPrefix:@"uikeyboardprediction"] || [name hasPrefix:@"_uikeyboardcandidate"])
+        features |= RKFeatureCandidateUI;
+    [RKFeatureCache() setObject:@(features) forKey:cls];
+    return features;
 }
 
-uint64_t RKKeyboardLayoutStamp(void) { return RKLayoutStamp; }
+#pragma mark - 键盘会话状态（P0-3：全局钩子快速短路开关）
 
-NSUInteger RKRegisteredKeyCount(void) { return RKKeyViewRegistry.count; }
+// Always clear decoration session state on hide/background. Retaining this
+// flag cannot keep an extension alive or prevent a system termination.
+static BOOL RKKeyboardSessionActiveValue;
+void RKKeyboardSessionSetActive(BOOL active) {
+    RKKeyboardSessionActiveValue = active;
+}
+BOOL RKKeyboardSessionActive(void) { return RKKeyboardSessionActiveValue; }
 
-void RKRegisterKeyView(UIView *keyView) {
-    if (!keyView) return;
-    if (!RKKeyViewRegistry) RKKeyViewRegistry = [NSHashTable weakObjectsHashTable];
-    [RKKeyViewRegistry addObject:keyView];
+// addObserverForName 返回的 observer token 必须被持有，否则 ARC 下立即释放、
+// 通知注册随之失效（iOS 经典坑）。此前的实现丢弃了 token，导致会话开关
+// 永远收不到 UIKeyboardWillShow，所有装饰钩子持续短路 —— 键盘无光效。
+static id RKKeyboardSessionObserverTokens[3];
+
+__attribute__((constructor))
+static void RKKeyboardSessionInstallObservers(void) {
+    RKKeyboardSessionObserverTokens[0] = [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIKeyboardWillShowNotification
+        object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        RKKeyboardSessionSetActive(YES);
+    }];
+    RKKeyboardSessionObserverTokens[1] = [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIKeyboardDidHideNotification
+        object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        RKKeyboardSessionSetActive(NO);
+    }];
+    RKKeyboardSessionObserverTokens[2] = [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIApplicationDidEnterBackgroundNotification
+        object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+        RKKeyboardSessionSetActive(NO);
+    }];
 }
 
-void RKRegisterCandidateContainer(UIView *container) {
-    if (!container) return;
-    if (!RKCandidateContainerRegistry) RKCandidateContainerRegistry = [NSHashTable weakObjectsHashTable];
-    [RKCandidateContainerRegistry addObject:container];
+#pragma mark - 排除区 / 键盘宿主判定（P0-1 + P1-5 宿主缓存）
+
+BOOL RKKeyboardExcludedView(UIView *view) {
+    if ((RKClassFeatures(view.class) & RKFeatureExcluded) != 0) return YES;
+    return [view isKindOfClass:RainbowEffectView.class];
 }
 
-BOOL RKIsInCandidateContainer(UIView *view) {
-    // Zero cost while no candidate bar is on screen (the common case for every
-    // other process the tweak is injected into).
-    if (!RKCandidateContainerRegistry.count || !view) return NO;
-    // Enumerating the table directly, never -allObjects: that helper allocates a fresh
-    // array of the whole registry on every call.
-    for (UIView *container in RKCandidateContainerRegistry) {
-        if (container.window && [view isDescendantOfView:container]) return YES;
-    }
-    return NO;
+static char RKHostSuperviewKey;
+static NSMapTable *RKHostCache(void) {
+    static NSMapTable *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsObjectPointerPersonality | NSPointerFunctionsWeakMemory
+                                      valueOptions:NSPointerFunctionsObjectPointerPersonality | NSPointerFunctionsWeakMemory];
+    });
+    return cache;
 }
 
-// The keyboard host is registered by the exact-class hook on layout/appearance.
-// Callers still validate the touch point against host.bounds, so no ancestor walk
-// is needed to confirm ownership.
+static void RKCacheEffectHost(UIView *view, UIView *host) {
+    [RKHostCache() setObject:host forKey:view];
+    // 只做指针比较用，不 retain；视图存活期间其父视图必然存活。
+    objc_setAssociatedObject(view, &RKHostSuperviewKey,
+        [NSValue valueWithNonretainedObject:view.superview], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
 UIView *RKKeyboardEffectHost(UIView *view) {
-    UIView *host = RKKeyboardHostWeak;
-    if (!host || !host.window || host.hidden || host.alpha < .01) return nil;
-    return host;
+    UIView *cached = [RKHostCache() objectForKey:view];
+    NSValue *superviewValue = objc_getAssociatedObject(view, &RKHostSuperviewKey);
+    if (cached && cached.window && superviewValue &&
+        superviewValue.nonretainedObjectValue == view.superview) return cached;
+
+    UIView *fallback = nil;
+    for (UIView *parent = view; parent && ![parent isKindOfClass:UIWindow.class]; parent = parent.superview) {
+        if (RKKeyboardExcludedView(parent)) return nil;
+        NSUInteger features = RKClassFeatures(parent.class);
+        if (features & RKFeatureLayoutStar) { RKCacheEffectHost(view, parent); return parent; }
+        // Remote input containers also contain the dock, not just key rows.
+        if (features & RKFeatureInputContainer) break;
+        if (!fallback && (features & RKFeatureKeyboardish) &&
+            parent.bounds.size.width > 180 && parent.bounds.size.height > 100 && parent.bounds.size.height < 500)
+            fallback = parent;
+    }
+    if (fallback) RKCacheEffectHost(view, fallback);
+    return fallback;
 }
+
+#pragma mark - 键帽路径
 
 UIBezierPath *RKKeyboardKeyFacePath(CGRect keyFrame) {
     CGRect face = CGRectInset(keyFrame, MIN(2.5, keyFrame.size.width * .065), 2);
@@ -98,55 +131,67 @@ UIBezierPath *RKKeyboardKeyFacePath(CGRect keyFrame) {
     return [UIBezierPath bezierPathWithRoundedRect:face cornerRadius:corner];
 }
 
-// Native keyboards still expose their key model through -keyplane.keys, which is a
-// property read rather than a subtree walk, so that path stays for them.
-typedef id (*RKIdGetter)(id, SEL);
-typedef BOOL (*RKBoolGetter)(id, SEL);
-typedef CGRect (*RKRectGetter)(id, SEL);
-enum { RKGetterId = 'i', RKGetterRect = 'r', RKGetterBool = 'b' };
+#pragma mark - 私有 getter（P1-2：缓存 selector 可用性与签名）
 
-static struct { Class cls; SEL selector; IMP imp; char kind; } RKGetterCache[24];
-static size_t RKGetterCount;
+static NSMapTable *RKGetterSignatureCache(void) {
+    static NSMapTable *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSMapTable mapTableWithKeyOptions:NSPointerFunctionsObjectPointerPersonality | NSPointerFunctionsWeakMemory
+                                      valueOptions:NSPointerFunctionsStrongMemory];
+    });
+    return cache;
+}
 
-// Returns a validated IMP for object's selector, or NULL when it is missing or its
-// signature does not match the expected convention. Validating keeps this as safe as
-// the old respondsToSelector + NSMethodSignature checks.
-static IMP RKGetterIMP(id object, SEL selector, char kind) {
-    if (!object || !selector) return NULL;
-    const char *type = kind == RKGetterId ? @encode(id)
-        : (kind == RKGetterRect ? @encode(CGRect) : @encode(BOOL));
-    Class cls = object_getClass(object);
-    for (size_t i = 0; i < RKGetterCount; i++) {
-        if (RKGetterCache[i].cls != cls || RKGetterCache[i].selector != selector) continue;
-        return RKGetterCache[i].kind == kind ? RKGetterCache[i].imp : NULL;
+// 对 (Class, selector) 一次性判定 ABI 兼容性并缓存签名，避免每次调用重复
+// respondsToSelector / methodSignatureForSelector 的运行时查找。
+static NSMethodSignature *RKGetterSignature(Class cls, NSString *name, const char *type) {
+    NSMutableDictionary *byName = [RKGetterSignatureCache() objectForKey:cls];
+    if (!byName) {
+        byName = [NSMutableDictionary dictionary];
+        [RKGetterSignatureCache() setObject:byName forKey:cls];
     }
-    IMP imp = NULL;
-    if ([object respondsToSelector:selector]) {
-        NSMethodSignature *signature = [object methodSignatureForSelector:selector];
-        if (signature.numberOfArguments == 2 && !strcmp(signature.methodReturnType, type))
-            imp = [object methodForSelector:selector];
+    id signature = byName[name];
+    if (signature) return signature == NSNull.null ? nil : signature;
+    SEL selector = NSSelectorFromString(name);
+    NSMethodSignature *candidate = nil;
+    if ([cls instancesRespondToSelector:selector]) {
+        candidate = [cls instanceMethodSignatureForSelector:selector];
+        if (candidate && (candidate.numberOfArguments != 2 || strcmp(candidate.methodReturnType, type)))
+            candidate = nil;
     }
-    if (RKGetterCount < sizeof(RKGetterCache) / sizeof(RKGetterCache[0])) {
-        RKGetterCache[RKGetterCount].cls = cls;
-        RKGetterCache[RKGetterCount].selector = selector;
-        RKGetterCache[RKGetterCount].imp = imp;
-        RKGetterCache[RKGetterCount].kind = kind;
-        RKGetterCount++;
-    }
-    return imp;
+    byName[name] = candidate ?: NSNull.null;
+    return candidate;
 }
-static id RKCallObject(id object, SEL selector) {
-    RKIdGetter getter = (RKIdGetter)RKGetterIMP(object, selector, RKGetterId);
-    return getter ? getter(object, selector) : nil;
+
+// Private selectors vary by OS release. Validate their ABI before invoking them.
+static NSInvocation *RKGetter(id object, NSString *name, const char *type) {
+    // 注意：不能用点语法 object.class —— id 类型上编译器会做属性查找而报错；
+    // 消息发送 [object class] 对 id 永远合法且语义一致。
+    NSMethodSignature *signature = RKGetterSignature([object class], name, type);
+    if (!signature) return nil;
+    NSInvocation *call = [NSInvocation invocationWithMethodSignature:signature];
+    call.target = object;
+    call.selector = NSSelectorFromString(name);
+    [call invoke];
+    return call;
 }
-static BOOL RKCallBool(id object, SEL selector, BOOL fallback) {
-    RKBoolGetter getter = (RKBoolGetter)RKGetterIMP(object, selector, RKGetterBool);
-    return getter ? getter(object, selector) : fallback;
+
+static id RKObject(id object, NSString *name) {
+    NSInvocation *call = RKGetter(object, name, @encode(id));
+    __unsafe_unretained id result = nil;
+    [call getReturnValue:&result];
+    return result;
 }
-static CGRect RKCallRect(id object, SEL selector) {
-    RKRectGetter getter = (RKRectGetter)RKGetterIMP(object, selector, RKGetterRect);
-    return getter ? getter(object, selector) : CGRectZero;
+
+static CGRect RKRect(id object, NSString *name) {
+    NSInvocation *call = RKGetter(object, name, @encode(CGRect));
+    CGRect result = CGRectZero;
+    [call getReturnValue:&result];
+    return result;
 }
+
+#pragma mark - 键位几何（P1-1：布局变化检测）
 
 static BOOL RKValidKeyRect(CGRect rect, CGRect bounds) {
     return isfinite(rect.origin.x) && isfinite(rect.origin.y) &&
@@ -167,112 +212,61 @@ static void RKAddKey(NSMutableArray<NSValue *> *frames, CGRect rect, CGRect boun
     if (frames.count < 100) [frames addObject:[NSValue valueWithCGRect:rect]];
 }
 
-// A keycap only counts while it belongs to the key set that is on screen. WeType
-// installs the new layout in place and keeps the outgoing one alive inside a
-// container it hides, so retired keycaps keep hidden == NO and alpha == 1 on
-// themselves: a self-only check let their stale frames keep feeding the geometry.
-// Walking the short chain up to the host (2-3 levels, fixed depth -- no recursion,
-// no class-name matching) catches the hidden container.
-static BOOL RKKeyViewIsLive(UIView *keyView, UIView *host) {
-    // Window equality also rejects keycaps parked in a preload window, whose frames
-    // would otherwise convert into perfectly plausible host coordinates.
-    if (!keyView || !host || keyView.window != host.window) return NO;
-    if (keyView.hidden || keyView.alpha < .01) return NO;
-    UIView *node = keyView.superview;
-    for (NSUInteger depth = 0; node && node != host && depth < 16; depth++) {
-        if (node.hidden || node.alpha < .01) return NO;
-        node = node.superview;
-    }
-    return YES;
-}
-
-// Keycaps registered by the exact-class hooks. Linear over the registered keys only
-// (tens of objects), never over the view hierarchy. requireLive selects the strict
-// test above; the loose pass keeps the original self-only test and is used only when
-// the strict one would leave the effect with no keys at all.
-//
-// The table is enumerated directly: -allObjects allocates a fresh array of the whole
-// registry on every call, and this runs once per key-frame collection.
-static void RKAddRegisteredKeys(UIView *host, NSMutableArray<NSValue *> *frames,
-                                BOOL requireLive) {
-    for (UIView *keyView in RKKeyViewRegistry) {
-        if (requireLive) {
-            if (!RKKeyViewIsLive(keyView, host)) continue;
-        } else if (!keyView.window || keyView.hidden || keyView.alpha < .01) continue;
-        RKAddKey(frames, [keyView convertRect:keyView.bounds toView:host], host.bounds);
+static void RKViewKeys(UIView *node, UIView *host, NSMutableArray *frames, NSUInteger depth) {
+    if (depth > 12 || frames.count >= 100) return;
+    for (UIView *view in node.subviews) {
+        if (view.hidden || view.alpha < .01 || RKKeyboardExcludedView(view)) continue;
+        NSUInteger features = RKClassFeatures(view.class);
+        BOOL key = [view isKindOfClass:UIButton.class] ||
+            (features & (RKFeatureKeycap | RKFeatureKeyview | RKFeatureKeybutton)) != 0;
+        CGRect rect = [view convertRect:view.bounds toView:host];
+        if (key && RKValidKeyRect(rect, host.bounds)) RKAddKey(frames, rect, host.bounds);
+        else RKViewKeys(view, host, frames, depth + 1);
     }
 }
 
 NSArray<NSValue *> *RKKeyboardKeyFrames(UIView *host) {
     NSMutableArray *frames = [NSMutableArray array];
-    // Native keyboards expose their key model directly, so their proven path stays
-    // exactly as before: two property reads, no subtree walk.
-    SEL selKeyplane = NSSelectorFromString(@"keyplane"), selKeys = NSSelectorFromString(@"keys");
-    SEL selGhost = NSSelectorFromString(@"ghost"), selVisible = NSSelectorFromString(@"visible");
-    SEL selDisplayFrame = NSSelectorFromString(@"displayFrame"), selFrame = NSSelectorFromString(@"frame");
-    id plane = RKCallObject(host, selKeyplane);
-    id keys = RKCallObject(plane, selKeys);
+    id plane = RKObject(host, @"keyplane");
+    id keys = RKObject(plane, @"keys");
     if ([keys isKindOfClass:NSArray.class] || [keys isKindOfClass:NSSet.class]) {
         for (id key in keys) {
-            // A missing getter keeps the previous defaults: ghost NO, visible YES.
-            if (RKCallBool(key, selGhost, NO)) continue;
-            if (!RKCallBool(key, selVisible, YES)) continue;
-            CGRect rect = RKCallRect(key, selDisplayFrame);
-            if (!RKValidKeyRect(rect, host.bounds)) rect = RKCallRect(key, selFrame);
+            BOOL ghost = NO;
+            NSInvocation *visibility = RKGetter(key, @"ghost", @encode(BOOL));
+            [visibility getReturnValue:&ghost];
+            if (ghost) continue;
+            BOOL visible = YES;
+            NSInvocation *visibleGetter = RKGetter(key, @"visible", @encode(BOOL));
+            [visibleGetter getReturnValue:&visible];
+            if (!visible) continue;
+            CGRect rect = RKRect(key, @"displayFrame");
+            if (!RKValidKeyRect(rect, host.bounds)) rect = RKRect(key, @"frame");
             RKAddKey(frames, rect, host.bounds);
         }
     }
-    if (frames.count >= 3) return frames;
-    // WeType has no keyplane model: use the keycaps registered by the exact-class
-    // hook on WBKeyView (linear over registered keycaps only).
-    [frames removeAllObjects];
-    RKAddRegisteredKeys(host, frames, YES);
     if (frames.count < 3) {
-        // The strict pass can come up empty when the keyboard hides a container on the
-        // path down to its keys. Losing every key would kill the effect outright, which
-        // is worse than the stale-frame problem that pass exists to fix, so fall back to
-        // the loose test and let the frame validation above do what it can.
         [frames removeAllObjects];
-        RKAddRegisteredKeys(host, frames, NO);
+        RKViewKeys(host, host, frames, 0);
     }
     return frames;
 }
 
-UIView *RKKeyboardOverlayHost(UIView *host, CGRect *outFrame) {
-    if (outFrame) *outFrame = host ? host.bounds : CGRectZero;
-    if (!host) return nil;
-    UIView *body = RKKeyboardBodyWeak;
-    // The body has to be on screen and genuinely contain the key area. The weak reference can
-    // briefly point at the outgoing body while a layout swap is in flight, and attaching there
-    // would park the overlay on a view that is no longer the keyboard.
-    if (!body || !body.window || body.hidden || body.alpha < .01 || body == host) return host;
-    // A containment check, not a search: the body came from the exact-class registry, so this
-    // only confirms the reference still points at an ancestor of the keys we were handed.
-    if (![host isDescendantOfView:body]) return host;
-    CGRect rect = body.bounds;
-    if (CGRectIsEmpty(rect)) return host;
-    // A body spanning the whole input set rather than the keyboard would drag the glow off the
-    // keys, so an implausible ratio falls back to the key area.
-    if (rect.size.width > host.bounds.size.width * 1.6 ||
-        rect.size.height > host.bounds.size.height * 3) return host;
-    if (outFrame) *outFrame = rect;
-    return body;
-}
-
-// Replaces the old recursive subview search: match the pressed key frame against the
-// registered keycaps. Returns nil when nothing is close enough.
-UIView *RKKeyboardKeyViewAtFrame(UIView *host, CGRect keyFrame) {
-    if (!host || CGRectIsEmpty(keyFrame)) return nil;
-    UIView *best = nil;
-    CGFloat bestDelta = 5;
-    for (UIView *keyView in RKKeyViewRegistry) {
-        if (!RKKeyViewIsLive(keyView, host)) continue;
-        CGRect rect = [keyView convertRect:keyView.bounds toView:host];
-        CGFloat delta = MAX(MAX(fabs(rect.origin.x - keyFrame.origin.x),
-                               fabs(rect.origin.y - keyFrame.origin.y)),
-                           MAX(fabs(rect.size.width - keyFrame.size.width),
-                               fabs(rect.size.height - keyFrame.size.height)));
-        if (delta < bestDelta) { bestDelta = delta; best = keyView; }
-    }
-    return best;
+// keyplane / keys 指针与 bounds 均未变化时返回 NO，调用方直接复用缓存的键位集合。
+BOOL RKKeyboardLayoutChanged(UIView *host) {
+    id plane = RKObject(host, @"keyplane");
+    id keys = nil;
+    if (plane) keys = RKObject(plane, @"keys");
+    static char RKLayoutObservationKey;
+    NSDictionary *current = @{
+        @"plane": plane ?: NSNull.null,
+        @"keys": keys ?: NSNull.null,
+        @"bounds": [NSValue valueWithCGRect:host.bounds],
+    };
+    NSDictionary *previous = objc_getAssociatedObject(host, &RKLayoutObservationKey);
+    BOOL changed = !previous ||
+        previous[@"plane"] != current[@"plane"] ||
+        previous[@"keys"] != current[@"keys"] ||
+        !CGRectEqualToRect([previous[@"bounds"] CGRectValue], host.bounds);
+    objc_setAssociatedObject(host, &RKLayoutObservationKey, current, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return changed;
 }

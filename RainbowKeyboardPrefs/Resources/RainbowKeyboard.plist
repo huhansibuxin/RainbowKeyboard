@@ -77,20 +77,6 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>key</key>
-			<string>LightPop</string>
-			<key>label</key>
-			<string>轻弹（键帽发光）</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.minis.rainbowkeyboard</string>
-			<key>PostNotification</key>
-			<string>com.minis.rainbowkeyboard.changed</string>
-		</dict>
-		<dict>
-			<key>cell</key>
 			<string>PSLinkCell</string>
 			<key>key</key>
 			<string>ColorMode</string>

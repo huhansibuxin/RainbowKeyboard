@@ -2,49 +2,33 @@
 
 FOUNDATION_EXPORT NSArray<NSValue *> *RKKeyboardKeyFrames(UIView *host);
 FOUNDATION_EXPORT UIBezierPath *RKKeyboardKeyFacePath(CGRect keyFrame);
+FOUNDATION_EXPORT BOOL RKKeyboardExcludedView(UIView *view);
 FOUNDATION_EXPORT UIView *RKKeyboardEffectHost(UIView *view);
 
-// Where the effect should be attached, and the rect it should occupy there.
-//
-// WeType offers exactly two candidate hosts, and they are the two its own view tree already
-// has: WBKeyboardView (the key panel alone) and WBMainInputView (the keyboard body, which
-// holds both the top bar -- the candidate row with its buttons -- and the key panel). The
-// body is registered by an exact-class hook like everything else in this file's registry, so
-// choosing it costs a weak read and never a walk up the superview chain. With a body
-// registered the overlay spans the whole keyboard, which is what lets the ambient glow reach
-// the candidate row; with none -- the native keyboard -- it stays on the key area.
-//
-// The window, the hidden/alpha state and an implausible size ratio are all re-checked here,
-// because the weak reference can briefly point at the outgoing body while a layout swap is
-// still in flight.
-FOUNDATION_EXPORT UIView *RKKeyboardOverlayHost(UIView *host, CGRect *outFrame);
+// ---- 性能优化（视觉零变化）----
 
-// The keyboard body: the container holding both the candidate bar and the key panel
-// (WBMainInputView on WeType). Registered from that class's layout pass, like the host.
-FOUNDATION_EXPORT void RKRegisterKeyboardBody(UIView *body);
-FOUNDATION_EXPORT UIView *RKKeyboardKeyViewAtFrame(UIView *host, CGRect keyFrame);
+// 类名特征位掩码：对每个 Class 只做一次字符串分析，之后查表复用。
+// 覆盖键盘排除区、宿主查找、键位递归识别等全部调用点。
+typedef NS_OPTIONS(NSUInteger, RKClassNameFeatures) {
+    RKFeatureNone           = 0,
+    RKFeatureKeycap         = 1 << 0, // 类名含 "keycap"
+    RKFeatureKeyview        = 1 << 1, // 类名含 "keyview"
+    RKFeatureKeybutton      = 1 << 2, // 类名含 "keybutton"
+    RKFeatureSuffixKey      = 1 << 3, // 类名以 "key" 结尾
+    RKFeatureExcluded       = 1 << 4, // 候选/预测/建议/工具条/配件/剪贴板/快捷/弹出/编辑条等排除区
+    RKFeatureLayoutStar     = 1 << 5, // 类名含 "keyboardlayoutstar"
+    RKFeatureInputContainer = 1 << 6, // inputset/itemcontainer/trackingwindow/placeholder/compatinput
+    RKFeatureKeyboardish    = 1 << 7, // 类名含 "keyboard" 或 "keyplane"
+    RKFeatureCandidateUI    = 1 << 8, // 原生候选/预测视图（UIKB*/TUI*/_UIKeyboardCandidate 前缀族）
+    RKFeatureCandidateArea  = 1 << 9, // 仅 candidate/prediction/suggestion 子串（候选文字区域，不含工具条）
+};
+FOUNDATION_EXPORT NSUInteger RKClassFeatures(Class cls);
 
-// Runtime registries. Exact-class hooks (RKKeyboardHooks.xm) register the live
-// keyboard host, keycaps and candidate containers once per instance, so the input
-// and draw paths can look them up directly instead of recursing the view tree or
-// walking the superview chain on every keystroke / every draw.
-FOUNDATION_EXPORT void RKRegisterKeyboardHost(UIView *host);
-FOUNDATION_EXPORT void RKRegisterKeyView(UIView *keyView);
-FOUNDATION_EXPORT void RKRegisterCandidateContainer(UIView *container);
-FOUNDATION_EXPORT BOOL RKIsInCandidateContainer(UIView *view);
+// 键盘布局是否发生变化：keyplane / keys 指针或 host.bounds 任一变化返回 YES。
+// 布局未变时调用方应复用既有 keyFrames，避免定时全量扫描。
+FOUNDATION_EXPORT BOOL RKKeyboardLayoutChanged(UIView *host);
 
-// Cheap fingerprint of the *current* key layout. A keyboard host keeps the same
-// bounds when it swaps between nine-key and full layouts, so bounds alone cannot
-// tell that the key set changed. The layout stamp is therefore bumped by the host
-// hook on every layout pass, and the registered keycap count moves whenever a
-// different key set is installed. Both reads are O(1) with no allocation, so callers
-// can validate the cached key-frame array on every keystroke without re-collecting it.
-//
-// Do not narrow the stamp to "bounds changed or an unseen keycap registered". 1.2.0 tried
-// that and it reproduced the 17.9 failure on the WeType keyboard: both key sets' keycaps
-// stay registered across a switch, so returning to the nine-key layout registers nothing
-// new and leaves the count unchanged -- both narrowed signals hold still while the keys
-// change, and the ripple keeps the retired layout's geometry (nine-key -> English -> back
-// to nine-key). The stamp must stay unconditional; the gate is what keeps typing cheap.
-FOUNDATION_EXPORT uint64_t RKKeyboardLayoutStamp(void);
-FOUNDATION_EXPORT NSUInteger RKRegisteredKeyCount(void);
+// 键盘会话状态：WillShow 置 YES，DidHide / 退后台置 NO。
+// 供全局 UIKit 钩子做快速短路，键盘未显示时不承担装饰开销。
+FOUNDATION_EXPORT void RKKeyboardSessionSetActive(BOOL active);
+FOUNDATION_EXPORT BOOL RKKeyboardSessionActive(void);
