@@ -56,7 +56,6 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
     if (!key || !value) return;
 
     NSMutableDictionary *values = [RKReadPreferences() mutableCopy] ?: [NSMutableDictionary dictionary];
-    NSInteger number = [value integerValue];
 
     if ([key isEqualToString:@"EffectStyle"] || [key isEqualToString:@"ColorMode"]) {
         values[key] = value;
