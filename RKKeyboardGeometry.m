@@ -338,3 +338,21 @@ void RKRegisterKeyView(UIView *keyView) {
 void RKRegisterCandidateContainer(UIView *container) {
     (void)container; // 预留：排除判定走 RKKeyboardExcludedView。
 }
+
+UIView *RKKeyboardRegisteredKeyViewAtFrame(UIView *host, CGRect frameInHost) {
+    UIView *best = nil;
+    CGFloat bestDelta = CGFLOAT_MAX;
+    for (UIView *view in RKRegisteredKeyViews()) {
+        if (view.hidden || view.alpha < .01 || !view.window) continue;
+        if (![view isDescendantOfView:host]) continue;
+        CGRect frame = [view convertRect:view.bounds toView:host];
+        CGFloat dx = fabs(frame.origin.x - frameInHost.origin.x);
+        CGFloat dy = fabs(frame.origin.y - frameInHost.origin.y);
+        CGFloat dw = fabs(frame.size.width - frameInHost.size.width);
+        CGFloat dh = fabs(frame.size.height - frameInHost.size.height);
+        if (dx > 3 || dy > 3 || dw > 4 || dh > 4) continue;
+        CGFloat delta = dx + dy + dw + dh;
+        if (delta < bestDelta) { bestDelta = delta; best = view; }
+    }
+    return best;
+}

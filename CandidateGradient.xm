@@ -43,7 +43,7 @@ static CGFloat RKCandidateAnimationSpeed = 0.14;
 }
 - (void)tick:(CADisplayLink *)link {
     if (!RKCandidateDisplayLink) return;
-    if (!RKCandidateFlag(@"CandidateGradient") || RKCandidateViews.count == 0) {
+    if (!RKCandidateFlag(@"CandidateGradient") || !RKCandidateAnimatedMode() || RKCandidateViews.count == 0) {
         [link invalidate];
         RKCandidateDisplayLink = nil;
         return;
@@ -76,7 +76,7 @@ static CGFloat RKCandidateAnimationPhase(void) {
 }
 
 static void RKCandidateStartAnimationIfNeeded(void) {
-    if (!RKCandidateFlag(@"CandidateGradient") || RKCandidateViews.count == 0) return;
+    if (!RKCandidateFlag(@"CandidateGradient") || !RKCandidateAnimatedMode() || RKCandidateViews.count == 0) return;
     if (RKCandidateDisplayLink) return;
 
     RKCandidatePhaseStart = CACurrentMediaTime();
@@ -112,8 +112,33 @@ static BOOL RKNativeCandidateRegion(UIView *view) {
     }
     return NO;
 }
+// 区域判定结果按视图缓存（锚点 = 所属 superview，变更即重算）：
+// 候选标签复用频繁，链爬结果在布局不变期间不会变，无需每次重画都爬一遍。
+static char RKRegionWeTypeResultKey, RKRegionWeTypeAnchorKey;
+static char RKRegionNativeResultKey, RKRegionNativeAnchorKey;
+static BOOL RKCandidateRegionCached(UIView *view, BOOL native) {
+    void *resultKey = native ? &RKRegionNativeResultKey : &RKRegionWeTypeResultKey;
+    void *anchorKey = native ? &RKRegionNativeAnchorKey : &RKRegionWeTypeAnchorKey;
+    NSNumber *cached = objc_getAssociatedObject(view, resultKey);
+    if (cached && objc_getAssociatedObject(view, anchorKey) == view.superview) return cached.boolValue;
+    BOOL result = native ? RKNativeCandidateRegion(view) : RKCandidateRegion(view);
+    objc_setAssociatedObject(view, resultKey, @(result), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(view, anchorKey, view.superview, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return result;
+}
 static BOOL RKCandidateFlag(NSString *key) {
     return !RKCandidatePrefs[key] || [RKCandidatePrefs[key] boolValue];
+}
+// 候选渐变模式：0=关闭 1=静态渐变 2=流动 3=呼吸 4=彩虹 5=跟随输入。
+// 只有动画档（2..5）值得起 20fps DisplayLink；静态与关闭一律不轮询，
+// 静态只在候选内容变化时随系统重绘画一次（相位固定为 0）。
+static NSInteger RKCandidateGradientMode(void) {
+    id value = RKCandidatePrefs[@"CandidateGradientMode"];
+    return [value respondsToSelector:@selector(integerValue)] ? [value integerValue] : 1;
+}
+static BOOL RKCandidateAnimatedMode(void) {
+    NSInteger mode = RKCandidateGradientMode();
+    return mode >= 2 && mode <= 5;
 }
 static BOOL RKCandidateIsWeType(UIView *view) {
     if ([NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"]) return YES;
@@ -140,7 +165,7 @@ static void RKCandidateReload(void) {
         RKCandidateCachedGradient = NULL;
     }
     RKCandidatePhaseStart = CACurrentMediaTime();
-    if (!RKCandidateFlag(@"CandidateGradient")) RKCandidateStopAnimation();
+    if (!RKCandidateFlag(@"CandidateGradient") || !RKCandidateAnimatedMode()) RKCandidateStopAnimation();
     for (UIView *view in RKCandidateViews.allObjects) {
         // Drop our rendered pixels, not the original text, so disabled gradients
         // do not remain in a reused label's backing layer.
@@ -169,7 +194,7 @@ static void RKDrawGradientText(CGRect rect, CGRect textRect, void (^original)(vo
         CGColorSpaceRelease(space);
     }
     CGGradientRef gradient = RKCandidateCachedGradient ? CGGradientRetain(RKCandidateCachedGradient) : NULL;
-    CGFloat phase = RKCandidateAnimationPhase();
+    CGFloat phase = RKCandidateAnimatedMode() ? RKCandidateAnimationPhase() : 0;
     CGFloat travel = CGRectGetWidth(textRect) * 0.42 * phase;
     if (!gradient) { original(); return; }
     RKCandidateRenderCount++;
@@ -194,10 +219,10 @@ static void RKDrawGradientText(CGRect rect, CGRect textRect, void (^original)(vo
 static void RKDrawCandidate(UILabel *label, CGRect rect, BOOL native, void (^original)(void)) {
     if (RKCandidateDrawingDepth) { original(); return; }
     if (RKCandidateIsWeType(label)) native = NO;
-    BOOL region = native ? RKNativeCandidateRegion(label) : RKCandidateRegion(label);
+    BOOL region = RKCandidateRegionCached(label, native);
     if (!region || RKCandidateDrawingDepth) { original(); return; }
     [RKCandidateViews addObject:label];
-    if (!RKCandidateFlag(@"CandidateGradient") ||
+    if (RKCandidateGradientMode() == 0 || !RKCandidateFlag(@"CandidateGradient") ||
         !RKCandidateFlag(native ? @"CandidateNative" : @"CandidateWeType")) {
         RKCandidateDrawingDepth++;
         @try { original(); } @finally { RKCandidateDrawingDepth--; }
@@ -381,7 +406,7 @@ static void RKWriteNativeDiagnostic(void) {
         %orig(layer, context);
         return;
     }
-    BOOL candidate = RKNativeCandidateRegion(self);
+    BOOL candidate = RKCandidateRegionCached(self, YES);
     if (!candidate) { 
         %orig;
  return; }

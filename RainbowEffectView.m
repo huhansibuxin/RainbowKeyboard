@@ -42,6 +42,9 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 @property(nonatomic,strong) NSArray<RKKeyWaveGeometry *> *cachedWaveGeometries;
 @property(nonatomic) CGRect cachedGeometryBounds;
 @property(nonatomic,strong) NSMutableArray<CALayer *> *pulsePool;
+@property(nonatomic,weak) UIView *nativeScanAnchor;          // 原生判定缓存的失效锚点
+@property(nonatomic) BOOL nativeGlowCacheValid, nativeGlowResult;
+@property(nonatomic) BOOL nativeNineKeyCacheValid, nativeNineKeyResult;
 @end
 @implementation RainbowEffectView
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -182,6 +185,7 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     self.cachedWaveGeometries = geometries;
     self.cachedGutterPath = nil;
     self.cachedGeometryBounds = CGRectNull;
+    self.nativeGlowCacheValid = self.nativeNineKeyCacheValid = NO; // 键位数变了，九键判定需重算
     for (CALayer *pulse in self.layer.sublayers.copy) [pulse removeFromSuperlayer];
     [self drainPulsePool];
 }
@@ -239,29 +243,44 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 // WeType keeps its existing cut-out mask, even if a native-looking view exists.
 - (BOOL)usesNativeKeycapGlow {
     if ([NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"]) return NO;
+    // 逐次按键都会问；superview 链在布局不变期间不会变，按锚点缓存扫描结果。
+    if (self.nativeGlowCacheValid && self.nativeScanAnchor == self.superview) return self.nativeGlowResult;
+    BOOL result = NO;
     for (UIView *v = self.superview; v && ![v isKindOfClass:UIWindow.class]; v = v.superview) {
-        if (RKClassFeatures(v.class) & RKFeatureLayoutStar) return YES;
+        if (RKClassFeatures(v.class) & RKFeatureLayoutStar) { result = YES; break; }
     }
-    return NO;
+    self.nativeScanAnchor = self.superview;
+    self.nativeGlowCacheValid = YES;
+    self.nativeGlowResult = result;
+    return result;
 }
 
 // Conservative native nine-key detection: never change WeType's mask.
 - (BOOL)usesNativeNineKeyBed {
     if ([NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"]) return NO;
+    // 与 usesNativeKeycapGlow 同理缓存；结果还依赖键位数，键位表变更时失效。
+    if (self.nativeNineKeyCacheValid && self.nativeScanAnchor == self.superview) return self.nativeNineKeyResult;
     BOOL native = NO;
     for (UIView *v = self.superview; v && ![v isKindOfClass:UIWindow.class]; v = v.superview) {
         if (RKClassFeatures(v.class) & RKFeatureLayoutStar) { native = YES; break; }
     }
-    if (!native || self.keyFrames.count < 9 || self.keyFrames.count > 25) return NO;
-    CGFloat width = self.bounds.size.width;
-    if (width <= 0) return NO;
-    NSUInteger broadKeys = 0;
-    for (NSValue *value in self.keyFrames) {
-        CGRect r = value.CGRectValue;
-        if (r.size.width >= width*.14 && r.size.width <= width*.30 &&
-            r.size.height >= 25 && r.size.height <= 85) broadKeys++;
+    BOOL result = NO;
+    if (native && self.keyFrames.count >= 9 && self.keyFrames.count <= 25) {
+        CGFloat width = self.bounds.size.width;
+        if (width > 0) {
+            NSUInteger broadKeys = 0;
+            for (NSValue *value in self.keyFrames) {
+                CGRect r = value.CGRectValue;
+                if (r.size.width >= width*.14 && r.size.width <= width*.30 &&
+                    r.size.height >= 25 && r.size.height <= 85) broadKeys++;
+            }
+            result = broadKeys >= 8;
+        }
     }
-    return broadKeys >= 8;
+    self.nativeScanAnchor = self.superview;
+    self.nativeNineKeyCacheValid = YES;
+    self.nativeNineKeyResult = result;
+    return result;
 }
 
 // Native keys need a separate luminous bed: a full-bed mask alone makes the

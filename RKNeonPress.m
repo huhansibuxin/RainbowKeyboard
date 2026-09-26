@@ -207,7 +207,8 @@ void RKShowNeonKeyPress(UIView *overlay, CGRect keyFrame, UIColor *color, CGFloa
             fabs(sourceFrame.size.height - hostFrame.size.height) <= 5;
         if (!matches) key = nil;
     }
-    if (!key) key = host ? RKPressKeyView(host, host, hostFrame, 0) : nil;
+    if (!key) key = host ? RKKeyboardRegisteredKeyViewAtFrame(host, hostFrame) : nil;
+    if (!key && host) key = RKPressKeyView(host, host, hostFrame, 0);
     foreground = RKCachedPressForeground(overlay, key, face);
     }
     RKNeonPressLayer *pulse = [RKNeonPressLayer layer];

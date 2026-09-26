@@ -41,3 +41,7 @@ FOUNDATION_EXPORT void RKRegisterKeyboardHost(UIView *host);
 FOUNDATION_EXPORT void RKRegisterKeyboardBody(UIView *body);
 FOUNDATION_EXPORT void RKRegisterKeyView(UIView *keyView);
 FOUNDATION_EXPORT void RKRegisterCandidateContainer(UIView *container);
+
+// 注册表键帽查帧：在已登记键帽（弱引用集）里找与 hostFrame 匹配的键视图，
+// 容差与 RKNeonPress 的递归兜底一致（origin ±3pt、尺寸 ±4pt）。零递归。
+FOUNDATION_EXPORT UIView *RKKeyboardRegisteredKeyViewAtFrame(UIView *host, CGRect frameInHost);
