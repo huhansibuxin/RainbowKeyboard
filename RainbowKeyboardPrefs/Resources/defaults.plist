@@ -6,6 +6,7 @@
     CandidateGradientIntensity = 1.0;
     EffectStyle = 0;
     AmbientGlow = 1;
+    AmbientGlide = 1;
     AmbientStrength = 0.85;
     PureBlackKeyboard = 0;
     KeyboardBackgroundColor = (0, 0, 0);

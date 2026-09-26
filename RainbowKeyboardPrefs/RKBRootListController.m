@@ -113,8 +113,8 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 - (void)chooseEffectStyle {
     [self chooseSimpleOptionForKey:@"EffectStyle"
                              title:@"光效风格"
-                           options:@[@"波纹", @"扩散", @"轻弹", @"流光底韵"]
-                            values:@[@0, @1, @2, @3]];
+                           options:@[@"波纹", @"扩散", @"轻弹"]
+                            values:@[@0, @1, @2]];
 }
 
 - (void)chooseColorMode {
@@ -137,7 +137,7 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
         NSInteger value = [RKReadPreferences()[key] integerValue];
         cell.detailTextLabel.text = (value >= 0 && value < (NSInteger)titles.count) ? titles[value] : @"静态渐变";
     } else if ([key isEqualToString:@"EffectStyle"]) {
-        NSArray *titles = @[@"波纹", @"扩散", @"轻弹", @"流光底韵"];
+        NSArray *titles = @[@"波纹", @"扩散", @"轻弹"];
         NSInteger value = [RKReadPreferences()[key] integerValue];
         cell.detailTextLabel.text = (value >= 0 && value < (NSInteger)titles.count) ? titles[value] : @"波纹";
     } else if ([key isEqualToString:@"ColorMode"]) {
