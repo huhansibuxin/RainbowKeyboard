@@ -431,6 +431,18 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     mask.contents = (__bridge id)self.underlightMaskImage.CGImage;
     return mask;
 }
+// 扩散(style 1)专用遮罩：整块键床区域白罩，不挖键面/键缝——径向渐变呈完整圆形。
+- (CALayer *)bedAreaMask {
+    CGRect bed = CGRectNull;
+    for (NSValue *value in self.keyFrames) bed = CGRectUnion(bed,value.CGRectValue);
+    if (CGRectIsNull(bed) || CGRectIsEmpty(bed)) bed = self.bounds;
+    CGRect area = CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds);
+    if (CGRectIsNull(area) || CGRectIsEmpty(area)) return nil;
+    CALayer *mask = [CALayer layer];
+    mask.frame = area;
+    mask.backgroundColor = UIColor.whiteColor.CGColor;
+    return mask;
+}
 // Both effects live in the exposed keyboard bed. Neither outlines keycaps.
 - (void)showBedEffectAtPoint:(CGPoint)point style:(NSInteger)style {
     CGRect pressed = CGRectNull;
@@ -440,7 +452,9 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
             rect.size.width*rect.size.height < pressed.size.width*pressed.size.height)) pressed = rect;
     }
     if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
-    CALayer *mask = [self waveUnderCapMask];
+    // 扩散(style 1)统一为「一整圈扩散」：光域是整块键床、不挖键面与键缝，
+    // 观感不再依赖键位帧对齐与布局切换时序；波纹(style 0)保留原键面镂空设计。
+    CALayer *mask = style == 0 ? [self waveUnderCapMask] : [self bedAreaMask];
     if (!mask) return;
     CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
     CGFloat alpha = [self number:@"Opacity" fallback:.65 low:0 high:1];
@@ -468,10 +482,13 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     // Ripples originate just below the key so their first crest is visible immediately.
     CALayer *pulse = [self recycledPulseNamed:style == 0 ? @"RKBedRipples" : @"RKBedSpread"];
     pulse.mask = mask;
-    [self addNativeBedSpreadToPulse:pulse origin:origin reach:reach color:color
-                          duration:duration reduce:reduce];
-    [self addNativeKeyWavesToPulse:pulse origin:origin reach:reach color:color
-                         duration:duration reduce:reduce];
+    // 键缝背光与键位波动是波纹(style 0)的原生分层；扩散(style 1)保持纯圆形，不叠加。
+    if (style == 0) {
+        [self addNativeBedSpreadToPulse:pulse origin:origin reach:reach color:color
+                              duration:duration reduce:reduce];
+        [self addNativeKeyWavesToPulse:pulse origin:origin reach:reach color:color
+                             duration:duration reduce:reduce];
+    }
     CFTimeInterval now = [pulse convertTime:CACurrentMediaTime() fromLayer:nil];
     if (style == 0) {
         // A broad body, bright shoulder and crisp foam crest, followed by a weaker swell.
@@ -539,92 +556,6 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     life.duration = duration;
     [pulse addAnimation:life forKey:@"bedEffectLifetime"];
     // Transparent when finished; bounded pulses (three for ripples), no timer queue.
-}
-
-// Native-only variant of WeType's spread. Keep showBedEffectAtPoint unchanged.
-- (void)showNativeWeTypeSpreadAtPoint:(CGPoint)point {
-    if (![self usesNativeKeycapGlow]) return;
-    CGRect pressed = CGRectNull;
-    for (NSValue *value in self.keyFrames) {
-        CGRect rect = value.CGRectValue;
-        if (CGRectContainsPoint(rect, point) && (CGRectIsNull(pressed) ||
-            rect.size.width*rect.size.height < pressed.size.width*pressed.size.height)) pressed = rect;
-    }
-    if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
-    // Native hit cells may tile the whole keyboard. Cut out inset faces,
-    // not full hit cells, to preserve the seams on both 9/26-key layouts.
-    CALayer *mask = [self nativeGutterMask];
-    if (!mask) return;
-    CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
-    CGFloat alpha = [self number:@"Opacity" fallback:.65 low:0 high:1];
-    if (brightness <= 0 || alpha <= 0) return;
-    BOOL fast = NO; // 智能降档已随 2.1.0 移除，特效参数不再被运行时砍。
-    BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
-    NSUInteger limit = fast ? 1 : 2;
-    [self retireOldestPulseForLimit:limit];
-    NSInteger mode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
-    self.hue = fmod(self.hue+.137,1);
-    CGFloat hue = mode == 1 ? [self number:@"Hue" fallback:.55 low:0 high:1] :
-        (mode == 2 ? point.x/MAX(1,self.bounds.size.width) : self.hue);
-    UIColor *color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:brightness alpha:1];
-    CGFloat reach = MIN(210,MAX(100,[self number:@"BackgroundRadius" fallback:180 low:60 high:360]));
-    CGFloat duration = MIN(.75,MAX(.42,[self number:@"Duration" fallback:.55 low:.15 high:1.2]));
-    if (fast) { duration = .38; reach = MIN(reach,145); }
-    if (reduce) reach = 32;
-    CGPoint origin = CGPointMake(CGRectGetMidX(pressed),CGRectGetMaxY(pressed)+1);
-    CALayer *pulse = [self recycledPulseNamed:@"RKNativeWeTypeSpread"];
-    CALayer *bed = [CALayer layer];
-    bed.frame = self.bounds;
-    bed.bounds = self.bounds;
-    bed.mask = mask;
-    [pulse addSublayer:bed];
-    // This pool uses the same colors, stops, origin and animation as WeType.
-    CAGradientLayer *pool = [CAGradientLayer layer];
-    pool.type = kCAGradientLayerRadial;
-    pool.frame = CGRectMake(origin.x-reach,origin.y-reach,reach*2,reach*2);
-    pool.startPoint = CGPointMake(.5,.5);
-    pool.endPoint = CGPointMake(1,1);
-    pool.colors = @[(id)[color colorWithAlphaComponent:.38].CGColor,
-        (id)[color colorWithAlphaComponent:.75].CGColor,
-        (id)color.CGColor, (id)[color colorWithAlphaComponent:0].CGColor];
-    pool.locations = @[@0,@.4,@.72,@1];
-    [bed addSublayer:pool];
-    // Only the tapped key gets an additional face-local expansion.
-    UIBezierPath *facePath = RKKeyboardKeyFacePath(pressed);
-    CGRect face = facePath.bounds;
-    CAShapeLayer *capMask = [CAShapeLayer layer];
-    capMask.frame = self.bounds;
-    capMask.path = facePath.CGPath;
-    CALayer *cap = [CALayer layer];
-    cap.frame = self.bounds;
-    cap.bounds = self.bounds;
-    cap.mask = capMask;
-    [pulse addSublayer:cap];
-    CGPoint center = CGPointMake(CGRectGetMidX(face),CGRectGetMidY(face));
-    CGFloat capReach = MAX(1,hypot(face.size.width,face.size.height)*.6);
-    CAGradientLayer *capPool = [CAGradientLayer layer];
-    capPool.type = pool.type;
-    capPool.frame = CGRectMake(center.x-capReach,center.y-capReach,capReach*2,capReach*2);
-    capPool.startPoint = pool.startPoint;
-    capPool.endPoint = pool.endPoint;
-    capPool.colors = pool.colors;
-    capPool.locations = pool.locations;
-    [cap addSublayer:capPool];
-    if (!reduce) {
-        CABasicAnimation *spread = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
-        spread.fromValue = @.06; spread.toValue = @1;
-        spread.duration = duration;
-        spread.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
-        [pool addAnimation:spread forKey:@"bedSpreadTravel"];
-        [capPool addAnimation:spread forKey:@"pressedCapSpreadTravel"];
-    }
-    CAKeyframeAnimation *life = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
-    CGFloat peak = MIN(1,alpha*1.35);
-    life.values = @[@0,@(peak),@(peak),@0];
-    life.keyTimes = @[@0,@.06,@.65,@1];
-    life.duration = duration;
-    [pulse addAnimation:life forKey:@"bedEffectLifetime"];
-    // Shared lifetime and eviction: no timers, snapshots or per-neighbor waves.
 }
 
 - (void)showRippleAtPoint:(CGPoint)point {
@@ -769,15 +700,6 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     id lightPopValue = self.config[@"LightPop"];
     BOOL lightPop = lightPopValue ? [lightPopValue boolValue] : NO;
     BOOL doLightPop = lightPop || style == 2;
-    if (style == 1 && !weType && [self usesNativeKeycapGlow]) {
-        [self showNativeWeTypeSpreadAtPoint:point];
-        return;
-    }
-    if (style == 1 && !weType && [self usesNativeKeycapGlow]) {
-        if (doLightPop) [self showNeonPressAtPoint:point sourceView:sourceView evictAll:NO];
-        [self showNativeWeTypeSpreadAtPoint:point];
-        return;
-    }
     if (style == 3) {
         if (doLightPop) [self showNeonPressAtPoint:point sourceView:sourceView evictAll:NO];
         [self showCrispUnderlightAtPoint:point];

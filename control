@@ -1,6 +1,6 @@
 Package: com.minis.rainbowkeyboard
 Name: 彩虹键盘光效
-Version: 2.1.1
+Version: 2.1.2
 Architecture: iphoneos-arm64
 Description: 霓虹键床光效，支持原生键盘和微信输入法
  2.1.1 主线程开销清扫：候选渐变模式真正生效与三处遍历缓存化。
