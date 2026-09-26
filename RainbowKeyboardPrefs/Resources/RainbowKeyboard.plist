@@ -9,14 +9,6 @@
             <key>label</key><string>流畅度保护</string>
             <key>footerText</key><string>打字时检测当前进程的调度卡顿，连续卡顿会降低装饰光效，稳定后逐步恢复。不会修改保存的主题，不记录输入文字。共享输入法进程不按 App 建立档案。</string>
         </dict>
-        <dict>
-            <key>cell</key><string>PSSwitchCell</string>
-            <key>key</key><string>SmartPerformance</string>
-            <key>label</key><string>智能流畅模式</string>
-            <key>default</key><true/>
-            <key>defaults</key><string>com.minis.rainbowkeyboard</string>
-            <key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string>
-        </dict>
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
@@ -155,22 +147,6 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSLinkCell</string>
-			<key>key</key>
-			<string>PerformanceMode</string>
-			<key>action</key>
-			<string>choosePerformanceMode</string>
-			<key>label</key>
-			<string>性能模式</string>
-			<key>default</key>
-			<integer>1</integer>
-			<key>defaults</key>
-			<string>com.minis.rainbowkeyboard</string>
-			<key>PostNotification</key>
-			<string>com.minis.rainbowkeyboard.changed</string>
-		</dict>
-		<dict>
-			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
 			<string>更多</string>
@@ -190,7 +166,6 @@
 			<string>恢复默认设置</string>
 			<key>action</key>
 			<string>resetToDefaults</string>
-		</dict>
-	</array>
+		</dict></array>
 </dict>
 </plist>

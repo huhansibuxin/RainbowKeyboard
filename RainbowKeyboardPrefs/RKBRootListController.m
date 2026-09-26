@@ -19,31 +19,6 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
                                           NULL, NULL, YES);
 }
 
-static void RKApplyPerformancePreset(NSMutableDictionary *values, NSInteger mode) {
-    NSArray *profiles = @[
-        // 省电
-        @{@"Opacity":@0.42, @"Brightness":@0.80, @"Duration":@0.42,
-          @"Spread":@1.50, @"Softness":@10, @"CoreStrength":@0.32,
-          @"MaxEffects":@2, @"BackgroundFeedback":@NO, @"AmbientGlow":@NO,
-          @"BackgroundStrength":@0.10},
-        // 平衡
-        @{@"Opacity":@0.65, @"Brightness":@0.95, @"Duration":@0.55,
-          @"Spread":@2.00, @"Softness":@8, @"CoreStrength":@0.50,
-          @"MaxEffects":@4, @"BackgroundFeedback":@YES, @"AmbientGlow":@YES,
-          @"BackgroundStrength":@0.18},
-        // 极致
-        @{@"Opacity":@0.78, @"Brightness":@1.00, @"Duration":@0.45,
-          @"Spread":@2.25, @"Softness":@7, @"CoreStrength":@0.62,
-          @"MaxEffects":@6, @"BackgroundFeedback":@YES, @"AmbientGlow":@YES,
-          @"BackgroundStrength":@0.24}
-    ];
-    if (mode >= 0 && mode < (NSInteger)profiles.count) {
-        [values addEntriesFromDictionary:profiles[mode]];
-        values[@"PerformanceMode"] = @(mode);
-        values[@"Preset"] = @(mode);
-    }
-}
-
 @interface RKBAdvancedListController : PSListController <UIColorPickerViewControllerDelegate>
 @property(nonatomic, copy) NSString *editingColorKey;
 @end
@@ -83,9 +58,7 @@ static void RKApplyPerformancePreset(NSMutableDictionary *values, NSInteger mode
     NSMutableDictionary *values = [RKReadPreferences() mutableCopy] ?: [NSMutableDictionary dictionary];
     NSInteger number = [value integerValue];
 
-    if ([key isEqualToString:@"PerformanceMode"]) {
-        RKApplyPerformancePreset(values, number);
-    } else if ([key isEqualToString:@"EffectStyle"] || [key isEqualToString:@"ColorMode"]) {
+    if ([key isEqualToString:@"EffectStyle"] || [key isEqualToString:@"ColorMode"]) {
         values[key] = value;
         values[@"Theme"] = @0;
         values[@"Preset"] = @(-1);
@@ -152,27 +125,6 @@ static void RKApplyPerformancePreset(NSMutableDictionary *values, NSInteger mode
                             values:@[@0, @1, @2]];
 }
 
-- (void)choosePerformanceMode {
-    NSInteger current = [RKReadPreferences()[@"PerformanceMode"] integerValue];
-    if (!RKReadPreferences()[@"PerformanceMode"]) current = 1;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"性能模式"
-                                                                     message:@"选择后会自动调整光效数量、持续时间和背景效果。"
-                                                              preferredStyle:UIAlertControllerStyleActionSheet];
-    NSArray *titles = @[@"省电", @"平衡", @"高性能"];
-    for (NSInteger i = 0; i < (NSInteger)titles.count; i++) {
-        NSString *name = titles[i];
-        NSString *buttonTitle = i == current ? [NSString stringWithFormat:@"✓ %@", name] : name;
-        [alert addAction:[UIAlertAction actionWithTitle:buttonTitle style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-            NSMutableDictionary *values = [RKReadPreferences() mutableCopy] ?: [NSMutableDictionary dictionary];
-            RKApplyPerformancePreset(values, i);
-            RKSaveAndNotify(values);
-            [self reloadSpecifiers];
-        }]];
-    }
-    [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
-    [self presentViewController:alert animated:YES completion:nil];
-}
-
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     UITableViewCell *cell = [super tableView:tableView cellForRowAtIndexPath:indexPath];
     PSSpecifier *specifier = [self specifierAtIndexPath:indexPath];
@@ -193,11 +145,6 @@ static void RKApplyPerformancePreset(NSMutableDictionary *values, NSInteger mode
         NSArray *titles = @[@"彩虹", @"固定颜色", @"横向渐变"];
         NSInteger value = [RKReadPreferences()[key] integerValue];
         cell.detailTextLabel.text = (value >= 0 && value < (NSInteger)titles.count) ? titles[value] : @"彩虹";
-    } else if ([key isEqualToString:@"PerformanceMode"]) {
-        NSArray *titles = @[@"省电", @"平衡", @"高性能"];
-        NSInteger value = [RKReadPreferences()[key] integerValue];
-        if (!RKReadPreferences()[key]) value = 1;
-        cell.detailTextLabel.text = (value >= 0 && value < (NSInteger)titles.count) ? titles[value] : @"平衡";
     }
     return cell;
 }

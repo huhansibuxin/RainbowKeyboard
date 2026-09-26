@@ -3,8 +3,6 @@
 #import <objc/runtime.h>
 #import "RainbowEffectView.h"
 #import "RKKeyboardGeometry.h"
-#import "RKBlackKeyboard.h"
-#import "RKAdaptivePerformance.h"
 static char RKOverlayKey;
 static char RKOverlayBoundsKey;
 static char RKPendingPressKey;
@@ -55,7 +53,6 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
         if (!host || !host.window) continue;
         CGPoint point = [touch locationInView:host];
         if (!CGRectContainsPoint(host.bounds, point)) continue;
-        RKAdaptiveNoteInput();
         RKPendingPress *pending = objc_getAssociatedObject(host, &RKPendingPressKey);
         if (!pending) {
             pending = [RKPendingPress new];
@@ -75,8 +72,6 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
             UIView *liveHost = weakHost;
             CFTimeInterval now = CACurrentMediaTime();
             if (!liveHost || !liveHost.window || liveHost.hidden || now - pending.time > .080) return;
-            // Throttle decoration before geometry scanning, never UIKit input.
-            if ((RKAdaptiveFastInput() || RKAdaptiveLevel() >= 2) && now - pending.lastRendered < .10) return;
             CGPoint touchPoint = pending.point;
             UIView *sourceView = pending.source;
             RainbowEffectView *effect = objc_getAssociatedObject(liveHost, &RKOverlayKey);
@@ -84,7 +79,6 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
                 effect = [[RainbowEffectView alloc] initWithFrame:liveHost.bounds];
                 objc_setAssociatedObject(liveHost, &RKOverlayKey, effect, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 [liveHost addSubview:effect];
-                RKApplyBlackKeyboardHost(liveHost);
             }
             NSValue *oldBoundsValue = objc_getAssociatedObject(liveHost, &RKOverlayBoundsKey);
             BOOL geometryChanged = !oldBoundsValue ||

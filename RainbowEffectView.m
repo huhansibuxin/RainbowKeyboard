@@ -5,7 +5,7 @@
 #import <math.h>
 #import "RKPreferences.h"
 #import "RKThemeEngine.h"
-#import "RKAdaptivePerformance.h"
+
 static NSDictionary *RKReadPreferences(void) {
     return RKThemeMergedPreferences(RKReadEffectivePreferences());
 }
@@ -41,6 +41,7 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 @property(nonatomic,strong) NSArray<NSValue *> *cachedCenters;
 @property(nonatomic,strong) NSArray<RKKeyWaveGeometry *> *cachedWaveGeometries;
 @property(nonatomic) CGRect cachedGeometryBounds;
+@property(nonatomic,strong) NSMutableArray<CALayer *> *pulsePool;
 @end
 @implementation RainbowEffectView
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -66,30 +67,20 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     NSDictionary *newConfig = RKReadPreferences();
     if (!newConfig) newConfig = @{};
     self.config = newConfig;
-    RKAdaptiveSetEnabled(!newConfig[@"SmartPerformance"] || [newConfig[@"SmartPerformance"] boolValue]);
 }
 - (CGFloat)number:(NSString *)key fallback:(CGFloat)fallback low:(CGFloat)low high:(CGFloat)high {
     id x = self.config[key];
     CGFloat v = [x respondsToSelector:@selector(doubleValue)] ? [x doubleValue] : fallback;
-    CGFloat result = isfinite(v) ? MIN(high,MAX(low,v)) : fallback;
-    NSInteger level = RKAdaptiveLevel();
-    if (level) {
-        if ([key isEqualToString:@"MaxEffects"]) result = MIN(result, level == 1 ? 2 : 1);
-        if ([key isEqualToString:@"Duration"] || [key isEqualToString:@"BackgroundDuration"])
-            result = MIN(result, level == 1 ? 0.35 : 0.22);
-        if ([key isEqualToString:@"BackgroundRadius"]) result = MIN(result, 110);
-    }
-    return result;
+    return isfinite(v) ? MIN(high,MAX(low,v)) : fallback;
 }
 - (BOOL)flag:(NSString *)key {
-    if (RKAdaptiveLevel() && ([key isEqualToString:@"AmbientGlow"] || [key isEqualToString:@"BackgroundFeedback"])) return NO;
     return !self.config[key] || [self.config[key] boolValue];
 }
 - (CGFloat)neonSaturation:(CGFloat)base {
     return base * [self number:@"NeonSaturation" fallback:.72 low:0 high:1];
 }
 - (BOOL)preservesBlackFaces {
-    return [self flag:@"PureBlackKeyboard"];
+    return NO; // 纯黑键盘引擎已随 2.1.0 移除，无黑色键面需要保留。
 }
 - (CAShapeLayer *)keyGutterMask {
     if (!self.cachedGutterPath || !CGRectEqualToRect(self.cachedGeometryBounds, self.bounds)) {
@@ -117,7 +108,45 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 }
 - (void)didMoveToWindow {
     [super didMoveToWindow];
-    if (!self.window) for (CALayer *pulse in self.layer.sublayers.copy) [pulse removeFromSuperlayer];
+    if (!self.window) {
+        for (CALayer *pulse in self.layer.sublayers.copy) [pulse removeFromSuperlayer];
+        [self drainPulsePool];
+    }
+}
+// —— 图层池（1.5.0 优化回归，2.1.0 移植到上游键床特效）——
+// 打字是高频路径：每次按键新建顶层脉冲容器并淘汰最旧者，会让图层树反复增删。
+// 池只回收已播完的顶层容器（模型 opacity 恒 0，动画结束后无副作用）；
+// 子层树随样式而异，复用时整体摘除重建，仅顶层容器与挂载成本被省下。
+- (NSMutableArray<CALayer *> *)pulsePool {
+    if (!_pulsePool) _pulsePool = [NSMutableArray array];
+    return _pulsePool;
+}
+- (CALayer *)recycledPulseNamed:(NSString *)name {
+    CALayer *pulse = self.pulsePool.lastObject;
+    if (pulse) {
+        [self.pulsePool removeLastObject];
+        for (CALayer *sub in pulse.sublayers.copy) [sub removeFromSuperlayer];
+    } else {
+        pulse = [CALayer layer];
+    }
+    [pulse removeAllAnimations];
+    pulse.name = name;
+    pulse.frame = self.bounds;
+    pulse.bounds = self.bounds;
+    pulse.opacity = 0;
+    if (pulse.superlayer == nil) [self.layer addSublayer:pulse];
+    return pulse;
+}
+- (void)retireOldestPulseForLimit:(NSUInteger)limit {
+    while (self.layer.sublayers.count >= limit) {
+        CALayer *oldest = self.layer.sublayers.firstObject;
+        [oldest removeFromSuperlayer];
+        if (self.pulsePool.count < 4) [self.pulsePool addObject:oldest];
+    }
+}
+- (void)drainPulsePool {
+    // 池是池化图层的唯一持有者，清空即整棵子层树释放。
+    [self.pulsePool removeAllObjects];
 }
 - (void)setKeyFrames:(NSArray<NSValue *> *)keyFrames {
     if ([_keyFrames isEqualToArray:keyFrames]) return;
@@ -154,6 +183,7 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     self.cachedGutterPath = nil;
     self.cachedGeometryBounds = CGRectNull;
     for (CALayer *pulse in self.layer.sublayers.copy) [pulse removeFromSuperlayer];
+    [self drainPulsePool];
 }
 - (void)addAmbientGlowToPulse:(CALayer *)pulse origin:(CGPoint)origin radius:(CGFloat)radius
                          hue:(CGFloat)hue mode:(NSInteger)mode duration:(CGFloat)duration {
@@ -396,10 +426,10 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
     CGFloat alpha = [self number:@"Opacity" fallback:.65 low:0 high:1];
     if (brightness <= 0 || alpha <= 0) return;
-    BOOL fast = RKAdaptiveFastInput() || RKAdaptiveLevel() >= 2;
+    BOOL fast = NO; // 智能降档已随 2.1.0 移除，特效参数不再被运行时砍。
     BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
     NSUInteger limit = style == 0 ? 3 : (fast ? 1 : 2);
-    while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
+    [self retireOldestPulseForLimit:limit];
     NSInteger mode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
     self.hue = fmod(self.hue+.137,1);
     CGFloat hue = mode == 1 ? [self number:@"Hue" fallback:.55 low:0 high:1] :
@@ -417,13 +447,8 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     if (reduce) reach = 32;
     CGPoint origin = CGPointMake(CGRectGetMidX(pressed),CGRectGetMaxY(pressed)+1);
     // Ripples originate just below the key so their first crest is visible immediately.
-    CALayer *pulse = [CALayer layer];
-    pulse.name = style == 0 ? @"RKBedRipples" : @"RKBedSpread";
-    pulse.frame = self.bounds;
-    pulse.bounds = self.bounds;
-    pulse.opacity = 0;
+    CALayer *pulse = [self recycledPulseNamed:style == 0 ? @"RKBedRipples" : @"RKBedSpread"];
     pulse.mask = mask;
-    [self.layer addSublayer:pulse];
     [self addNativeBedSpreadToPulse:pulse origin:origin reach:reach color:color
                           duration:duration reduce:reduce];
     [self addNativeKeyWavesToPulse:pulse origin:origin reach:reach color:color
@@ -514,10 +539,10 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
     CGFloat alpha = [self number:@"Opacity" fallback:.65 low:0 high:1];
     if (brightness <= 0 || alpha <= 0) return;
-    BOOL fast = RKAdaptiveFastInput() || RKAdaptiveLevel() >= 2;
+    BOOL fast = NO; // 智能降档已随 2.1.0 移除，特效参数不再被运行时砍。
     BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
     NSUInteger limit = fast ? 1 : 2;
-    while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
+    [self retireOldestPulseForLimit:limit];
     NSInteger mode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
     self.hue = fmod(self.hue+.137,1);
     CGFloat hue = mode == 1 ? [self number:@"Hue" fallback:.55 low:0 high:1] :
@@ -528,12 +553,7 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     if (fast) { duration = .38; reach = MIN(reach,145); }
     if (reduce) reach = 32;
     CGPoint origin = CGPointMake(CGRectGetMidX(pressed),CGRectGetMaxY(pressed)+1);
-    CALayer *pulse = [CALayer layer];
-    pulse.name = @"RKNativeWeTypeSpread";
-    pulse.frame = self.bounds;
-    pulse.bounds = self.bounds;
-    pulse.opacity = 0;
-    [self.layer addSublayer:pulse];
+    CALayer *pulse = [self recycledPulseNamed:@"RKNativeWeTypeSpread"];
     CALayer *bed = [CALayer layer];
     bed.frame = self.bounds;
     bed.bounds = self.bounds;
@@ -648,26 +668,21 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
         self.underlightMaskIncludesNativeFaces = nativeFaces;
     }
     if (!self.underlightMaskImage) return;
-    BOOL fast = RKAdaptiveFastInput() || RKAdaptiveLevel() >= 2;
+    BOOL fast = NO; // 智能降档已随 2.1.0 移除，特效参数不再被运行时砍。
     BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
     NSUInteger limit = fast ? 1 : 2;
-    while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
+    [self retireOldestPulseForLimit:limit];
     NSInteger mode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
     self.hue = fmod(self.hue + .137,1);
     CGFloat hue = mode == 1 ? [self number:@"Hue" fallback:.55 low:0 high:1] :
         (mode == 2 ? point.x/MAX(1,self.bounds.size.width) : self.hue);
     UIColor *color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:brightness alpha:1];
-    CALayer *pulse = [CALayer layer];
-    pulse.name = @"RKExpandingUnderlight";
-    pulse.frame = self.bounds;
-    pulse.bounds = self.bounds;
-    pulse.opacity = 0;
+    CALayer *pulse = [self recycledPulseNamed:@"RKExpandingUnderlight"];
     CALayer *mask = [CALayer layer];
     mask.frame = self.bounds;
     mask.contentsScale = screenScale;
     mask.contents = (__bridge id)self.underlightMaskImage.CGImage;
     pulse.mask = mask;
-    [self.layer addSublayer:pulse];
     // Launch from just underneath the pressed key, rather than its letter.
     CGPoint origin = CGPointMake(CGRectGetMidX(pressed),CGRectGetMaxY(pressed)+1);
     CGFloat reach = MIN(210,MAX(105,[self number:@"BackgroundRadius" fallback:180 low:60 high:360]));
@@ -766,7 +781,7 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     CGFloat duration = [self number:@"Duration" fallback:.55 low:.15 high:1.2];
     if (evictAll) {
         NSUInteger limit = (NSUInteger)[self number:@"MaxEffects" fallback:4 low:1 high:8];
-        while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
+        [self retireOldestPulseForLimit:limit];
     }
     NSInteger mode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
     self.hue = fmod(self.hue + .137, 1);
@@ -787,7 +802,7 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
         }
         RKShowNeonKeyPress(self, value.CGRectValue, color,
             pressBrightness,
-            duration, UIAccessibilityIsReduceMotionEnabled() || [self flag:@"SmartPerformance"], sourceView);
+            duration, UIAccessibilityIsReduceMotionEnabled(), sourceView);
         break;
     }
 }

@@ -4,7 +4,6 @@
 #import <mach-o/dyld.h>
 #import <os/lock.h>
 #import "RKPreferences.h"
-#import "RKAdaptivePerformance.h"
 #import "RKKeyboardGeometry.h"
 
 static NSDictionary *RKCandidatePrefs;
@@ -49,14 +48,7 @@ static CGFloat RKCandidateAnimationSpeed = 0.14;
         RKCandidateDisplayLink = nil;
         return;
     }
-    static NSInteger previousLevel;
-    NSInteger level = RKAdaptiveLevel();
-    BOOL levelChanged = level != previousLevel;
-    previousLevel = level;
-    link.preferredFramesPerSecond = level ? 10 : 20;
-    // One redraw on transition removes/restores existing gradient pixels.
-    // During pressure only natural candidate updates draw after this.
-    if (level && !levelChanged) return;
+    link.preferredFramesPerSecond = 20;
     for (UIView *view in RKCandidateViews.allObjects) {
         if (!view.window || view.hidden || view.alpha <= 0.01 || CGRectIsEmpty(view.bounds)) continue;
         BOOL visible = YES;
@@ -166,7 +158,6 @@ static void RKCandidateChanged(CFNotificationCenterRef center, void *observer, C
     dispatch_async(dispatch_get_main_queue(), ^{ RKCandidateReload(); });
 }
 static void RKDrawGradientText(CGRect rect, CGRect textRect, void (^original)(void)) {
-    if (RKAdaptiveLevel() >= 2) { original(); return; }
     CGContextRef ctx = UIGraphicsGetCurrentContext();
     if (RKCandidateDrawingDepth || !ctx || CGRectIsEmpty(textRect)) { original(); return; }
     if (!RKCandidateCachedGradient) {
@@ -227,7 +218,6 @@ static BOOL RKNativeTextDrawingEnabled(void) {
 // TUICandidateLabel draws CoreText directly. Capture just its drawRect glyphs, not
 // its background, and use their ink bounds so short words get both endpoint colors.
 static void RKDrawNativeGlyphView(UIView *view, CGRect dirtyRect, void (^original)(void)) {
-    if (RKAdaptiveLevel() >= 2) { original(); return; }
     [RKCandidateViews addObject:view];
     CGRect bounds = view.bounds;
     if (!RKCandidateFlag(@"CandidateGradient") ||
