@@ -41,6 +41,8 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 @property(nonatomic,strong) NSArray<NSValue *> *cachedCenters;
 @property(nonatomic,strong) NSArray<RKKeyWaveGeometry *> *cachedWaveGeometries;
 @property(nonatomic) CGRect cachedGeometryBounds;
+@property(nonatomic) NSUInteger underlightMaskKeyCount; // 建罩时键位数（2.1.3 一致性校验）
+@property(nonatomic) CGRect underlightMaskKeyUnion;     // 建罩时键位 union
 @property(nonatomic,strong) NSMutableArray<CALayer *> *pulsePool;
 @property(nonatomic,weak) UIView *nativeScanAnchor;          // 原生判定缓存的失效锚点
 @property(nonatomic) BOOL nativeGlowCacheValid, nativeGlowResult;
@@ -394,6 +396,15 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     // Native: let the existing wave illuminate both the bed and key faces.
     // WeType/unknown: retain the original face cut-outs and all animation values.
     BOOL nativeFaces = [self usesNativeKeycapGlow];
+    // 键位一致性校验（2.1.3）：布局切换后注册表可能短暂混合新旧键位，
+    // 遮罩若按错位帧缓存会只亮出几条缝。每次调用轻量重算键位 union 与数量，
+    // 与建罩时不一致立即重建——观感漂移窗口压缩到一次按键以内。
+    CGRect keyUnion = CGRectNull;
+    for (NSValue *value in self.keyFrames) keyUnion = CGRectUnion(keyUnion,value.CGRectValue);
+    BOOL keyMismatch = self.underlightMaskImage &&
+        (self.underlightMaskKeyCount != self.keyFrames.count ||
+         !CGRectEqualToRect(self.underlightMaskKeyUnion, keyUnion));
+    if (keyMismatch) self.underlightMaskImage = nil;
     if (!self.underlightMaskImage || self.underlightMaskIncludesNativeFaces != nativeFaces ||
         !CGRectEqualToRect(self.underlightMaskBounds,self.bounds) ||
         self.underlightMaskImage.scale != screenScale) {
@@ -423,24 +434,14 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
         UIGraphicsEndImageContext();
         self.underlightMaskBounds = self.bounds;
         self.underlightMaskIncludesNativeFaces = nativeFaces;
+        self.underlightMaskKeyCount = self.keyFrames.count;
+        self.underlightMaskKeyUnion = keyUnion;
     }
     if (!self.underlightMaskImage) return nil;
     CALayer *mask = [CALayer layer];
     mask.frame = self.bounds;
     mask.contentsScale = screenScale;
     mask.contents = (__bridge id)self.underlightMaskImage.CGImage;
-    return mask;
-}
-// 扩散(style 1)专用遮罩：整块键床区域白罩，不挖键面/键缝——径向渐变呈完整圆形。
-- (CALayer *)bedAreaMask {
-    CGRect bed = CGRectNull;
-    for (NSValue *value in self.keyFrames) bed = CGRectUnion(bed,value.CGRectValue);
-    if (CGRectIsNull(bed) || CGRectIsEmpty(bed)) bed = self.bounds;
-    CGRect area = CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds);
-    if (CGRectIsNull(area) || CGRectIsEmpty(area)) return nil;
-    CALayer *mask = [CALayer layer];
-    mask.frame = area;
-    mask.backgroundColor = UIColor.whiteColor.CGColor;
     return mask;
 }
 // Both effects live in the exposed keyboard bed. Neither outlines keycaps.
@@ -452,9 +453,9 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
             rect.size.width*rect.size.height < pressed.size.width*pressed.size.height)) pressed = rect;
     }
     if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
-    // 扩散(style 1)统一为「一整圈扩散」：光域是整块键床、不挖键面与键缝，
-    // 观感不再依赖键位帧对齐与布局切换时序；波纹(style 0)保留原键面镂空设计。
-    CALayer *mask = style == 0 ? [self waveUnderCapMask] : [self bedAreaMask];
+    // 扩散与波纹同款光域：键面挖空、只在键缝里透光（键帽不亮）。
+    // 样式差异只在内容——波纹=缝里的环形波，扩散=缝里的径向光团。
+    CALayer *mask = [self waveUnderCapMask];
     if (!mask) return;
     CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
     CGFloat alpha = [self number:@"Opacity" fallback:.65 low:0 high:1];
@@ -482,13 +483,10 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
     // Ripples originate just below the key so their first crest is visible immediately.
     CALayer *pulse = [self recycledPulseNamed:style == 0 ? @"RKBedRipples" : @"RKBedSpread"];
     pulse.mask = mask;
-    // 键缝背光与键位波动是波纹(style 0)的原生分层；扩散(style 1)保持纯圆形，不叠加。
-    if (style == 0) {
-        [self addNativeBedSpreadToPulse:pulse origin:origin reach:reach color:color
-                              duration:duration reduce:reduce];
-        [self addNativeKeyWavesToPulse:pulse origin:origin reach:reach color:color
-                             duration:duration reduce:reduce];
-    }
+    [self addNativeBedSpreadToPulse:pulse origin:origin reach:reach color:color
+                          duration:duration reduce:reduce];
+    [self addNativeKeyWavesToPulse:pulse origin:origin reach:reach color:color
+                         duration:duration reduce:reduce];
     CFTimeInterval now = [pulse convertTime:CACurrentMediaTime() fromLayer:nil];
     if (style == 0) {
         // A broad body, bright shoulder and crisp foam crest, followed by a weaker swell.
