@@ -28,7 +28,8 @@ static inline NSArray<NSString *> *RKDisplayColors(void) {
 static inline NSArray<NSString *> *RKDisplayKeys(void) {
     return [[[RKDisplayNumbers() arrayByAddingObjectsFromArray:RKDisplayFlags()]
         arrayByAddingObjectsFromArray:RKDisplayColors()]
-        arrayByAddingObjectsFromArray:@[@"PressBrightness", @"AmbientGlide"]];
+        arrayByAddingObjectsFromArray:@[@"PressBrightness", @"AmbientGlide",
+            @"BedGlow", @"LightPop"]];
 }
 static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[RKDisplayWordCount]) {
     memset(words, 0, RKDisplayWordCount * sizeof(uint64_t));
@@ -81,12 +82,23 @@ static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[R
     // and value bits 31..40 meet -- so an eleventh flag cannot be appended to it without
     // landing on the first flag's value bit. These live in the free gap above
     // PressBrightness (bit 43), allocated as presence/value pairs from the bottom up:
-    // AmbientGlide owns 44/45, the next flag added owns 46/47, and so on. Never renumber
-    // a pair that has shipped, for the same reason the positional list is append-only.
+    // AmbientGlide owns 44/45, BedGlow owns 46/47, LightPop owns 48/49, and so on.
+    // Never renumber a pair that has shipped, for the same reason the positional list
+    // is append-only.
     id ambientGlide = prefs[@"AmbientGlide"];
     if ([ambientGlide isKindOfClass:NSNumber.class]) {
         words[1] |= UINT64_C(1) << 44;
         if ([ambientGlide boolValue]) words[1] |= UINT64_C(1) << 45;
+    }
+    id bedGlow = prefs[@"BedGlow"];
+    if ([bedGlow isKindOfClass:NSNumber.class]) {
+        words[1] |= UINT64_C(1) << 46;
+        if ([bedGlow boolValue]) words[1] |= UINT64_C(1) << 47;
+    }
+    id lightPop = prefs[@"LightPop"];
+    if ([lightPop isKindOfClass:NSNumber.class]) {
+        words[1] |= UINT64_C(1) << 48;
+        if ([lightPop boolValue]) words[1] |= UINT64_C(1) << 49;
     }
 }
 static inline uint64_t RKDisplayChecksum(const uint64_t words[RKDisplayWordCount]) {
@@ -132,6 +144,10 @@ static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDispl
     // simply leaves the behaviour alone instead of forcing it off.
     if (words[1] & (UINT64_C(1) << 44))
         result[@"AmbientGlide"] = @((words[1] >> 45) & 1);
+    if (words[1] & (UINT64_C(1) << 46))
+        result[@"BedGlow"] = @((words[1] >> 47) & 1);
+    if (words[1] & (UINT64_C(1) << 48))
+        result[@"LightPop"] = @((words[1] >> 49) & 1);
     return result;
 }
 static inline int RKDisplayToken(NSUInteger index) {

@@ -219,21 +219,34 @@
 		</dict>
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
-			<key>label</key><string>背景霓虹</string>
-			<key>footerText</key><string>原生键盘与微信键盘共用配色。此处只控制键缝与键框周围的霓虹背光，不改变键帽自身的底色。</string>
+			<key>label</key><string>见缝发光（键缝背光）</string>
+			<key>footerText</key><string>主光效。点亮按键之间的横竖空白（键缝）与键框周围的背光，不改变键帽自身底色。每次点击都点亮键缝，可与「轻弹」叠加。默认开启；关闭后仅保留逐键描边与扩散色带。</string>
 		</dict>
 		<dict>
 			<key>cell</key><string>PSSwitchCell</string>
 			<key>defaults</key><string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string>
-			<key>key</key><string>AmbientGlow</string>
-			<key>label</key><string>背景霓虹扩散</string>
+			<key>key</key><string>BedGlow</string>
+			<key>label</key><string>见缝发光</string>
 			<key>default</key><true/>
 		</dict>
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
+			<key>label</key><string>轻弹（键帽发光）</string>
+			<key>footerText</key><string>独立开关。开启后除键缝发光外，按下的键帽本身亮起一种纯色光（可叠加在见缝发光上），随后淡回原配色。颜色按「颜色模式」循环，亮度由「键帽灯光亮度」控制。也可在「光效样式」选「霓虹键帽 · 轻弹」单独使用此效果。系统开启「减弱动态效果」时无回弹。</string>
+		</dict>
+		<dict>
+			<key>cell</key><string>PSSwitchCell</string>
+			<key>defaults</key><string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string>
+			<key>key</key><string>LightPop</string>
+			<key>label</key><string>轻弹（键帽发光）</string>
+			<key>default</key><false/>
+		</dict>
+		<dict>
+			<key>cell</key><string>PSGroupCell</string>
 			<key>label</key><string>背景霓虹跟随滑行</string>
-			<key>footerText</key><string>开启后，背景霓虹的光斑会从上一个按键的位置滑到当前按键，连续打字时像一块光跟着手指走。关闭后光斑直接出现在当前按键上、不发生位移，与更早的版本观感一致。需开启「背景霓虹扩散」；只影响背景霓虹的光斑，不影响键框与键面本身的亮灯。</string>
+			<key>footerText</key><string>开启后，背景霓虹的光斑会从上一个按键的位置滑到当前按键，连续打字时像一块光跟着手指走。关闭后光斑直接出现在当前按键上、不发生位移，与更早的版本观感一致。需开启「见缝发光」；只影响键缝背光的光斑，不影响键框与键面本身的亮灯。</string>
 		</dict>
 		<dict>
 			<key>cell</key><string>PSSwitchCell</string>
@@ -246,7 +259,7 @@
 		<dict>
 			<key>cell</key><string>PSGroupCell</string>
 			<key>label</key><string>背景霓虹强度</string>
-			<key>footerText</key><string>只在三星风格中控制键缝与键框周围的扩散背光。调低背光更淡，以键框为主；调高像霓虹灯向外散光。需同时开启「背景霓虹扩散」与「启用扩散色带」；0 关闭背光，不关闭键框。</string>
+			<key>footerText</key><string>只在三星风格中控制键缝与键框周围的扩散背光。调低背光更淡，以键框为主；调高像霓虹灯向外散光。需同时开启「见缝发光」与「启用扩散色带」；0 关闭背光，不关闭键框。</string>
 		</dict>
 		<dict>
 			<key>cell</key><string>PSSliderCell</string>

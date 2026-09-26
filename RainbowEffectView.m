@@ -33,7 +33,7 @@ static NSArray *RKAnimConstant(NSUInteger index) {
     static NSArray *table[RKConstCount];
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        table[RKConstAmbientLocations]    = @[@0, @.22, @.52, @.78, @1];
+        table[RKConstAmbientLocations]    = @[@0, @.1, @.38, @.7, @1];
         table[RKConstSpreadValues]        = @[@.04, @.64, @1, @1.08];
         table[RKConstSpreadKeyTimes]      = @[@0, @.32, @.7, @1];
         table[RKConstAmbientFadeValues]   = @[@0, @1, @.9, @0];
@@ -115,6 +115,8 @@ typedef struct {
     BOOL ambientGlow;
     BOOL backgroundFeedback;
     BOOL ambientGlide;             // let the ambient bloom travel from press to press
+    BOOL bedGlow;                  // 见缝发光（键缝背光）主特效，默认开
+    BOOL lightPop;                 // 轻弹（键帽发光）独立开关，默认关
     NSInteger style;
     NSInteger colorMode;
     CGFloat opacity;
@@ -360,6 +362,9 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     // Absent means on, which is what -flag: already answers, so an install that has never
     // seen the switch keeps the travel the pooled build introduced.
     p.ambientGlide = [self flag:@"AmbientGlide"];
+    p.bedGlow = [self flag:@"BedGlow"];
+    id lp = self.config[@"LightPop"];
+    p.lightPop = lp ? [lp boolValue] : NO;
     p.style = (NSInteger)[self number:@"EffectStyle" fallback:0 low:0 high:2];
     p.colorMode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
     p.opacity = [self number:@"Opacity" fallback:.65 low:0 high:1];
@@ -591,7 +596,7 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
                       hue:(CGFloat)hue mode:(NSInteger)mode duration:(CGFloat)duration {
     CGFloat strength = _params.ambientStrength;
     CGFloat alpha = _params.opacity * strength;
-    BOOL wanted = _params.ambientGlow && _params.backgroundFeedback && alpha > 0;
+    BOOL wanted = _params.bedGlow && alpha > 0;
     if (!wanted) {
         if (pulse.ambient) {
             [pulse.ambient removeFromSuperlayer];
@@ -611,9 +616,9 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
         pulse.ambient.frame = self.bounds;
         [pulse.container addSublayer:pulse.ambient];
         // Solid black mode has backlighting only; the optional wash belongs to other themes.
-        for (NSUInteger pass = [self preservesBlackFaces] ? 1 : 0; pass < 2; pass++) {
+        for (NSUInteger pass = 1; pass < 2; pass++) {
             CALayer *field = [CALayer layer];
-            field.name = pass ? @"gutterLight" : @"keyFaceWash";
+            field.name = @"gutterLight";
             RKDisableImplicitAnimations(field);
             field.frame = self.bounds;
             [pulse.ambient addSublayer:field];
@@ -663,7 +668,7 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
                 [bloom addAnimation:glide forKey:@"ambientGlide"];
             }
         }
-        CGFloat level = alpha * (pass ? 1 : .24);
+        CGFloat level = MIN(1.0, alpha * (pass ? 1.4 : .24));
         NSMutableArray *colors = pulse.bloomColorBuffer;
         if (!colors) {
             colors = [NSMutableArray arrayWithCapacity:5];
@@ -671,10 +676,10 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
             pulse.bloomColorBuffer = colors;
         }
         CGColorRef ramp[5] = {
-            RKCopiedAlpha(inner, level * .22),
-            RKCopiedAlpha(inner, level * .6),
+            RKCopiedAlpha(inner, level * .5),
+            RKCopiedAlpha(inner, level * .95),
             RKCopiedAlpha(middle, level),
-            RKCopiedAlpha(outer, level * .5),
+            RKCopiedAlpha(outer, level * .4),
             RKCopiedAlpha(outer, 0),
         };
         for (NSUInteger i = 0; i < 5; i++) {
@@ -726,8 +731,6 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     RKWavePulse *pulse = [self wavePulseForArmingWithLimit:MAX((NSUInteger)1, _params.maxEffects)];
     CFTimeInterval now = [pulse.container convertTime:CACurrentMediaTime() fromLayer:nil];
     CGFloat tail = duration * (.45 + band);
-    [self armAmbientOnPulse:pulse origin:origin radius:reach hue:hue mode:mode
-                   duration:travel + tail];
     for (NSUInteger keyIndex = 0; keyIndex < keyCount; keyIndex++) {
         CGRect rect = _keyFrameRects[keyIndex];
         BOOL touched = keyIndex == pressedIndex;
@@ -873,25 +876,33 @@ static void RKPreferencesChangedCallback(CFNotificationCenterRef center, void *o
     NSInteger mode = _params.colorMode;
     self.hue = fmod(self.hue + .137, 1);
     CGFloat hue = mode == 1 ? _params.hue : (mode == 2 ? point.x / MAX(1,self.bounds.size.width) : self.hue);
-    if (style == 0) {
-        // The wave pool owns its own capacity -- it re-arms a finished pulse, or the one
-        // that finishes soonest -- so the generic eviction below is skipped here. Counting
-        // pooled layers as if they were live waves would evict the pool itself.
-        [self showKeyWaveAtPoint:point hue:hue mode:mode];
-        return;
-    }
-    while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
-    if (style == 2) {
+    // 底床发光（键缝背光）——主特效，默认开，独立于样式，每次点击都点亮键缝。
+    CGFloat bgReach = _params.backgroundRadius * spread / 2;
+    CGFloat bgTravel = _params.backgroundDurationKeyWave;
+    CGFloat bgTail = duration * (.45 + _params.backgroundBand);
+    RKWavePulse *bedPulse = [self wavePulseForArmingWithLimit:MAX((NSUInteger)1, limit)];
+    [self armAmbientOnPulse:bedPulse origin:point radius:bgReach hue:hue mode:mode duration:bgTravel + bgTail];
+
+    // 轻弹（键帽发光）——独立开关，或与旧“霓虹键帽·轻弹”样式等价；可叠加在见缝发光上。
+    BOOL doLightPop = _params.lightPop || style == 2;
+    if (doLightPop) {
         for (NSValue *value in self.keyFrames) {
             if (!CGRectContainsPoint(value.CGRectValue, point)) continue;
             self.pressHue = fmod(self.pressHue + .38196601125, 1);
-            // 「亮色模式」（彩色/单色）已移除：轻弹固定使用逐次换色的鲜艳纯色。
             UIColor *color = [UIColor colorWithHue:self.pressHue saturation:1 brightness:1 alpha:1];
             RKShowNeonKeyPress(self, value.CGRectValue, color,
-                _params.pressBrightness,
-                duration, UIAccessibilityIsReduceMotionEnabled(), sourceView);
+                _params.pressBrightness, duration, UIAccessibilityIsReduceMotionEnabled(), sourceView);
             break;
         }
+    }
+
+    if (style == 0) {
+        [self showKeyWaveAtPoint:point hue:hue mode:mode];  // 仅逐键描边，环境光已在上方点灯
+        return;
+    }
+    if (style == 2) {
+        // 键帽发光已由上方 doLightPop 块处理（轻弹开关开启或本样式即轻弹）；
+        // 此样式不再叠加圆环，直接返回。
         return;
     }
     CGFloat radius = MIN(160, MAX(24, self.bounds.size.width / 10.0 * spread));
