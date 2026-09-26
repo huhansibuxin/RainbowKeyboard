@@ -200,3 +200,32 @@ static inline BOOL RKSavePreferences(NSMutableDictionary *values) {
     RKPublishPreferences(values);
     return YES;
 }
+
+// ---- 「自用」光效预设（随原版 1.2.1 光效链路一并保留）----
+// The owner's live values copied verbatim, trailing digits included: they were read
+// straight out of the device plist, and rounding them would change the look this
+// preset exists to reproduce.
+static inline NSDictionary<NSString *, NSNumber *> *RKPresetSelfUseTable(void) {
+    static NSDictionary *table;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        table = @{@"Opacity":@0.6,
+            @"Brightness":@0.8033448457717896,
+            @"NeonSaturation":@0.7006920576095581,
+            @"Duration":@0.2959342300891876,
+            @"Spread":@1.5020183324813843,
+            @"Softness":@5,
+            @"CoreStrength":@0.6,
+            @"MaxEffects":@2.99826979637146,
+            @"BackgroundStrength":@0.30484429001808167,
+            @"BackgroundRadius":@126.26296997070312,
+            @"BackgroundBand":@0.29783737659454346,
+            @"AmbientStrength":@0.85,
+            @"BackgroundDuration":@0.4,
+            @"Hue":@0.32814300060272217,
+            @"PressBrightness":@0.9013840556144714,
+            @"EffectStyle":@0,
+            @"ColorMode":@0};
+    });
+    return table;
+}
