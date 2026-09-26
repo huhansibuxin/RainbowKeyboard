@@ -7,6 +7,7 @@
 #import "RKKeyboardGeometry.h"
 
 static NSDictionary *RKCandidatePrefs;
+static BOOL RKCandidateAnimatedMode(void); // 定义在 RKCandidateFlag 附近，proxy 的 tick 要用
 static CGGradientRef RKCandidateCachedGradient;
 static NSHashTable<UIView *> *RKCandidateViews;
 static __thread NSUInteger RKCandidateDrawingDepth;
