@@ -240,7 +240,12 @@ NSArray<NSValue *> *RKKeyboardKeyFrames(UIView *host) {
             [visibleGetter getReturnValue:&visible];
             if (!visible) continue;
             CGRect rect = RKRect(key, @"displayFrame");
-            if (!RKValidKeyRect(rect, host.bounds)) rect = RKRect(key, @"frame");
+            UIView *keyplaneView = [plane isKindOfClass:UIView.class] ? plane : nil;
+            if (keyplaneView) rect = [keyplaneView convertRect:rect toView:host];
+            if (!RKValidKeyRect(rect, host.bounds)) {
+                rect = RKRect(key, @"frame");
+                if (keyplaneView) rect = [keyplaneView convertRect:rect toView:host];
+            }
             RKAddKey(frames, rect, host.bounds);
         }
     }
