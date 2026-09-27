@@ -1,8 +1,12 @@
 Package: com.minis.rainbowkeyboard
 Name: 彩虹键盘光效
-Version: 2.3.1
+Version: 2.3.2
 Architecture: iphoneos-arm64
 Description: 霓虹键床光效，支持原生键盘和微信输入法
+ 2.3.2 注销/重启回落值固化：把当前配置(光效风格=扩散、候选栏渐变=关、
+ 全部高级参数)固化为键盘出厂回落值与“恢复默认”落点，注销后不再回落为
+ 波纹+渐变开的出厂值。实现=单一入口 RKReadEffectivePreferences() 叠加
+ “自用固化表”(RKPreferences.h)，渲染层与候选渐变层一并见效。
  2.1.1 主线程开销清扫：候选渐变模式真正生效与三处遍历缓存化。
  一、候选栏渐变模式真正生效：静态渐变（默认）不再运行 20fps DisplayLink
  轮询，只在候选内容变化时画一次；关闭档完全跳过渐变；流动/呼吸/彩虹/

@@ -6,6 +6,68 @@
 static NSString * const RKPreferencesPath = @"/var/mobile/Library/Preferences/com.minis.rainbowkeyboard.plist";
 static CFStringRef const RKPreferencesDomain = CFSTR("com.minis.rainbowkeyboard");
 
+// 自用固化表：注销/重启后 notifyd 状态清空，键盘进程(InputUI/wxkb_plugin, 沙盒)又读不到
+// /var/mobile/Library/Preferences 下的 plist，此时用它兜底，使回落值 = 用户当前配置
+// （光效风格=扩散 / 候选栏渐变=关 / 全部高级参数），而非出厂回落值。
+// 单一入口：键盘渲染层(RainbowEffectView)与候选渐变层(CandidateGradient)都经
+// RKReadEffectivePreferences() 取值，故只需在这一个点兜底即可全覆盖。
+// 取值 = 设备 plist 2026-09-28 实时值，逐项照抄不做取整。
+static inline NSDictionary *RKPresetSelfUseTable(void) {
+    static NSDictionary *table;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        table = @{
+            @"Opacity": @(0.7991349101066589),
+            @"Brightness": @(1.0),
+            @"NeonSaturation": @(0.7006920576095581),
+            @"Duration": @(0.45),
+            @"Spread": @(2.25),
+            @"Softness": @(7.0),
+            @"CoreStrength": @(0.62),
+            @"MaxEffects": @(6.0),
+            @"AmbientStrength": @(0.85),
+            @"BackgroundStrength": @(0.24),
+            @"BackgroundDuration": @(0.4),
+            @"BackgroundRadius": @(100.65743255615234),
+            @"BackgroundBand": @(0.29783737659454346),
+            @"ColorMode": @(0.0),
+            @"Hue": @(0.32814300060272217),
+            @"EffectStyle": @(1.0),
+            @"Preset": @(-1.0),
+            @"CandidateGradient": @(0),
+            @"CandidateNative": @(0),
+            @"CandidateWeType": @(0),
+            @"PureBlackKeyboard": @(0),
+            @"Enabled": @(1),
+            @"NativeKeyboard": @(0),
+            @"WeChatKeyboard": @(1),
+            @"RippleEnabled": @(1),
+            @"AmbientGlow": @(1),
+            @"BackgroundFeedback": @(1),
+            @"PressColorMode": @(0),
+            @"PressBrightness": @(0.9013840556144714),
+            @"SmartPerformance": @(0),
+            @"Theme": @(0),
+            @"CandidateStart": @[@(0.6627452373504639), @(0.40784311294555664), @(0.0)],
+            @"CandidateEnd": @[@(0.803921639919281), @(0.9098039269447327), @(0.7098039984703064)],
+            @"KeyboardBackgroundColor": @[@(0.7960782647132874), @(0.9411764740943909), @(0.9999999403953552)],
+            @"KeycapColor": @[@(0.6941176056861877), @(0.5490196347236633), @(0.9960784316062927)],
+            @"PressColor": @[@(0.4745098948478699), @(0.10196084529161453), @(0.2392156720161438)],
+        };
+    });
+    return table;
+}
+
+// 用固化表补齐缺失键：已解析出的值优先，缺失键回落到固化表。
+// 注销后 stored/transport 皆空 → 全部键由固化表提供，键盘即按用户配置渲染。
+static inline NSDictionary *RKApplySelfUseFallback(NSDictionary *values) {
+    NSDictionary *table = RKPresetSelfUseTable();
+    if (!table.count) return values ?: @{};
+    NSMutableDictionary *merged = [table mutableCopy];
+    if (values.count) [merged addEntriesFromDictionary:values];
+    return merged;
+}
+
 static inline void RKRequestPreferencesRelay(void) {
     static NSLock *lock;
     static CFAbsoluteTime last;
@@ -122,7 +184,7 @@ static inline NSDictionary *RKReadEffectivePreferences(void) {
     // Commit checks keep same-process saves immediate, even before Darwin callbacks.
     // Missing transport is retried at a bounded rate, never once per keystroke.
     if (!cached || changed || commit != lastCommit || (!complete && now - lastRead > 2)) {
-        cached = RKReadUncachedEffectivePreferences();
+        cached = RKApplySelfUseFallback(RKReadUncachedEffectivePreferences());
         lastRead = now;
         lastCommit = commit;
     }
