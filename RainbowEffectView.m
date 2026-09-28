@@ -42,6 +42,48 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 @property(nonatomic,strong) NSArray<RKKeyWaveGeometry *> *cachedWaveGeometries;
 @property(nonatomic) CGRect cachedGeometryBounds;
 @end
+
+// 落点 → 按压键解析（仅服务于扩散/波纹，即 showBedEffectAtPoint）。
+// 原生键盘的 displayFrame 就是命中单元，落点基本总落在某个键内；
+// WeType 收集到的是键帽视觉 frame（圆角 + 间距），按进键缝时落点处于几何空洞，
+// 而微信自身按更大的命中单元仍会上屏字符 —— 于是出现「出了字却没有光效」。
+// 这里对空洞落点做「最近键吸附」，还原微信的命中判定，让光效跟着实际生效的键走。
+// 约束一：落点须落在键区包围盒外扩 8pt 内，挡住候选栏 / 工具条误触发。
+// 约束二：吸附距离须 ≤ clamp(最近键高 × 0.6, 8, 26)pt，键缝实际仅 2~6pt，余量充足。
+// 返回 CGRectNull 表示此落点不算有效按键，调用方保持原样放弃。
+static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint point) {
+    CGRect pressed = CGRectNull;
+    CGFloat pressedArea = CGFLOAT_MAX;
+    for (NSValue *value in keyFrames) {
+        CGRect rect = value.CGRectValue;
+        CGFloat area = rect.size.width * rect.size.height;
+        if (area < pressedArea && CGRectContainsPoint(rect, point)) {
+            pressedArea = area;
+            pressed = rect;
+        }
+    }
+    if (!CGRectIsNull(pressed)) return pressed;
+    CGRect bed = CGRectNull;
+    for (NSValue *value in keyFrames) bed = CGRectUnion(bed, value.CGRectValue);
+    if (CGRectIsNull(bed) || !CGRectContainsPoint(CGRectInset(bed, -8, -8), point)) return CGRectNull;
+    CGRect nearest = CGRectNull;
+    CGFloat nearestDistance = CGFLOAT_MAX;
+    for (NSValue *value in keyFrames) {
+        CGRect rect = value.CGRectValue;
+        CGFloat dx = 0, dy = 0;
+        if (point.x < CGRectGetMinX(rect)) dx = CGRectGetMinX(rect) - point.x;
+        else if (point.x > CGRectGetMaxX(rect)) dx = point.x - CGRectGetMaxX(rect);
+        if (point.y < CGRectGetMinY(rect)) dy = CGRectGetMinY(rect) - point.y;
+        else if (point.y > CGRectGetMaxY(rect)) dy = point.y - CGRectGetMaxY(rect);
+        CGFloat distance = hypot(dx, dy);
+        if (distance < nearestDistance) { nearestDistance = distance; nearest = rect; }
+    }
+    if (CGRectIsNull(nearest)) return CGRectNull;
+    CGFloat maxSnap = MIN(26.0, MAX(8.0, nearest.size.height * .6));
+    if (nearestDistance > maxSnap) return CGRectNull;
+    return nearest;
+}
+
 @implementation RainbowEffectView
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
@@ -384,12 +426,10 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 }
 // Both effects live in the exposed keyboard bed. Neither outlines keycaps.
 - (void)showBedEffectAtPoint:(CGPoint)point style:(NSInteger)style {
-    CGRect pressed = CGRectNull;
-    for (NSValue *value in self.keyFrames) {
-        CGRect rect = value.CGRectValue;
-        if (CGRectContainsPoint(rect, point) && (CGRectIsNull(pressed) ||
-            rect.size.width*rect.size.height < pressed.size.width*pressed.size.height)) pressed = rect;
-    }
+    // 键缝落点吸附：原「落点必须落在键帽矩形内」的判据会让 WeType 全键盘的
+    // 宽键缝整段丢光效（微信仍会上屏字符）。改用 RKResolvePressedKeyFrame
+    // 还原命中判定；包含落点的场景逐位等同原逻辑，观感零变化。
+    CGRect pressed = RKResolvePressedKeyFrame(self.keyFrames, point);
     if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
     CALayer *mask = [self waveUnderCapMask];
     if (!mask) return;
