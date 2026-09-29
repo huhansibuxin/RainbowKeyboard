@@ -131,7 +131,7 @@
 			<key>label</key>
 			<string>微信输入法</string>
 			<key>footerText</key>
-			<string>把微信输入法工具栏的语音按钮横向拉宽到约三个按钮的宽度，其余按钮尺寸与位置保持不变。改动后收起键盘再重新唤出即生效。</string>
+			<string>把微信输入法功能工具栏的语音按钮横向拉宽并让它落在键盘正中，同时把整排按钮的底色统一。按钮尺寸与相互间距除语音按钮外均保持不变，改动后收起键盘再重新唤出即生效。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -147,7 +147,7 @@
 			<key>PostNotification</key>
 			<string>com.minis.rainbowkeyboard.changed</string>
 			<key>footerText</key>
-			<string>把语音按钮横向拉宽、让它落在键盘正中，并把它的底色压暗一档（暗色 #505050 / 亮色 #F3F3F5），其余按钮尺寸与位置保持不变。改动后收起键盘再重新唤出即生效。</string>
+			<string>把语音按钮横向拉宽（约 3.5 个方钮宽）并让它落在键盘正中；同时把键盘工具栏整排按钮的底色统一压暗一档（暗色 #505050 / 亮色 #F3F3F5，跟随系统深浅色自动切换）。按钮尺寸与相互间距除语音按钮外均保持不变。改动后收起键盘再重新唤出即生效。</string>
 		</dict>
 		<dict>
 			<key>cell</key>

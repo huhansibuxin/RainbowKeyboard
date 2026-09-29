@@ -62,11 +62,32 @@
 // 容器 bounds 原点。我们在宿主算完之后只改这颗滚动视图的 origin.x：尺寸不动、不产生
 // 任何布局连锁、之后也没有任何人再算它 ⇒ 位移留得住。容器不裁剪到为负的一侧（那侧本来
 // 就是空白），所以左移 5pt 完全没有副作用。
-// 2) 底色：暗色 #505050（= 用户指定的「常用语」那一档；现在的 #5B5B5B 偏亮发闷），
+// 2) 底色：暗色 #505050（= 用户指定的「常用语」那一档；原来的 #5B5B5B 偏亮发闷），
 //    亮色 #F3F3F5（按暗色那档相对键盘底的对比度同比推算：亮色键盘底 #DFE0E4、按钮
 //    #FAFAFB 太扎眼）。微信自己的底色来自 -backgroundColorForCurrentFunc 经
 //    wb_colorWithBackendColor:frontColor: 混合后 setBackgroundColor:，我们在布局后直接
-//    写最终值绕开那层混合，只作用于 func==1 这一个按钮，别的按钮一概不碰。
+//    写最终值绕开那层混合。
+//
+// == 2.3.15：底色作用范围从「语音按钮一个」扩到「键盘工具栏整排」 ==
+// 实机反馈：只有语音按钮变成灰的、旁边几个方钮还是原来的浅灰，整排花。
+// 现在统一：**含语音按钮(func==1)的那个工具栏容器里的全部按钮**都写成同一个底色
+//（暗色模式 #505050 / 亮色模式 #F3F3F5 自动切），与语音按钮完全一致。
+// 范围界定（为何不是「所有 WBToolBarButton」）：微信的工具栏容器 WBFunctionToolBar 被
+// 多种面板复用，而「常用语」面板那排按钮是靠底色区分**选中/未选中**的
+//（实测 #505050 选中 / #434343 旁钮 / #3C3C3C 未选中）。所以判据取「同一容器里存在
+// func==1 的语音按钮」＝键盘上方那一排；剪贴板/常用语面板判据不命中，配色分毫不动。
+// 落点两处（互为兜底，成本都可忽略）：
+//   1) `WBToolBarButton -layoutSubviews` 后置 —— 最后一道，覆盖微信自己在本方法里的写入；
+//      判据放宽为「语音按钮 或 处于键盘工具栏内的按钮」。
+//   2) `WBFunctionToolBar` 布局后置 —— 递归遍历整棵子树统一刷一遍，兜住「子类自己重写了
+//      layoutSubviews 而没走父类实现」的按钮（如最近使用胶囊 WBCombinedToolBarButton）。
+// 两处都只在**颜色真的不同**时才写 backgroundColor，避免无谓的重绘。
+//
+// == 2.3.15：底色作用范围扩到整排；居中算法不变，但消掉每轮多余的 frame 写入 ==
+// 防回滚本身仍是「每轮布局收尾重算一次」（宿主每轮都会重设滚动视图 frame，写一次守不住），
+// 但改成一次测量直接算目标位移（按钮中心已含当前位移），已就位时一次都不写。
+// 结果与 2.3.14 完全一致，只是把原来「先摆回基准 → 再回填」的两次写入降到通常 0 次、最多 1 次。
+// 详见 RKVoiceCenterInScreen 上方注释。
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -218,9 +239,20 @@ static UIScrollView *RKVoiceInternalScrollView(UIView *bar) {
 //（见文件头反汇编依据），原点恒等于容器 bounds 原点，所以这个基准不会随按钮增减变化。
 static char RKVoiceScrollerBaseXKey;
 
-static void RKVoiceCenterInScreen(UIView *bar) {
-    if (!RKVoiceWidenEnabled()) return;
-
+// 开关与语音按钮都由调用方 RKVoiceFinishBar 判好并传进来（每轮只读一次偏好、只递归找一次）。
+//
+// == 防回滚机制（位移为什么不会被宿主的布局抹掉）==
+// 宿主**每一轮布局都会把 `_scrollView.frame` 重设回容器 bounds**（反汇编 0x100066d6c 段），
+// 所以「写一次就不管」不成立 —— 位移必然被抹回原位（2.3.13 的容器 transform 就是这么失效的）。
+// 做法是「每轮布局收尾重算一次、但只在需要时写」：
+//   1) 基准 baseX = 宿主给这颗滚动视图摆的自然原点（首次记录后固定）；
+//   2) 语音按钮的当前中心**已含上一轮施加的位移** ⇒ 目标位移 = 当前位移 + (屏幕中心 − 当前中心)；
+//   3) 目标与当前差值 < 0.5pt ⇒ **一次都不写**；要调整才写一次，且只改 origin.x
+//（尺寸不变 ⇒ 不触发父视图重排、无布局连锁）。
+// 每轮布局的写入次数上限 = 1 次，通常 0 次。
+// 刻意**不用**「先把滚动视图摆回基准 → 再测量 → 再写位移」的写法：那种写法每轮必然写两次
+// frame（即使位置根本没变），白刷两遍图层几何属性 —— 纯属多余的 CPU 开销。
+static void RKVoiceCenterInScreen(UIView *bar, WBToolBarButton *voice) {
     UIScrollView *scroller = RKVoiceInternalScrollView(bar);
     if (!scroller) return;                    // 拿不到内容容器就一个像素都不动（fail-safe）
 
@@ -237,14 +269,7 @@ static void RKVoiceCenterInScreen(UIView *bar) {
             @(baseX), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 
-    // 先把上一轮的位移摆回去再测量：否则同一轮里第二次调用量到的中心已含位移，越移越偏。
-    if (fabs(frame.origin.x - baseX) > 0.01) {
-        frame.origin.x = baseX;
-        scroller.frame = frame;
-    }
-
-    WBToolBarButton *voice = RKVoiceFindVoiceButton(bar);   // 判据只有 func == 1，见上
-    if (!voice) return;                                     // 面板里没有语音按钮 ⇒ 一点都不动
+    // 判据与查找都由调用方完成；这里直接用传进来的语音按钮（判据仍是单一的 func == 1）。
 
     // 自检：语音按钮必须真的在这颗滚动视图里，平移它才有意义。反汇编确认所有功能按钮
     // 都是 [self->_scrollView addSubview:] 挂进去的；万一微信日后改了层级，这里就不动。
@@ -265,38 +290,113 @@ static void RKVoiceCenterInScreen(UIView *bar) {
                                          toView:bar];
     CGFloat dx = screenMidInBar.x - voiceMidInBar.x;
 
-    // 已经居中就别写 frame：少一次无谓的图层几何更新（也就是少一分卡顿）。
-    if (fabs(dx) < 0.5) return;
+    // 目标位移 = 当前位移 + dx（语音按钮的当前中心已经含了当前位移，不能当它没动过）。
+    CGFloat currentOffset = CGRectGetMinX(scroller.frame) - baseX;
+    CGFloat targetOffset = currentOffset + dx;
+    if (fabs(targetOffset - currentOffset) < 0.5) return;   // 已经就位 ⇒ 一次都不写
 
     frame = scroller.frame;
-    frame.origin.x = baseX + dx;              // origin 增大 ⇒ 内容右移，故直接加 dx
+    frame.origin.x = baseX + targetOffset;    // origin 增大 ⇒ 内容右移
     scroller.frame = frame;
 }
 
-#pragma mark - 语音按钮底色
+#pragma mark - 工具栏整排底色统一
 
 // 最终像素值（三张截图扫描所得）：
-//   暗色 #505050 = 用户点名的「常用语那一档」（现在语音胶囊是 #5B5B5B，偏亮、发闷）；
+//   暗色 #505050 = 用户点名的「常用语那一档」（原来语音胶囊是 #5B5B5B，偏亮、发闷）；
 //   亮色 #F3F3F5 = 按「暗色那档相对键盘底 #323232 的对比度」同比推出的亮色对应值
 //                 （亮色键盘底 #DFE0E4、按钮实测 #FAFAFB，大色块看着发白）。
+// 深浅色靠 traitCollection 自动切，无需监听通知。
 static UIColor *RKVoiceBackgroundColor(BOOL dark) {
     if (dark) return [UIColor colorWithRed:0.31373 green:0.31373 blue:0.31373 alpha:1.0];
     return [UIColor colorWithRed:0.95294 green:0.95294 blue:0.96078 alpha:1.0];
+}
+
+// 单个按钮刷底色。颜色没变就不写，避免每次布局都触发一轮无谓重绘。
+static void RKVoicePaintButton(WBToolBarButton *button) {
+    BOOL dark = (button.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    UIColor *bg = RKVoiceBackgroundColor(dark);
+    if (![button.backgroundColor isEqual:bg]) button.backgroundColor = bg;
+}
+
+// 这两个类只在首次用到时按名字解析。刻意**不写** WBToolBarButton.class 这类静态类引用：
+// 那是链接期的 objc-class-ref 符号，而这两个类只存在于微信输入法扩展里。
+static Class RKVoiceBarClass(void) {
+    static Class cls;
+    if (!cls) cls = objc_getClass("WBFunctionToolBar");
+    return cls;
+}
+
+static Class RKVoiceToolBarButtonClass(void) {
+    static Class cls;
+    if (!cls) cls = objc_getClass("WBToolBarButton");
+    return cls;
+}
+
+// 工具栏容器上的标记：「这个容器是不是键盘工具栏（里面有没有 func==1 的语音按钮）」。
+// 由 RKVoiceFinishBar 在容器每轮布局收尾时刷新，按钮层只做一次 O(1) 读取 —— 免得每个
+// 按钮每一轮都去递归整棵子树找语音按钮。
+static char RKVoiceBarFlagKey;
+
+// 本按钮是否处在「键盘工具栏」里。这是整排底色统一的作用范围：只统一键盘上方那一排；
+// 剪贴板/常用语面板那排按钮靠底色区分选中态（实测 #505050 选中 / #434343 旁钮 /
+// #3C3C3C 未选中），标记为 NO，配色分毫不动。
+// 层级实测：button → UIScrollView(_scrollView) → WBFunctionToolBar。
+static BOOL RKVoiceInKeyboardBar(UIView *button) {
+    Class barClass = RKVoiceBarClass();
+    if (!barClass) return NO;
+    UIView *bar = button.superview;
+    for (int i = 0; bar && i < 4; i++) {
+        if ([bar isKindOfClass:barClass])
+            return [objc_getAssociatedObject(bar, &RKVoiceBarFlagKey) boolValue];
+        bar = bar.superview;
+    }
+    return NO;
+}
+
+// 递归把一棵子树里的工具栏按钮全部刷成同一底色。用于工具栏容器布局之后兜底 ——
+// 覆盖「子类自己重写了 layoutSubviews 而没走父类实现」的按钮（如最近使用胶囊
+// WBCombinedToolBarButton）。深度限制 3 层，键盘工具栏整棵子树节点个位数。
+static void RKVoicePaintSubtree(UIView *node, NSUInteger depth) {
+    if (depth > 3) return;
+    Class btnClass = RKVoiceToolBarButtonClass();
+    if (btnClass && [node isKindOfClass:btnClass]) RKVoicePaintButton((WBToolBarButton *)node);
+    for (UIView *sub in node.subviews) RKVoicePaintSubtree(sub, depth + 1);
 }
 
 #pragma mark - 每轮布局的唯一入口
 
 // 一次身份判断 + 一次偏好读取，然后分发到「底色」与「排布」两件事。
 static void RKVoiceApplyAll(WBToolBarButton *button) {
-    if (!RKVoiceIsVoiceButton(button)) return;   // 零开销判身份，非语音按钮立即返回
-    if (!RKVoiceWidenEnabled()) return;          // 偏好入口要拿锁，每轮只读这一次
+    BOOL isVoice = RKVoiceIsVoiceButton(button);   // 零开销判身份
+    // 语音按钮：底色 + 图标/文字排布都归它管。
+    // 同排其他按钮：只管底色（整排统一），判据是「与语音按钮同处一个工具栏容器」。
+    // 其余按钮（别的界面/别的面板）：立即返回，连偏好都不读。
+    if (!isVoice && !RKVoiceInKeyboardBar(button)) return;
+    if (!RKVoiceWidenEnabled()) return;            // 偏好入口要拿锁，每轮只读这一次
 
-    BOOL dark = (button.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    UIColor *bg = RKVoiceBackgroundColor(dark);
-    // 颜色没变就不写，避免每次布局都触发一轮重绘。
-    if (![button.backgroundColor isEqual:bg]) button.backgroundColor = bg;
+    RKVoicePaintButton(button);
+    if (isVoice) RKVoiceArrangeContent(button);
+}
 
-    RKVoiceArrangeContent(button);
+#pragma mark - 工具栏容器收尾（整排底色 + 居中）
+
+// 工具栏容器布局完成后统一收尾：整排底色统一 + 整排居中。
+// 开关只读一次、语音按钮只递归查找一次，结果传给两个动作复用（判据仍是 func==1）。
+static void RKVoiceFinishBar(UIView *bar) {
+    if (!RKVoiceWidenEnabled()) return;
+    WBToolBarButton *voice = RKVoiceFindVoiceButton(bar);
+
+    // 刷新容器标记（供按钮层 O(1) 读取）。值没变就不写关联对象，省掉一次带锁的写。
+    BOOL isKeyboardBar = (voice != nil);
+    NSNumber *flag = objc_getAssociatedObject(bar, &RKVoiceBarFlagKey);
+    if (!flag || flag.boolValue != isKeyboardBar)
+        objc_setAssociatedObject(bar, &RKVoiceBarFlagKey, @(isKeyboardBar),
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+    if (!voice) return;                     // 不是键盘工具栏 ⇒ 底色与位移都一个像素不动
+    RKVoicePaintSubtree(bar, 0);            // 整排底色
+    RKVoiceCenterInScreen(bar, voice);      // 整排居中
 }
 
 #pragma mark - Hook
@@ -338,14 +438,14 @@ static void RKVoiceApplyAll(WBToolBarButton *button) {
 // 不改它任何行为，也不碰容器的 transform / frame。
 - (void)layoutForAnimated:(BOOL)animated animateFinishedBlock:(void (^)(void))block {
     %orig;
-    RKVoiceCenterInScreen(self);
+    RKVoiceFinishBar(self);
 }
 
 // 兜底：-layoutSubviews 的后半段还有「语音聚焦」收尾逻辑，可能再动一次布局，
-// 所以最后再对齐一次（函数本身幂等，且值没变不会写 frame）。
+// 所以最后再收一次尾（两个动作都幂等：颜色没变不写、位移没变不写）。
 - (void)layoutSubviews {
     %orig;
-    RKVoiceCenterInScreen(self);
+    RKVoiceFinishBar(self);
 }
 
 %end
