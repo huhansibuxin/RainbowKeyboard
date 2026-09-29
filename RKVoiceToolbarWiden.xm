@@ -31,7 +31,7 @@
 //      descLabel.frame = (12 + imgW + 4, 居中, width-(2*12+imgW+4), labelS.height)
 //      [self setContentEdgeInsets:(4, -4, 4, labelS.width)]
 // 即：文字固定在 x≈40，而图标并没有放在 12 处 —— 它由 UIButton 按 contentEdgeInsets
-// 在剩余空间里**居中**。按钮一宽（我们加宽到 4.5 格 = 153pt），居中位置 ~42pt，正好压到
+// 在剩余空间里**居中**。按钮一宽（2.3.7 时 4.5 格 = 153pt），居中位置 ~42pt，正好压到
 // x=40 的文字上 —— 这就是截图里「麦克风压住"点"字」的成因；而 right=4 使得间距只有 4pt，
 // 看着挤成一片。这套算法本来就是给窄按钮写的，加宽后它算不对。
 // => 结论：加宽后必须由我们接管 imageView 与 descLabel 两个 frame，不再依赖原生 desc 排布。
@@ -91,10 +91,11 @@ static void RKVoiceApplyDescIfNeeded(WBToolBarButton *button) {
     [button setNeedsLayout];
 }
 
-#pragma mark - 图标 / 文字排布（图标贴左、文字贴右，中间留白把整格占满）
+#pragma mark - 图标 / 文字排布（两者靠拢成一组，整组在按钮里居中）
 
-static CGFloat const RKVoiceSidePadding = 16.0;   // 图标距左、文字距右的留白
-static CGFloat const RKVoiceMinGap = 10.0;        // 图标与文字之间的最小间距
+// 2.3.8 用的是「图标贴左、文字贴右、富余全给中间」，实机看着是「左边一坨、右边一坨、
+// 中间一大块空」；2.3.9 改成成组居中：图标 + 间距 + 文字 当成一整组居中，左右留白相等。
+static CGFloat const RKVoiceGroupGap = 10.0;      // 图标与文字之间固定间距
 
 static void RKVoiceArrangeContentIfNeeded(WBToolBarButton *button) {
     if (!RKVoiceWidenEnabled()) return;
@@ -121,13 +122,18 @@ static void RKVoiceArrangeContentIfNeeded(WBToolBarButton *button) {
     if (iconSize.width <= 0 || iconSize.height <= 0) return;
     if (labelSize.width <= 0 || labelSize.height <= 0) return;
 
-    // 富余宽度 = 整格 - 图标 - 文字，全部给「两侧留白 + 中间间距」，两端顶格 ⇒ 占满。
-    CGFloat slack = bounds.size.width - iconSize.width - labelSize.width;
-    CGFloat pad = RKVoiceSidePadding;
-    if (slack < pad * 2 + RKVoiceMinGap) pad = MAX(0.0, (slack - RKVoiceMinGap) * 0.5);
-    CGFloat gap = MAX(RKVoiceMinGap, slack - pad * 2);
+    // 成组居中：content = 图标 + 间距 + 文字，整组在格内居中 ⇒ 左右留白必然相等。
+    // 只要格宽放得下就恒定用 RKVoiceGroupGap；极端窄时（换机型/超大字号）才压缩间距，
+    // 保证不溢出按钮，任何一种情况都不会出现负的左边距。
+    CGFloat gap = RKVoiceGroupGap;
+    CGFloat content = iconSize.width + gap + labelSize.width;
+    if (content > bounds.size.width) {
+        gap = MAX(0.0, bounds.size.width - iconSize.width - labelSize.width);
+        content = iconSize.width + gap + labelSize.width;
+    }
+    CGFloat left = round(MAX(0.0, (bounds.size.width - content) * 0.5));
 
-    icon.frame = CGRectMake(round(pad),
+    icon.frame = CGRectMake(left,
         round((bounds.size.height - iconSize.height) * 0.5),
         iconSize.width, iconSize.height);
     label.frame = CGRectMake(round(CGRectGetMaxX(icon.frame) + gap),
@@ -138,9 +144,9 @@ static void RKVoiceArrangeContentIfNeeded(WBToolBarButton *button) {
 #pragma mark - 目标宽度
 
 // 方钮是正方形 ⇒「一格」= 它的高（也是它的自然宽），实测 34pt。
-// 目标 = 4.5 格（153pt）：3 格 = 与「最近使用」胶囊等长，3.5 格仍偏短，4.5 格合适。
+// 目标 = 4 格（136pt）：3 格 = 与「最近使用」胶囊等长(偏短)，4.5 格(153pt)偏长，4 格合适。
 // 「一格」从同排方钮实测采样，换机型/字号自动跟随；采不到时用实测的 34pt 兜底。
-static CGFloat const RKVoiceTargetUnits = 4.5;
+static CGFloat const RKVoiceTargetUnits = 4.0;
 static CGFloat RKVoiceUnitWidth = 0;
 
 #pragma mark - Hook
