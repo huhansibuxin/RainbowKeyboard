@@ -33,6 +33,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <math.h>
 #import "RKPreferences.h"
 
 @interface WBToolBarButton : UIView
@@ -113,5 +114,7 @@ static CGFloat RKVoiceUnitWidth = 0;
 
 %ctor {
     // 只在微信输入法扩展里生效；注入到系统键盘(InputUI)时该类不存在，直接跳过。
-    if (objc_getClass("WBToolBarButton")) %init(RKVoiceButtonGroup);
+    if (objc_getClass("WBToolBarButton")) {
+        %init(RKVoiceButtonGroup);
+    }
 }
