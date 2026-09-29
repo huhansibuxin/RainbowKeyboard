@@ -36,6 +36,22 @@
 // 看着挤成一片。这套算法本来就是给窄按钮写的，加宽后它算不对。
 // => 结论：加宽后必须由我们接管 imageView 与 descLabel 两个 frame，不再依赖原生 desc 排布。
 //    只改 frame（在 %orig 之后），字体/颜色/间距参数一律不碰。
+//
+// == 2.3.13 新增：整排居中 + 语音按钮底色 ==
+// 截图逐像素实测（1pt = 3px）：语音胶囊 118pt(161.3→279.3)，三个方钮各 32.7pt，间距各
+// 12.7pt，整排右边缘钉在 417.7pt（右留白 12.3pt），左边却空着 163pt —— 微信原生是**右对齐**。
+// 1) 居中：刻意**不用**「加宽语音按钮」（要左留白=右留白 12.3 需语音宽 269pt = 7.9 格）
+//    也**不用**「拉大间距」（3 个间隔要从 12.7 → 63pt 才撑得满，且间距是微信内部布局
+//    算的、没有 setter，只能接管整个重排 = 2.3.4 的坑）。正解 = 宽度/间距/兄弟按钮 frame
+//    一个都不动，只把**整排沿 x 平移**，直到语音按钮中心落在屏幕中心：
+//        dx = 屏幕中心 − 语音按钮中心（都在工具栏坐标系里算）  实测 ≈ −5.3pt
+//    用 transform 而不是改 frame：frame 每轮被 -layoutForAnimated: 重设，改了会被抹掉；
+//    transform 是渲染层位移，父布局照旧、命中测试自动跟随，且天然幂等。每轮先归零再测量。
+// 2) 底色：暗色 #505050（= 用户指定的「常用语」那一档；现在的 #5B5B5B 偏亮发闷），
+//    亮色 #F3F3F5（按暗色那档相对键盘底的对比度同比推算：亮色键盘底 #DFE0E4、按钮
+//    #FAFAFB 太扎眼）。微信自己的底色来自 -backgroundColorForCurrentFunc 经
+//    wb_colorWithBackendColor:frontColor: 混合后 setBackgroundColor:，我们在布局后直接
+//    写最终值绕开那层混合，只作用于 func==1 这一个按钮，别的按钮一概不碰。
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -51,6 +67,10 @@
 - (BOOL)showDesc;
 - (void)setDesc:(NSString *)desc;
 - (UILabel *)descLabel;
+@end
+
+// 工具栏容器（携带全部功能按钮，右对齐；见文件头「原生布局规律」）。
+@interface WBFunctionToolBar : UIView
 @end
 
 #pragma mark - 开关
@@ -97,11 +117,8 @@ static void RKVoiceApplyDescIfNeeded(WBToolBarButton *button) {
 // 中间一大块空」；2.3.9 改成成组居中；2.3.10 修掉成组居中的左右 1pt 偏差（右边缘镜像）。
 static CGFloat const RKVoiceGroupGap = 10.0;      // 图标与文字之间的目标间距
 
-static void RKVoiceArrangeContentIfNeeded(WBToolBarButton *button) {
-    // 先做零开销的按钮身份判断，再读偏好。偏好入口每次都要拿锁 + 两次 notify 查询，
-    // 工具栏一排按钮每次 layout 都读一遍纯属白费 —— 只有语音按钮才值得读。
-    if (!RKVoiceIsVoiceButton(button)) return;
-    if (!RKVoiceWidenEnabled()) return;
+// 身份与开关由调用方 RKVoiceApplyAll 统一判定（每轮布局只读一次偏好），这里只管排布。
+static void RKVoiceArrangeContent(WBToolBarButton *button) {
     if (![button showDesc]) return;
 
     UIImageView *icon = button.imageView;     // UIButton 的图标视图（麦克风）
@@ -156,6 +173,68 @@ static void RKVoiceArrangeContentIfNeeded(WBToolBarButton *button) {
 static CGFloat const RKVoiceTargetUnits = 3.5;
 static CGFloat RKVoiceUnitWidth = 0;
 
+#pragma mark - 整排居中（让语音按钮落在屏幕正中）
+
+// 递归找语音按钮。**判据仍是唯一的 func == 1**：找不到就说明这不是键盘工具栏
+// （例如「剪贴板/常用语」那个面板的工具栏里没有 func=1），此时一个像素都不动。
+static WBToolBarButton *RKVoiceFindVoiceButton(UIView *root) {
+    if (RKVoiceIsVoiceButton(root)) return (WBToolBarButton *)root;
+    for (UIView *sub in root.subviews) {
+        WBToolBarButton *hit = RKVoiceFindVoiceButton(sub);
+        if (hit) return hit;
+    }
+    return nil;
+}
+
+static void RKVoiceCenterInScreen(UIView *bar) {
+    // 先把上一轮的位移归零再测量 —— 否则本帧量到的中心已经含位移，会越移越偏。
+    bar.transform = CGAffineTransformIdentity;
+
+    WBToolBarButton *voice = RKVoiceFindVoiceButton(bar);
+    if (!voice) return;
+
+    // 屏幕宽度取窗口；窗口尚未挂上时退回 UIScreen（同一台设备两者一致）。
+    UIWindow *win = bar.window;
+    CGFloat screenW = win ? win.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
+    if (screenW <= 0) return;
+
+    // 屏幕中心与本按钮中心都换算到工具栏坐标系再相减（跨坐标系直接比 origin 是 2.3.4 的坑）。
+    CGPoint screenMidInBar = [bar convertPoint:CGPointMake(screenW * 0.5, 0) fromView:nil];
+    CGPoint voiceMidInBar = [voice convertPoint:CGPointMake(CGRectGetMidX(voice.bounds), 0)
+                                         toView:bar];
+    CGFloat dx = screenMidInBar.x - voiceMidInBar.x;
+
+    // 已经居中就别设 transform：少一层无谓的合成，也避免和微信自己的动效打架。
+    if (fabs(dx) < 0.5) return;
+    bar.transform = CGAffineTransformMakeTranslation(dx, 0);
+}
+
+#pragma mark - 语音按钮底色
+
+// 最终像素值（三张截图扫描所得）：
+//   暗色 #505050 = 用户点名的「常用语那一档」（现在语音胶囊是 #5B5B5B，偏亮、发闷）；
+//   亮色 #F3F3F5 = 按「暗色那档相对键盘底 #323232 的对比度」同比推出的亮色对应值
+//                 （亮色键盘底 #DFE0E4、按钮实测 #FAFAFB，大色块看着发白）。
+static UIColor *RKVoiceBackgroundColor(BOOL dark) {
+    if (dark) return [UIColor colorWithRed:0.31373 green:0.31373 blue:0.31373 alpha:1.0];
+    return [UIColor colorWithRed:0.95294 green:0.95294 blue:0.96078 alpha:1.0];
+}
+
+#pragma mark - 每轮布局的唯一入口
+
+// 一次身份判断 + 一次偏好读取，然后分发到「底色」与「排布」两件事。
+static void RKVoiceApplyAll(WBToolBarButton *button) {
+    if (!RKVoiceIsVoiceButton(button)) return;   // 零开销判身份，非语音按钮立即返回
+    if (!RKVoiceWidenEnabled()) return;          // 偏好入口要拿锁，每轮只读这一次
+
+    BOOL dark = (button.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    UIColor *bg = RKVoiceBackgroundColor(dark);
+    // 颜色没变就不写，避免每次布局都触发一轮重绘。
+    if (![button.backgroundColor isEqual:bg]) button.backgroundColor = bg;
+
+    RKVoiceArrangeContent(button);
+}
+
 #pragma mark - Hook
 
 %group RKVoiceGroup
@@ -180,17 +259,28 @@ static CGFloat RKVoiceUnitWidth = 0;
 }
 
 // 微信原生的 desc 排布在加宽后会把图标与文字摆重叠（见文件头），所以在它算完之后
-// 接管这两个 frame —— 这是唯一被我们改动的原生布局点。
+// 接管这两个 frame —— 这是唯一被我们改动的原生布局点。底色也在这里落（同一轮、同一判据）。
 - (void)layoutSubviews {
     %orig;
-    RKVoiceArrangeContentIfNeeded(self);
+    RKVoiceApplyAll(self);
+}
+
+%end
+
+%hook WBFunctionToolBar
+
+// 工具栏自己算完布局（按钮位置已定）之后，把整排平移到位。只设 transform，不碰任何 frame。
+- (void)layoutSubviews {
+    %orig;
+    if (!RKVoiceWidenEnabled()) return;
+    RKVoiceCenterInScreen(self);
 }
 
 %end
 %end
 
 %ctor {
-    // 只在微信输入法扩展里生效；注入到系统键盘(InputUI)时该类不存在，直接跳过。
+    // 只在微信输入法扩展里生效；注入到系统键盘(InputUI)时这些类不存在，直接跳过。
     if (objc_getClass("WBToolBarButton")) {
         %init(RKVoiceGroup);
     }

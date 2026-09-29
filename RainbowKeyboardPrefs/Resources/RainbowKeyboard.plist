@@ -146,6 +146,8 @@
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>
 			<string>com.minis.rainbowkeyboard.changed</string>
+			<key>footerText</key>
+			<string>把语音按钮横向拉宽、让它落在键盘正中，并把它的底色压暗一档（暗色 #505050 / 亮色 #F3F3F5），其余按钮尺寸与位置保持不变。改动后收起键盘再重新唤出即生效。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
