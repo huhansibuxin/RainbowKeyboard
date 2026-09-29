@@ -11,7 +11,7 @@ TWEAK_NAME := RainbowKeyboard
 # 两处按需求裁剪，均以同名空实现替代，上游光效文件本身逐字不改：
 #   RKAdaptivePerformanceOff.m  ← 智能流畅模式（自动降档）
 #   RKBlackKeyboardHost.m       ← 纯黑键帽引擎
-RainbowKeyboard_FILES := RKAdaptivePerformanceOff.m Tweak.xm RainbowEffectView.m RKNeonPress.m RKThemeEngine.m RKKeyboardGeometry.m RKBlackKeyboardHost.m CandidateGradient.xm
+RainbowKeyboard_FILES := RKAdaptivePerformanceOff.m Tweak.xm RainbowEffectView.m RKNeonPress.m RKThemeEngine.m RKKeyboardGeometry.m RKBlackKeyboardHost.m CandidateGradient.xm RKVoiceToolbarWiden.xm
 # -Oz overrides Theos' default -Os (user CFLAGS are appended after OPTFLAG), and
 # -dead_strip drops unreferenced code/data to keep the injected __TEXT segment small.
 RainbowKeyboard_CFLAGS := -fobjc-arc -Wno-deprecated-declarations -Oz

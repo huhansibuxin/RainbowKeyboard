@@ -20,9 +20,10 @@ static inline NSArray<NSString *> *RKDisplayColors(void) {
     return @[@"CandidateStart", @"CandidateEnd", @"KeyboardBackgroundColor", @"KeycapColor"];
 }
 static inline NSArray<NSString *> *RKDisplayKeys(void) {
-    return [[[RKDisplayNumbers() arrayByAddingObjectsFromArray:RKDisplayFlags()]
+    return [[[[RKDisplayNumbers() arrayByAddingObjectsFromArray:RKDisplayFlags()]
         arrayByAddingObjectsFromArray:RKDisplayColors()]
-        arrayByAddingObjectsFromArray:@[@"PressColorMode", @"PressBrightness", @"PressColor", @"Theme", @"SmartPerformance", @"KeyboardLock"]];
+        arrayByAddingObjectsFromArray:@[@"PressColorMode", @"PressBrightness", @"PressColor", @"Theme", @"SmartPerformance", @"KeyboardLock"]]
+        arrayByAddingObject:@"WidenVoiceButton"];
 }
 static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[RKDisplayWordCount]) {
     memset(words, 0, RKDisplayWordCount * sizeof(uint64_t));
@@ -103,6 +104,12 @@ static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[R
                 words[2 + c] |= (uint64_t)llround(MIN(1, MAX(0, [pressColor[c] doubleValue])) * 65535) << 48;
         }
     }
+    // 微信输入法工具栏语音按钮放大开关。words[1] 的 54/55 位此前空闲。
+    id widenVoice = prefs[@"WidenVoiceButton"];
+    if ([widenVoice isKindOfClass:NSNumber.class]) {
+        words[1] |= UINT64_C(1) << 54;
+        if ([widenVoice boolValue]) words[1] |= UINT64_C(1) << 55;
+    }
 }
 static inline uint64_t RKDisplayChecksum(const uint64_t words[RKDisplayWordCount]) {
     uint64_t hash = UINT64_C(14695981039346656037);
@@ -154,6 +161,7 @@ static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDispl
     if (words[1] & (UINT64_C(1) << 44))
         result[@"PressColor"] = @[@((words[2] >> 48) / 65535.0),
             @((words[3] >> 48) / 65535.0), @((words[4] >> 48) / 65535.0)];
+    if (words[1] & (UINT64_C(1) << 54)) result[@"WidenVoiceButton"] = @((words[1] >> 55) & 1);
     return result;
 }
 static inline int RKDisplayToken(NSUInteger index) {

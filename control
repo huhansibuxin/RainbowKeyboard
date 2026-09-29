@@ -1,8 +1,14 @@
 Package: com.minis.rainbowkeyboard
 Name: 彩虹键盘光效
-Version: 2.3.3
+Version: 2.3.4
 Architecture: iphoneos-arm64
 Description: 霓虹键床光效，支持原生键盘和微信输入法
+ 2.3.4 微信输入法工具栏「语音按钮」放大（新增设置开关，默认开）：语音按钮原为一个
+ 小圆形图标，现横向拉宽到约 3 格（3×钮宽+2×间距，按同排按钮实测自适应），其余按钮
+ 尺寸与位置保持不变。实现=hook WBFunctionToolBar 的 layoutSubviews 与
+ layoutForAnimated:animateFinishedBlock: 后置修正语音按钮 frame（该工具栏在二进制里
+ 没有任何宽度属性，宽度是布局内部现算值，故只能 hook）。本版为诊断版：会在键盘扩展
+ 容器 tmp/rk_voicetoolbar.log 记录工具栏结构，下一版移除日志。
  2.3.3 键缝落点补光效：微信输入法全键盘键帽间视觉缝隙较宽，原先“落点须落在
  键帽矩形内”的判据让按进缝隙的触摸整段丢光效，而微信按更大的命中单元仍会
  上屏字符——于是出现“出了字却没有光效”。现将扩散/波纹(波纹/扩散共用入口

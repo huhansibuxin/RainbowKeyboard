@@ -129,6 +129,28 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
+			<string>微信输入法</string>
+			<key>footerText</key>
+			<string>把微信输入法工具栏的语音按钮横向拉宽到约三个按钮的宽度，其余按钮尺寸与位置保持不变。改动后收起键盘再重新唤出即生效。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>key</key>
+			<string>WidenVoiceButton</string>
+			<key>label</key>
+			<string>放大语音按钮</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
 			<string>性能</string>
 		</dict>
 		<dict>
