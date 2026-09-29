@@ -1,21 +1,328 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>items</key><array>
-<dict><key>cell</key><string>PSGroupCell</string><key>label</key><string>光效细节</string></dict>
-<dict><key>cell</key><string>PSSliderCell</string><key>key</key><string>Brightness</string><key>label</key><string>霓虹亮度</string><key>default</key><real>.95</real><key>min</key><real>0</real><key>max</key><real>1</real><key>showValue</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSSliderCell</string><key>key</key><string>Duration</string><key>label</key><string>持续时间</string><key>default</key><real>.55</real><key>min</key><real>.15</real><key>max</key><real>1.2</real><key>showValue</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSSliderCell</string><key>key</key><string>Spread</string><key>label</key><string>扩散倍率</string><key>default</key><real>2</real><key>min</key><real>.5</real><key>max</key><real>3</real><key>showValue</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSSliderCell</string><key>key</key><string>Softness</string><key>label</key><string>光晕柔度</string><key>default</key><real>8</real><key>min</key><real>0</real><key>max</key><real>24</real><key>showValue</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSSliderCell</string><key>key</key><string>CoreStrength</string><key>label</key><string>中心亮度</string><key>default</key><real>.5</real><key>min</key><real>0</real><key>max</key><real>1</real><key>showValue</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSSliderCell</string><key>key</key><string>MaxEffects</string><key>label</key><string>同时光效上限</string><key>default</key><real>4</real><key>min</key><real>1</real><key>max</key><real>8</real><key>showValue</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSGroupCell</string><key>label</key><string>背景效果</string></dict>
-<dict><key>cell</key><string>PSSliderCell</string><key>key</key><string>BackgroundStrength</string><key>label</key><string>背景强度</string><key>default</key><real>.18</real><key>min</key><real>0</real><key>max</key><real>.6</real><key>showValue</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSSliderCell</string><key>key</key><string>BackgroundRadius</string><key>label</key><string>背景范围</string><key>default</key><real>180</real><key>min</key><real>60</real><key>max</key><real>360</real><key>showValue</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSSliderCell</string><key>key</key><string>BackgroundBand</string><key>label</key><string>色带宽度</string><key>default</key><real>.55</real><key>min</key><real>.2</real><key>max</key><real>.85</real><key>showValue</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSGroupCell</string><key>label</key><string>键盘与颜色</string></dict>
-<dict><key>cell</key><string>PSSwitchCell</string><key>key</key><string>NativeKeyboard</string><key>label</key><string>原生键盘</string><key>default</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSSwitchCell</string><key>key</key><string>WeChatKeyboard</string><key>label</key><string>微信输入法</string><key>default</key><true/><key>defaults</key><string>com.minis.rainbowkeyboard</string><key>PostNotification</key><string>com.minis.rainbowkeyboard.changed</string></dict>
-<dict><key>cell</key><string>PSLinkCell</string><key>label</key><string>键盘底色</string><key>action</key><string>chooseKeyboardBackground</string></dict>
-<dict><key>cell</key><string>PSLinkCell</string><key>label</key><string>键帽颜色</string><key>action</key><string>chooseKeycapColor</string></dict>
-<dict><key>cell</key><string>PSLinkCell</string><key>label</key><string>单色灯光颜色</string><key>action</key><string>choosePressColor</string></dict>
-</array></dict></plist>
+<plist version="1.0">
+<dict>
+	<key>items</key>
+	<array>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>光效细节
+霓虹亮度</string>
+			<key>footerText</key>
+			<string>控制光效本身的明暗。调低更暗，调高更亮，0 时几乎看不见。不改变键帽底色与键盘背景的深浅。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>key</key>
+			<string>Brightness</string>
+			<key>label</key>
+			<string>霓虹亮度</string>
+			<key>default</key>
+			<real>0.95</real>
+			<key>min</key>
+			<real>0.0</real>
+			<key>max</key>
+			<real>1.0</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>光效细节
+持续时间</string>
+			<key>footerText</key>
+			<string>单次按下后光效完全消退所需的时间。调低更干脆、跟手，调高停留更久、余韵更长。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>key</key>
+			<string>Duration</string>
+			<key>label</key>
+			<string>持续时间</string>
+			<key>default</key>
+			<real>0.55</real>
+			<key>min</key>
+			<real>0.15</real>
+			<key>max</key>
+			<real>1.2</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>光效细节
+扩散倍率</string>
+			<key>footerText</key>
+			<string>光效向外扩散的范围。调低集中在按下的键附近，调高能覆盖更多相邻键位。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>key</key>
+			<string>Spread</string>
+			<key>label</key>
+			<string>扩散倍率</string>
+			<key>default</key>
+			<real>2.0</real>
+			<key>min</key>
+			<real>0.5</real>
+			<key>max</key>
+			<real>3.0</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>光效细节
+光晕柔度</string>
+			<key>footerText</key>
+			<string>键帽周围光晕的模糊程度。调低边缘更清晰利落，调高更柔和朦胧。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>key</key>
+			<string>Softness</string>
+			<key>label</key>
+			<string>光晕柔度</string>
+			<key>default</key>
+			<real>8.0</real>
+			<key>min</key>
+			<real>0.0</real>
+			<key>max</key>
+			<real>24.0</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>光效细节
+中心亮度</string>
+			<key>footerText</key>
+			<string>按下瞬间键帽内部的填色强度。调低更含蓄，调高更醒目。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>key</key>
+			<string>CoreStrength</string>
+			<key>label</key>
+			<string>中心亮度</string>
+			<key>default</key>
+			<real>0.5</real>
+			<key>min</key>
+			<real>0.0</real>
+			<key>max</key>
+			<real>1.0</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>光效细节
+同时光效上限</string>
+			<key>footerText</key>
+			<string>连续快速输入时最多同时保留几组光效。调低画面更干净、开销更小，调高光波叠加更丰富；超出上限时移除最早的一组。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>key</key>
+			<string>MaxEffects</string>
+			<key>label</key>
+			<string>同时光效上限</string>
+			<key>default</key>
+			<real>4.0</real>
+			<key>min</key>
+			<real>1.0</real>
+			<key>max</key>
+			<real>8.0</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>背景效果
+背景强度</string>
+			<key>footerText</key>
+			<string>按键周围背景柔光的强弱。调低更淡、以键帽为主，调高整片背景更亮。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>key</key>
+			<string>BackgroundStrength</string>
+			<key>label</key>
+			<string>背景强度</string>
+			<key>default</key>
+			<real>0.18</real>
+			<key>min</key>
+			<real>0.0</real>
+			<key>max</key>
+			<real>0.6</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>背景效果
+背景范围</string>
+			<key>footerText</key>
+			<string>背景柔光能照亮的范围，单位为屏幕逻辑点（不是像素）。调低只照亮按键附近，调高扩散得更远。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>key</key>
+			<string>BackgroundRadius</string>
+			<key>label</key>
+			<string>背景范围</string>
+			<key>default</key>
+			<real>180.0</real>
+			<key>min</key>
+			<real>60.0</real>
+			<key>max</key>
+			<real>360.0</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>背景效果
+色带宽度</string>
+			<key>footerText</key>
+			<string>背景光带的宽度。调低更窄、退得更快，调高更宽、余光拖尾更连贯。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>key</key>
+			<string>BackgroundBand</string>
+			<key>label</key>
+			<string>色带宽度</string>
+			<key>default</key>
+			<real>0.55</real>
+			<key>min</key>
+			<real>0.2</real>
+			<key>max</key>
+			<real>0.85</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>键盘与颜色</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>key</key>
+			<string>NativeKeyboard</string>
+			<key>label</key>
+			<string>原生键盘</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>key</key>
+			<string>WeChatKeyboard</string>
+			<key>label</key>
+			<string>微信输入法</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>label</key>
+			<string>键盘底色</string>
+			<key>action</key>
+			<string>chooseKeyboardBackground</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>label</key>
+			<string>键帽颜色</string>
+			<key>action</key>
+			<string>chooseKeycapColor</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>label</key>
+			<string>单色灯光颜色</string>
+			<key>action</key>
+			<string>choosePressColor</string>
+		</dict>
+	</array>
+</dict>
+</plist>

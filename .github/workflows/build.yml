@@ -51,6 +51,7 @@ jobs:
         run: |
           set -euxo pipefail
           python3 check_control.py control
+          python3 check_slider_help.py
           test -s build/RainbowKeyboard-rootless.deb
           python3 check_control.py --deb build/RainbowKeyboard-rootless.deb
           echo "Package info:"
@@ -106,6 +107,7 @@ jobs:
         run: |
           set -euxo pipefail
           python3 check_control.py control
+          python3 check_slider_help.py
           test -s build/RainbowKeyboard-roothide.deb
           python3 check_control.py --deb build/RainbowKeyboard-roothide.deb
           echo "Package info:"
