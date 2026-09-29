@@ -45,8 +45,23 @@
 //    算的、没有 setter，只能接管整个重排 = 2.3.4 的坑）。正解 = 宽度/间距/兄弟按钮 frame
 //    一个都不动，只把**整排沿 x 平移**，直到语音按钮中心落在屏幕中心：
 //        dx = 屏幕中心 − 语音按钮中心（都在工具栏坐标系里算）  实测 ≈ −5.3pt
-//    用 transform 而不是改 frame：frame 每轮被 -layoutForAnimated: 重设，改了会被抹掉；
-//    transform 是渲染层位移，父布局照旧、命中测试自动跟随，且天然幂等。每轮先归零再测量。
+//    2.3.13 先是用容器的 transform 做平移 —— 实机不成立（见下）。
+//
+// == 2.3.14 修正：平移的对象从「容器的 transform」换成「容器内部的滚动视图」 ==
+// 2.3.13 的 transform 表现为「键盘刚弹出时左偏一下、随即弹回右原位」，且某些 App 里
+// 调键盘发卡。两个原因同源：
+//   1) transform 位移守不住。只要宿主再 setFrame: 一次，UIKit 就按「新 frame 的中点 →
+//      center」反算，center 回到原位 ⇒ 视觉整条弹回。宿主每轮布局都会重设容器 frame，
+//      所以位移必然被抹。
+//   2) 每轮无条件写一次 transform（即使本来就是单位阵）＝ 每次布局都刷一遍图层几何属性；
+//      而 transform 会让 frame 的 getter 返回值跟着变，宿主若按子视图 frame 反推布局
+//      就会被反复触发，形成布局连锁 —— 这就是「卡」。
+// 改法：容器把全部按钮放在内部那颗 UIScrollView（ivar `_scrollView`）里，而
+// -layoutForAnimated: 给这颗滚动视图设的 frame **就是容器自己的 bounds**（反汇编
+// 0x100066d6c 段：取 self->_scrollView，用 [self bounds] 直接 setFrame:），原点恒等于
+// 容器 bounds 原点。我们在宿主算完之后只改这颗滚动视图的 origin.x：尺寸不动、不产生
+// 任何布局连锁、之后也没有任何人再算它 ⇒ 位移留得住。容器不裁剪到为负的一侧（那侧本来
+// 就是空白），所以左移 5pt 完全没有副作用。
 // 2) 底色：暗色 #505050（= 用户指定的「常用语」那一档；现在的 #5B5B5B 偏亮发闷），
 //    亮色 #F3F3F5（按暗色那档相对键盘底的对比度同比推算：亮色键盘底 #DFE0E4、按钮
 //    #FAFAFB 太扎眼）。微信自己的底色来自 -backgroundColorForCurrentFunc 经
@@ -186,27 +201,76 @@ static WBToolBarButton *RKVoiceFindVoiceButton(UIView *root) {
     return nil;
 }
 
-static void RKVoiceCenterInScreen(UIView *bar) {
-    // 先把上一轮的位移归零再测量 —— 否则本帧量到的中心已经含位移，会越移越偏。
-    bar.transform = CGAffineTransformIdentity;
+// 容器内部那颗滚动视图（按钮全在里面）。ivar 名已从二进制确认（_scrollView, UIScrollView）。
+// 用 object_getIvar 而不是 KVC：没有字符串查找、不会抛异常，第一次解析出 ivar 后复用。
+static Ivar RKVoiceScrollerIvar;
 
-    WBToolBarButton *voice = RKVoiceFindVoiceButton(bar);
-    if (!voice) return;
+static UIScrollView *RKVoiceInternalScrollView(UIView *bar) {
+    if (!RKVoiceScrollerIvar) {
+        RKVoiceScrollerIvar = class_getInstanceVariable(object_getClass(bar), "_scrollView");
+        if (!RKVoiceScrollerIvar) return nil;
+    }
+    id view = object_getIvar(bar, RKVoiceScrollerIvar);
+    return [view isKindOfClass:[UIScrollView class]] ? (UIScrollView *)view : nil;
+}
+
+// 基准 origin.x：第一次记下后固定使用。宿主给这颗滚动视图设的 frame 就是容器的 bounds
+//（见文件头反汇编依据），原点恒等于容器 bounds 原点，所以这个基准不会随按钮增减变化。
+static char RKVoiceScrollerBaseXKey;
+
+static void RKVoiceCenterInScreen(UIView *bar) {
+    if (!RKVoiceWidenEnabled()) return;
+
+    UIScrollView *scroller = RKVoiceInternalScrollView(bar);
+    if (!scroller) return;                    // 拿不到内容容器就一个像素都不动（fail-safe）
+
+    CGRect frame = scroller.frame;
+    if (frame.size.width <= 0 || frame.size.height <= 0) return;   // 宿主还没办过布局
+
+    NSNumber *baseValue = objc_getAssociatedObject(scroller, &RKVoiceScrollerBaseXKey);
+    CGFloat baseX;
+    if (baseValue) {
+        baseX = (CGFloat)baseValue.doubleValue;
+    } else {
+        baseX = CGRectGetMinX(frame);
+        objc_setAssociatedObject(scroller, &RKVoiceScrollerBaseXKey,
+            @(baseX), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
+    // 先把上一轮的位移摆回去再测量：否则同一轮里第二次调用量到的中心已含位移，越移越偏。
+    if (fabs(frame.origin.x - baseX) > 0.01) {
+        frame.origin.x = baseX;
+        scroller.frame = frame;
+    }
+
+    WBToolBarButton *voice = RKVoiceFindVoiceButton(bar);   // 判据只有 func == 1，见上
+    if (!voice) return;                                     // 面板里没有语音按钮 ⇒ 一点都不动
+
+    // 自检：语音按钮必须真的在这颗滚动视图里，平移它才有意义。反汇编确认所有功能按钮
+    // 都是 [self->_scrollView addSubview:] 挂进去的；万一微信日后改了层级，这里就不动。
+    BOOL insideScroller = NO;
+    for (UIView *holder = voice; holder && holder != bar; holder = holder.superview) {
+        if (holder == (UIView *)scroller) { insideScroller = YES; break; }
+    }
+    if (!insideScroller) return;
 
     // 屏幕宽度取窗口；窗口尚未挂上时退回 UIScreen（同一台设备两者一致）。
     UIWindow *win = bar.window;
     CGFloat screenW = win ? win.bounds.size.width : UIScreen.mainScreen.bounds.size.width;
     if (screenW <= 0) return;
 
-    // 屏幕中心与本按钮中心都换算到工具栏坐标系再相减（跨坐标系直接比 origin 是 2.3.4 的坑）。
+    // 屏幕中心与本按钮中心都换算到容器坐标系再相减（跨坐标系直接比 origin 是 2.3.4 的坑）。
     CGPoint screenMidInBar = [bar convertPoint:CGPointMake(screenW * 0.5, 0) fromView:nil];
     CGPoint voiceMidInBar = [voice convertPoint:CGPointMake(CGRectGetMidX(voice.bounds), 0)
                                          toView:bar];
     CGFloat dx = screenMidInBar.x - voiceMidInBar.x;
 
-    // 已经居中就别设 transform：少一层无谓的合成，也避免和微信自己的动效打架。
+    // 已经居中就别写 frame：少一次无谓的图层几何更新（也就是少一分卡顿）。
     if (fabs(dx) < 0.5) return;
-    bar.transform = CGAffineTransformMakeTranslation(dx, 0);
+
+    frame = scroller.frame;
+    frame.origin.x = baseX + dx;              // origin 增大 ⇒ 内容右移，故直接加 dx
+    scroller.frame = frame;
 }
 
 #pragma mark - 语音按钮底色
@@ -269,10 +333,18 @@ static void RKVoiceApplyAll(WBToolBarButton *button) {
 
 %hook WBFunctionToolBar
 
-// 工具栏自己算完布局（按钮位置已定）之后，把整排平移到位。只设 transform，不碰任何 frame。
+// 这里才是微信真正摆按钮的地方（-layoutSubviews 内部就是调它）。挂在 %orig 之后，
+// 保证「按钮位置已经定下来」再平移；入参与回调原样透传（%orig 转发全部参数），
+// 不改它任何行为，也不碰容器的 transform / frame。
+- (void)layoutForAnimated:(BOOL)animated animateFinishedBlock:(void (^)(void))block {
+    %orig;
+    RKVoiceCenterInScreen(self);
+}
+
+// 兜底：-layoutSubviews 的后半段还有「语音聚焦」收尾逻辑，可能再动一次布局，
+// 所以最后再对齐一次（函数本身幂等，且值没变不会写 frame）。
 - (void)layoutSubviews {
     %orig;
-    if (!RKVoiceWidenEnabled()) return;
     RKVoiceCenterInScreen(self);
 }
 
