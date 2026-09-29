@@ -72,9 +72,12 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
 %hook UIApplication
 - (void)sendEvent:(UIEvent *)event {
     %orig;
+    // 判定按「最廉价且能挡掉最多事件」排序：sendEvent: 是进程内所有事件的唯一入口，
+    // 非触摸事件（滚动/遥控/硬件按键）在数量上占多数，先用一次属性读把它们挡掉，
+    // 再付进程守卫那次跨编译单元函数调用。两个判断都是 return，交换后语义完全等价。
+    if (event.type != UIEventTypeTouches) return;
     // 进程守卫：系统 UI 进程（SpringBoard / backboardd）不参与任何装饰，直接放行。
     if (RKKeyboardProcessIsSystemUI()) return;
-    if (event.type != UIEventTypeTouches) return;
     if (!RKKeyboardSessionActive()) {
         // 自愈兜底：触摸能解析出键盘宿主 = 键盘真实在场（通知可能未达），
         // 直接激活会话，保证装饰不依赖通知时序。

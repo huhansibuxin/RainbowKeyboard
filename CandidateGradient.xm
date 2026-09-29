@@ -69,15 +69,24 @@ static CGFloat RKCandidateAnimationSpeed = 0.14;
         RKCandidateDisplayLink = nil;
         return;
     }
-    static NSInteger previousLevel;
+    // 帧率只在档位真的变化时写。preferredFramesPerSecond 是带内部记账的属性写入，
+    // 而这里是 20fps 的每帧回调 —— 档位在本项目里恒为 0（智能流畅模式已裁掉），
+    // 每帧重写同一个值纯属白烧。
+    static NSInteger previousLevel = NSNotFound;
     NSInteger level = RKAdaptiveLevel();
     BOOL levelChanged = level != previousLevel;
-    previousLevel = level;
-    link.preferredFramesPerSecond = level ? 10 : 20;
+    if (levelChanged) {
+        previousLevel = level;
+        link.preferredFramesPerSecond = level ? 10 : 20;
+    }
     // One redraw on transition removes/restores existing gradient pixels.
     // During pressure only natural candidate updates draw after this.
     if (level && !levelChanged) return;
-    for (UIView *view in RKCandidateViews.allObjects) {
+    // NSHashTable 支持快速枚举；allObjects 每次调用都会新分配一个 NSArray，
+    // 而这条循环在 20fps 的每帧路径上。快速枚举要求循环期间集合不被改动 ——
+    // 循环体只打 setNeedsDisplay 标记，重绘要等本轮 runloop 结束、CA 提交事务时才发生，
+    // 因此不会同步走进 RKDrawCandidate / RKDrawNativeGlyphView 的 addObject。
+    for (UIView *view in RKCandidateViews) {
         if (!view.window || view.hidden || view.alpha <= 0.01 || CGRectIsEmpty(view.bounds)) continue;
         BOOL visible = YES;
         for (UIView *parent = view.superview; parent; parent = parent.superview) {
@@ -188,7 +197,7 @@ static void RKCandidateReload(void) {
     }
     RKCandidatePhaseStart = CACurrentMediaTime();
     if (!RKCandidateGradientEnabled) RKCandidateStopAnimation();
-    for (UIView *view in RKCandidateViews.allObjects) {
+    for (UIView *view in RKCandidateViews) {
         // Drop our rendered pixels, not the original text, so disabled gradients
         // do not remain in a reused label's backing layer.
         if (objc_getAssociatedObject(view, &RKCandidateRenderedKey)) {

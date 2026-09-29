@@ -1,6 +1,7 @@
 #import "RKNeonPress.h"
 #import "RKKeyboardGeometry.h"
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
 #import <math.h>
 
 static NSString *const RKPressScale = @"rkNeonPressScale";
@@ -19,6 +20,19 @@ static NSMapTable<UIView *, NSMutableDictionary<NSString *, UIImage *> *> *RKNeo
     return cache;
 }
 
+// 缓存容量：整键盘 26 键以上。原先是 8 条 + 超限时 removeAllObjects 整表清空 ——
+// 按键轮换一到第 9 个键就全清，紧接着的若干个键统统退化成冷键，而每个冷键要付
+// 一次整键层级快照 + calloc + 逐像素扫描（实测 0.5~2ms）。现在提到 20 条、且超限
+// 只淘汰「最久未用」的那一条，冷键因此只在首次按键与切换键面后出现。
+static NSUInteger const RKNeonForegroundCacheCapacity = 20;
+static char RKNeonEntryOrderKey;
+
+// 「上一次命中的那一份」快路径：长按删除 / 连打同一个字时命中率很高，而构造缓存键
+// 要格式化两个 NSString。这里先做一次指针 + 矩形比较，命中即返回，把这笔分配整个省掉。
+static __weak UIView *RKNeonLastHitKeyView;
+static CGRect RKNeonLastHitFace;
+static UIImage *RKNeonLastHitImage;
+
 static NSString *RKNeonForegroundCacheKey(UIView *keyView, CGRect face) {
     NSString *label = keyView.accessibilityLabel ?: @"";
     if ([keyView isKindOfClass:UIButton.class]) {
@@ -31,21 +45,41 @@ static NSString *RKNeonForegroundCacheKey(UIView *keyView, CGRect face) {
 
 static UIImage *RKCachedPressForeground(UIView *overlay, UIView *keyView, CGRect face) {
     if (!keyView) return nil;
+    if (keyView == RKNeonLastHitKeyView && CGRectEqualToRect(face, RKNeonLastHitFace) &&
+        RKNeonLastHitImage) return RKNeonLastHitImage;
     NSMapTable *cache = RKNeonForegroundCache();
     NSMutableDictionary *entries = [cache objectForKey:keyView];
     if (!entries) {
         entries = [NSMutableDictionary dictionary];
         [cache setObject:entries forKey:keyView];
     }
+    // 淘汰顺序与缓存同生命周期挂在字典上（键视图被复用/销毁时随字典一起走）。
+    NSMutableArray<NSString *> *order = objc_getAssociatedObject(entries, &RKNeonEntryOrderKey);
+    if (!order) {
+        order = [NSMutableArray array];
+        objc_setAssociatedObject(entries, &RKNeonEntryOrderKey, order,
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
     NSString *cacheKey = RKNeonForegroundCacheKey(keyView, face);
     UIImage *cached = entries[cacheKey];
-    if (cached) return cached;
+    if (cached) {
+        // 命中即提到队尾（LRU）。keyView 的缓存条目个位数，这两步的线性扫描可忽略。
+        [order removeObject:cacheKey];
+        [order addObject:cacheKey];
+        RKNeonLastHitKeyView = keyView; RKNeonLastHitFace = face; RKNeonLastHitImage = cached;
+        return cached;
+    }
     UIImage *image = RKPressForegroundUncached(overlay, keyView, face);
     if (image) {
-        // P1-6: 4 条缓存在上档/符号切换时过早整体失效，导致反复整键快照+像素扫描；
-        // 放宽到 8 条减少重复快照，命中结果与原来完全一致。
-        if (entries.count >= 8) [entries removeAllObjects];
+        while (order.count >= RKNeonForegroundCacheCapacity) {
+            NSString *oldest = order.firstObject;
+            if (!oldest) break;
+            [order removeObjectAtIndex:0];
+            [entries removeObjectForKey:oldest];
+        }
         entries[cacheKey] = image;
+        [order addObject:cacheKey];
+        RKNeonLastHitKeyView = keyView; RKNeonLastHitFace = face; RKNeonLastHitImage = image;
     }
     return image;
 }
@@ -151,21 +185,27 @@ static UIImage *RKPressForegroundUncached(UIView *overlay, UIView *keyView, CGRe
         background[c] = (samples[1] + samples[2]) / 2;
     }
     BOOL lightInk = (background[0] + background[1] + background[2]) / 3 < .5;
+    // 逐通道的分母是常量，提到循环外算一次；两个内层循环合并后每通道只取一次值。
+    // 除法与浮点表达式逐条保留（没换成倒数乘法），因此输出位图逐字节相同。
+    CGFloat denom[3];
+    for (NSUInteger c = 0; c < 3; c++)
+        denom[c] = lightInk ? MAX(.05, 1 - background[c]) : MAX(.05, background[c]);
     NSUInteger ink = 0;
     for (size_t i = 0; i < width * height; i++) {
         uint8_t *pixel = pixels + i * 4;
+        CGFloat value[3];
         CGFloat alpha = 0;
         for (NSUInteger c = 0; c < 3; c++) {
-            CGFloat value = pixel[c] / 255.0;
-            CGFloat difference = lightInk ? (value - background[c]) / MAX(.05, 1 - background[c]) :
-                (background[c] - value) / MAX(.05, background[c]);
+            value[c] = pixel[c] / 255.0;
+            CGFloat difference = lightInk ? (value[c] - background[c]) / denom[c] :
+                (background[c] - value[c]) / denom[c];
             alpha = MAX(alpha, difference);
         }
         alpha = MIN(1, alpha);
         if (alpha < .035) alpha = 0;
         if (alpha > .1) ink++;
         for (NSUInteger c = 0; c < 3; c++)
-            pixel[c] = (uint8_t)lround(MIN(alpha, MAX(0, pixel[c] / 255.0 - background[c] * (1 - alpha))) * 255);
+            pixel[c] = (uint8_t)lround(MIN(alpha, MAX(0, value[c] - background[c] * (1 - alpha))) * 255);
         pixel[3] = (uint8_t)lround(alpha * 255);
     }
     CGImageRef image = CGBitmapContextCreateImage(context);
