@@ -113,7 +113,11 @@ static CGFloat RKCandidateAnimationPhase(void) {
 }
 
 static void RKCandidateStartAnimationIfNeeded(void) {
-    if (!RKCandidateGradientEnabled || RKCandidateViews.count == 0) return;
+    // 守卫用合成的 RKCandidateEnabled（总开关 && 至少一个子开关），与绘制总闸
+    // RKCandidateActive() 里的开关部分逐字一致 —— 总开关开着但 native/wetype 两个
+    // 子开关都关时，没有任何一次绘制会走到这里，这条 20fps 的链也就不该被起起来。
+    // 这里刻意不判会话状态（键盘可能尚未弹出），会话由 tick 首行与绘制总闸各自兜住。
+    if (!RKCandidateEnabled || RKCandidateViews.count == 0) return;
     if (RKCandidateDisplayLink) return;
 
     RKCandidatePhaseStart = CACurrentMediaTime();
@@ -129,6 +133,23 @@ static void RKCandidateStartAnimationIfNeeded(void) {
 static void RKCandidateStopAnimation(void) {
     [RKCandidateDisplayLink invalidate];
     RKCandidateDisplayLink = nil;
+}
+
+// 关闭候选栏渐变时的统一收尾：停掉 20fps 的 CADisplayLink，并清空重绘表。
+// 清表有两重作用：① 关掉功能后不再持有任何弱引用；② tick 即便被外部意外触发，
+// 也会在第一行的 `RKCandidateViews.count == 0` 处立刻 invalidate 返回 ——
+// 「关掉就不循环」因此是代码保证，而不是仅靠调用链推理。
+// 调用时机固定在 RKCandidateReload() 的清像素循环**之后**：那个循环还要靠这张表
+// 去把已经渲染过的渐变像素撤掉，先清表就撤不干净了。
+//
+// 综观全局，「关闭候选栏渐变 ⇒ 零循环」由三道防线构成，改动这里时三条都要看：
+//   ① 三个绘制钩子（UILabel/WBTextItemLabel -drawTextInRect:、UIView -drawLayer:inContext:）
+//      首行即总闸 RKCandidateActive()，关闭时一次内存读后 %orig 放行，走不到启动函数；
+//   ② 启动函数自身守卫（本函数的 RKCandidateEnabled + 表非空）；
+//   ③ 本收尾函数 + tick 首行自检。
+static void RKCandidateTeardown(void) {
+    RKCandidateStopAnimation();
+    [RKCandidateViews removeAllObjects];
 }
 
 static NSDictionary *RKCandidateReadPreferences(void) {
@@ -196,7 +217,6 @@ static void RKCandidateReload(void) {
         RKCandidateCachedGradient = NULL;
     }
     RKCandidatePhaseStart = CACurrentMediaTime();
-    if (!RKCandidateGradientEnabled) RKCandidateStopAnimation();
     for (UIView *view in RKCandidateViews) {
         // Drop our rendered pixels, not the original text, so disabled gradients
         // do not remain in a reused label's backing layer.
@@ -209,6 +229,9 @@ static void RKCandidateReload(void) {
         [view setNeedsLayout];
         [view.superview setNeedsLayout];
     }
+    // 撤掉已渲染像素之后再收尾：关掉功能就停链、清表，不留任何后续动作。
+    // 判据用合成值 RKCandidateEnabled（与启动守卫、绘制总闸同一判据）。
+    if (!RKCandidateEnabled) RKCandidateTeardown();
 }
 static void RKCandidateChanged(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef info) {
     dispatch_async(dispatch_get_main_queue(), ^{ RKCandidateReload(); });

@@ -36,6 +36,47 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 @end
 @implementation RKKeyRow
 @end
+
+// ---- 层驱逐按「效果分组」进行（2.3.26）------------------------------------------
+// 键底光效（波纹/扩散/流光）与轻弹（键帽上色）都往 self.layer 上挂自己的层，而此前
+// 两者的驱逐写的是同一句话：`while (sublayers.count >= limit) [firstObject removeFromSuperlayer]`。
+// 计数池共用，于是叠加时每按一次键净增两层，池子更快触顶 —— 后按下的轻弹会把仍在
+// 扩散途中的波纹层一并踢掉，表现为「开着轻弹，波纹扩到一半就停住」。
+// 现在按层名归类：各自只数自己那一类，超限只驱逐同类里最早的一层，两组互不干扰。
+// 语义与原来一致：添加前保证「同类层数 < limit」。
+static void RKEvictLayersByName(NSArray<CALayer *> *sublayers,
+                                NSSet<NSString *> *names, NSUInteger limit) {
+    if (!limit || !sublayers.count) return;
+    NSMutableArray<CALayer *> *owned = [NSMutableArray array];
+    for (CALayer *layer in sublayers) {
+        NSString *name = layer.name;
+        if (name && [names containsObject:name]) [owned addObject:layer];
+    }
+    while (owned.count >= limit) {
+        [owned.firstObject removeFromSuperlayer];
+        [owned removeObjectAtIndex:0];
+    }
+}
+// 键底光效组：波纹 / 扩散 / 原生扩散 / 流光底韵四种风格共用一个预算。
+static NSSet<NSString *> *RKBedEffectLayerNames(void) {
+    static NSSet *names;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        names = [NSSet setWithArray:@[@"RKBedRipples", @"RKBedSpread",
+                                      @"RKNativeWeTypeSpread", @"RKExpandingUnderlight"]];
+    });
+    return names;
+}
+// 轻弹组：neonKeyPress 为现用名，RKFastInputFeedback 是旧版遗留，一并纳入以便清理。
+static NSSet<NSString *> *RKKeycapFeedbackLayerNames(void) {
+    static NSSet *names;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        names = [NSSet setWithArray:@[@"neonKeyPress", @"RKFastInputFeedback"]];
+    });
+    return names;
+}
+
 @interface RainbowEffectView ()
 @property(nonatomic,strong) NSDictionary *config;
 @property(nonatomic,strong) UIImage *underlightMaskImage;
@@ -50,6 +91,11 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 // 命中索引（随 keyFrames 一起重建，见 setKeyFrames:）：行分桶 + 整表包围盒。
 @property(nonatomic,strong) NSArray<RKKeyRow *> *keyHitRows;
 @property(nonatomic) CGRect keyBedBounds;
+// 原生键缝遮罩的合并路径缓存：只依赖「键区包围盒 + 本视图 bounds + 键面路径集合」，
+// 三者任一变化才重建；setKeyFrames: 会主动置空（bounds 相同但键面不同的场景，如
+// 全键盘 ↔ 数字键盘切换，光看 bounds 是判不出来的）。
+@property(nonatomic,strong) UIBezierPath *cachedGutterMaskPath;
+@property(nonatomic) CGRect cachedGutterMaskPathBounds;
 @end
 
 // 落点 → 按压键解析（扩散/波纹、原生扩散、轻弹三处共用同一套判据）。
@@ -206,6 +252,8 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
     if ([_keyFrames isEqualToArray:keyFrames]) return;
     _keyFrames = [keyFrames copy];
     self.underlightMaskImage = nil;
+    // 键面集合变了，键缝遮罩的合并路径必须重建（bounds 可能没变，判不出来）。
+    self.cachedGutterMaskPath = nil;
     NSMutableArray *faces = [NSMutableArray arrayWithCapacity:_keyFrames.count];
     NSMutableArray *centers = [NSMutableArray arrayWithCapacity:_keyFrames.count];
     NSMutableArray *geometries = [NSMutableArray arrayWithCapacity:_keyFrames.count * 2];
@@ -243,7 +291,8 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
 }
 // 注：原 addAmbientGlowToPulse:（背景光晕/背景扩散）于 2.3.17 删除 ——
 // 该方法全项目零调用，与之配套的「背景光晕」「背景扩散」两个开关是死开关，
-// 已一并从高级设置移除。keyGutterMask / cachedGutterPath 为其独占依赖，同批删除。
+// 已一并从高级设置移除；它当时独占的 keyGutterMask 方法与同名路径缓存同批删掉。
+// 2.3.26 给「原生键缝遮罩」另加了路径缓存，属性名取 cachedGutterMaskPath 以作区分。
 // Only positively identified native layouts may illuminate key faces.
 // WeType keeps its existing cut-out mask, even if a native-looking view exists.
 - (BOOL)usesNativeKeycapGlow {
@@ -282,11 +331,19 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
     CGRect bed = self.keyBedBounds;
     CGRect area = CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds);
     if (CGRectIsNull(area) || CGRectIsEmpty(area)) return nil;
-    UIBezierPath *path = [UIBezierPath bezierPathWithRect:area];
-    for (UIBezierPath *face in self.cachedFacePaths) [path appendPath:face];
+    // 合并路径（整块键区 ∪ 全部键面，EvenOdd 取缝）只依赖键位表与 bounds，与按哪个键无关，
+    // 因此可以跨按键复用。此前每次按键都要把 26 条键面路径 append 进一条新路径、再把
+    // UIBezierPath 扁平化成 CGPath —— 现在这笔开销只在布局变化时付一次。
+    // mask 层本身仍每次新建：它是被 bed.mask 持有的，不与其它 pulse 共用同一个层对象。
+    if (!self.cachedGutterMaskPath || !CGRectEqualToRect(self.cachedGutterMaskPathBounds, self.bounds)) {
+        UIBezierPath *path = [UIBezierPath bezierPathWithRect:area];
+        for (UIBezierPath *face in self.cachedFacePaths) [path appendPath:face];
+        self.cachedGutterMaskPath = path;
+        self.cachedGutterMaskPathBounds = self.bounds;
+    }
     CAShapeLayer *mask = [CAShapeLayer layer];
     mask.frame = self.bounds;
-    mask.path = path.CGPath;
+    mask.path = self.cachedGutterMaskPath.CGPath;
     mask.fillRule = kCAFillRuleEvenOdd;
     return mask;
 }
@@ -479,7 +536,8 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
     BOOL fast = RKAdaptiveFastInput() || RKAdaptiveLevel() >= 2;
     BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
     NSUInteger limit = style == 0 ? 3 : (fast ? 1 : 2);
-    while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
+    // 只驱逐本组（波纹/扩散/流光）的旧层：轻弹层再多也不会把在飞的波纹踢停。
+    RKEvictLayersByName(self.layer.sublayers, RKBedEffectLayerNames(), limit);
     UIColor *color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:brightness alpha:1];
     CGFloat reach = MIN(210,MAX(100,[self number:@"BackgroundRadius" fallback:180 low:60 high:360]));
     CGFloat duration = MIN(.75,MAX(.42,[self number:@"Duration" fallback:.55 low:.15 high:1.2]));
@@ -588,7 +646,7 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
     BOOL fast = RKAdaptiveFastInput() || RKAdaptiveLevel() >= 2;
     BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
     NSUInteger limit = fast ? 1 : 2;
-    while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
+    RKEvictLayersByName(self.layer.sublayers, RKBedEffectLayerNames(), limit);
     UIColor *color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:brightness alpha:1];
     CGFloat reach = MIN(210,MAX(100,[self number:@"BackgroundRadius" fallback:180 low:60 high:360]));
     CGFloat duration = MIN(.75,MAX(.42,[self number:@"Duration" fallback:.55 low:.15 high:1.2]));
@@ -666,7 +724,8 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
     CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
     CGFloat duration = [self number:@"Duration" fallback:.55 low:.15 high:1.2];
     NSUInteger limit = (NSUInteger)[self number:@"MaxEffects" fallback:4 low:1 high:8];
-    while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
+    // 轻弹只在自己的层组里做上限控制，不去挤键底光效的计数池。
+    RKEvictLayersByName(self.layer.sublayers, RKKeycapFeedbackLayerNames(), limit);
     // 轻弹自己的色相照常推进：关掉「与光效同色」后接着用，行为与旧版一致。
     self.pressHue = fmod(self.pressHue + .38196601125, 1);
     BOOL single = [self number:@"PressColorMode" fallback:0 low:0 high:1] == 1;
@@ -750,7 +809,7 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
     BOOL fast = RKAdaptiveFastInput() || RKAdaptiveLevel() >= 2;
     BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
     NSUInteger limit = fast ? 1 : 2;
-    while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
+    RKEvictLayersByName(self.layer.sublayers, RKBedEffectLayerNames(), limit);
     UIColor *color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:brightness alpha:1];
     CALayer *pulse = [CALayer layer];
     pulse.name = @"RKExpandingUnderlight";

@@ -53,6 +53,7 @@ jobs:
           python3 check_control.py control
           python3 check_slider_help.py
           python3 check_settings_items.py
+          python3 check_candidate_idle.py
           test -s build/RainbowKeyboard-rootless.deb
           python3 check_control.py --deb build/RainbowKeyboard-rootless.deb
           echo "Package info:"
@@ -110,6 +111,7 @@ jobs:
           python3 check_control.py control
           python3 check_slider_help.py
           python3 check_settings_items.py
+          python3 check_candidate_idle.py
           test -s build/RainbowKeyboard-roothide.deb
           python3 check_control.py --deb build/RainbowKeyboard-roothide.deb
           echo "Package info:"
