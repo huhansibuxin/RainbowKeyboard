@@ -113,10 +113,29 @@
 
 // 缺省即开：键盘扩展沙盒读不到偏好文件时，固化表(RKPresetSelfUseTable)会把
 // WidenVoiceButton 兜底成 1，所以任何情况下默认都是打开状态。
-static BOOL RKVoiceWidenEnabled(void) {
+//
+// 进程级缓存（与 Tweak.xm 的装饰总闸同一模式）：本函数在**每轮布局**里被逐个按钮调用，
+// 而 RKReadEffectivePreferences() 内部要加锁 + 两次 notify syscall。摊平成裸 BOOL 后，
+// 「关掉开关」的判定在稳态布局路径上只剩一次内存读。
+// 刷新时机 = %ctor / 键盘弹出 / 偏好变更 Darwin 通知，均不在布局路径上。
+static BOOL RKVoiceWidenFlag;
+static BOOL RKVoiceWidenFlagPrimed;
+
+static void RKVoiceWidenRefresh(void) {
     NSDictionary *prefs = RKReadEffectivePreferences();
     id value = prefs[@"WidenVoiceButton"];
-    return value ? [value boolValue] : YES;
+    RKVoiceWidenFlag = !value || [value boolValue];
+    RKVoiceWidenFlagPrimed = YES;
+}
+
+static BOOL RKVoiceWidenEnabled(void) {
+    if (!RKVoiceWidenFlagPrimed) RKVoiceWidenRefresh();
+    return RKVoiceWidenFlag;
+}
+
+static void RKVoiceWidenPreferencesChanged(CFNotificationCenterRef center, void *observer,
+                                           CFStringRef name, const void *object, CFDictionaryRef info) {
+    dispatch_async(dispatch_get_main_queue(), ^{ RKVoiceWidenRefresh(); });
 }
 
 #pragma mark - 语音按钮识别
@@ -452,8 +471,27 @@ static void RKVoiceFinishBar(UIView *bar) {
 %end
 
 %ctor {
-    // 只在微信输入法扩展里生效；注入到系统键盘(InputUI)时这些类不存在，直接跳过。
-    if (objc_getClass("WBToolBarButton")) {
-        %init(RKVoiceGroup);
+    @autoreleasepool {
+        // 开关缓存的刷新与订阅（与 %init 无关，系统键盘进程里也照常维护，代价可忽略）。
+        RKVoiceWidenRefresh();
+        // block observer 的 token 必须持有，否则 ARC 下立即释放导致通知静默失效。
+        static id voiceObserverTokens[2];
+        voiceObserverTokens[0] = [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIKeyboardDidShowNotification object:nil
+            queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            RKVoiceWidenRefresh();
+        }];
+        voiceObserverTokens[1] = [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+            queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            RKVoiceWidenRefresh();
+        }];
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+            RKVoiceWidenPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
+        // 只在微信输入法扩展里生效；注入到系统键盘(InputUI)时这些类不存在，直接跳过。
+        if (objc_getClass("WBToolBarButton")) {
+            %init(RKVoiceGroup);
+        }
     }
 }

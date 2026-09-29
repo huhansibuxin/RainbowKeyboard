@@ -5,10 +5,45 @@
 #import "RKKeyboardGeometry.h"
 #import "RKBlackKeyboard.h"
 #import "RKAdaptivePerformance.h"
+#import "RKPreferences.h"
 static char RKOverlayKey;
 static char RKOverlayBoundsKey;
 static char RKPendingPressKey;
 static char RKGeometryTimeKey;
+
+#pragma mark - 装饰总闸（进程级缓存，按键路径只付一次内存读）
+
+// 「启用键盘光效 / 波动扩散 / 原生键盘 / 微信输入法」任一关闭 ⇒ 装饰链路必须零开销：
+// 不派发按键任务、不做布局变更检测、不做全量键位扫描（0.2s 节流）、不构造遮罩图层。
+// 此前这些工作全部发生在 showRippleAtPoint: 的开关判定**之前**，于是关掉开关每次按键
+// 仍要白扫一遍几何并建一层 CAShapeLayer —— 这里把闸提到派发之前。
+// 取值为进程级缓存：只在 %ctor / 键盘弹出 / 偏好变更通知时刷新，稳态下按键路径只读一个
+// static BOOL（RKDecorationEnabledFlag），不碰偏好字典、不加锁。
+static BOOL RKDecorationEnabledFlag;
+static BOOL RKDecorationFlagPrimed;
+
+static void RKDecorationRefresh(void) {
+    NSDictionary *prefs = RKReadEffectivePreferences();
+    id enabled = prefs[@"Enabled"];
+    id ripple = prefs[@"RippleEnabled"];
+    id layout = prefs[RKKeyboardBundleIsWeType() ? @"WeChatKeyboard" : @"NativeKeyboard"];
+    // 与 RainbowEffectView -flag: 同语义：键缺失视为开。
+    RKDecorationEnabledFlag = (!enabled || [enabled boolValue])
+        && (!ripple || [ripple boolValue])
+        && (!layout || [layout boolValue]);
+    RKDecorationFlagPrimed = YES;
+}
+
+static inline BOOL RKDecorationEnabled(void) {
+    // 标志未就绪（进程内第一个触摸事件早于通知）时惰性取一次，之后恒为内存读。
+    if (!RKDecorationFlagPrimed) RKDecorationRefresh();
+    return RKDecorationEnabledFlag;
+}
+
+static void RKDecorationPreferencesChanged(CFNotificationCenterRef center, void *observer,
+                                           CFStringRef name, const void *object, CFDictionaryRef info) {
+    dispatch_async(dispatch_get_main_queue(), ^{ RKDecorationRefresh(); });
+}
 @interface RKPendingPress : NSObject
 @property(nonatomic) CGPoint point;
 @property(nonatomic) CFTimeInterval time, lastRendered;
@@ -51,6 +86,10 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
         if (!keyboardTouch) return;
         RKKeyboardSessionSetActive(YES);
     }
+    // 装饰总闸：四个功能开关任一关闭即在此止步 —— 不派发按键任务、不碰几何与图层。
+    // 上面的会话自愈刻意保留：候选栏渐变独立依赖 RKKeyboardSessionActive()，
+    // 不能因为主光效关闭而让会话判定失效。
+    if (!RKDecorationEnabled()) return;
     for (UITouch *touch in event.allTouches) {
         if (touch.phase != UITouchPhaseBegan) continue;
         UIView *host = RKKeyboardEffectHost(touch.view);
@@ -77,6 +116,9 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
             UIView *liveHost = weakHost;
             CFTimeInterval now = CACurrentMediaTime();
             if (!liveHost || !liveHost.window || liveHost.hidden || now - pending.time > .080) return;
+            // 二道闸：派发与执行之间用户可能刚从设置页关掉开关（Darwin 通知已刷新缓存）。
+            // 放在几何工作之前，避免「这一拍仍然白扫一遍键位」。
+            if (!RKDecorationEnabled()) return;
             // Throttle decoration before geometry scanning, never UIKit input.
             if ((RKAdaptiveFastInput() || RKAdaptiveLevel() >= 2) && now - pending.lastRendered < .10) return;
             CGPoint touchPoint = pending.point;
@@ -138,3 +180,26 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
     RKKeyboardSessionSetActive([(UIView *)self window] != nil);
 }
 %end
+
+%ctor {
+    @autoreleasepool {
+        // 系统 UI 进程不参与装饰（见 RKKeyboardProcessIsSystemUI），连总闸都不必维护。
+        if (RKKeyboardProcessIsSystemUI()) return;
+        RKDecorationRefresh();
+        // block observer 的 token 必须持有，否则 ARC 下立即释放导致通知静默失效。
+        static id decorationObserverTokens[2];
+        decorationObserverTokens[0] = [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIKeyboardDidShowNotification object:nil
+            queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            RKDecorationRefresh();
+        }];
+        decorationObserverTokens[1] = [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationDidBecomeActiveNotification object:nil
+            queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+            RKDecorationRefresh();
+        }];
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+            RKDecorationPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
+    }
+}

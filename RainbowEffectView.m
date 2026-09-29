@@ -106,6 +106,12 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
     if (!newConfig) newConfig = @{};
     self.config = newConfig;
     RKAdaptiveSetEnabled(!newConfig[@"SmartPerformance"] || [newConfig[@"SmartPerformance"] boolValue]);
+    // 装饰关闭时立刻自清：扔掉自己的图层并隐藏，不在键盘上留一个空叠加层
+    //（重新打开时再显示，视图树位置不动，无需跨文件清理 Tweak.xm 的关联对象）。
+    BOOL on = [self flag:@"Enabled"] && [self flag:@"RippleEnabled"] &&
+        [self flag:RKKeyboardBundleIsWeType() ? @"WeChatKeyboard" : @"NativeKeyboard"];
+    if (!on) for (CALayer *layer in self.layer.sublayers.copy) [layer removeFromSuperlayer];
+    self.hidden = !on;
 }
 - (CGFloat)number:(NSString *)key fallback:(CGFloat)fallback low:(CGFloat)low high:(CGFloat)high {
     id x = self.config[key];
@@ -683,8 +689,9 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
     // Configuration is cached and invalidated by the settings Darwin notification.
     // Do not perform preference/transport checks on every key press.
     // Input activity is recorded once in sendEvent, before decoration coalescing.
-    NSString *bid = NSBundle.mainBundle.bundleIdentifier.lowercaseString ?: @"";
-    BOOL weType = [bid containsString:@"wetype"];
+    // 宿主判定走进程级缓存（dispatch_once 内解析一次）；此前每次按键都要
+    // NSBundle.mainBundle.bundleIdentifier + lowercaseString，两次 NSString 分配。
+    BOOL weType = RKKeyboardBundleIsWeType();
     if (![self flag:@"Enabled"] || ![self flag:@"RippleEnabled"] || ![self flag:weType ? @"WeChatKeyboard" : @"NativeKeyboard"]) {
         for (CALayer *l in self.layer.sublayers.copy) [l removeFromSuperlayer];
         return;

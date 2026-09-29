@@ -89,6 +89,9 @@ static id RKKeyboardSessionObserverTokens[3];
 
 __attribute__((constructor))
 static void RKKeyboardSessionInstallObservers(void) {
+    // 系统 UI 进程（SpringBoard / backboardd）里会话判定毫无意义 —— 那里没有键盘装饰，
+    // 锁屏/桌面的任何绘制都不该走进本插件的路径。连观察者都不注册，彻底不参与。
+    if (RKKeyboardProcessIsSystemUI()) return;
     RKKeyboardSessionObserverTokens[0] = [[NSNotificationCenter defaultCenter]
         addObserverForName:UIKeyboardWillShowNotification
         object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
