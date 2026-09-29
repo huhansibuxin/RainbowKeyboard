@@ -28,7 +28,7 @@
 // 配套有 imageSizeWithDescLabel、imageHorInsetWithDescLabel、imageRightInsetWithDescLabel、
 // descLabelHeight 等专用布局方法（imageRightInset = 图标右侧给文字留位 ⇒ 图标在左、
 // 文字在右，正是目标形态）。所以只需 setShowDesc: + setDesc:，排布交给它自己的
-// -layoutSubviews，不干预字体/颜色/间距。
+// -layoutSubviews；字体/颜色一律不碰，只把「图标与文字」的间距放开（原生默认偏紧）。
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -41,6 +41,7 @@
 - (void)setShowDesc:(BOOL)showDesc;
 - (void)setDesc:(NSString *)desc;
 - (id)descLabel;
+- (void)setSpacingBetweenImageAndTitle:(CGFloat)spacing;   // 继承自 WBButton(_spacingBetweenImageAndTitle, double)
 @end
 
 #pragma mark - 开关
@@ -66,6 +67,9 @@ static BOOL RKVoiceIsVoiceButton(UIView *button) {
 #pragma mark - 描述文字（图标在左，文字跟在右侧）
 
 static NSString * const RKVoiceDescText = @"点击说话";
+// 图标与文字之间的间距。原生默认偏紧（看着「挤在一起」），这里放开到 8pt。
+// 类型依据：WBButton 的 ivar `_spacingBetweenImageAndTitle` 编码为 `d`(double)。
+static CGFloat const RKVoiceDescSpacing = 8.0;
 static char RKVoiceDescAppliedKey;
 
 static void RKVoiceApplyDescIfNeeded(WBToolBarButton *button) {
@@ -75,17 +79,21 @@ static void RKVoiceApplyDescIfNeeded(WBToolBarButton *button) {
 
     [button setShowDesc:YES];
     [button setDesc:RKVoiceDescText];
+    [button setSpacingBetweenImageAndTitle:RKVoiceDescSpacing];
     // setShowDesc: 若没顺手建出 label，这里补一次（方法不存在就跳过）。
     if (![button descLabel] && [button respondsToSelector:@selector(initDescLabelIfNeeded)])
         ((void (*)(id, SEL))objc_msgSend)(button, @selector(initDescLabelIfNeeded));
+    [button setNeedsLayout];
 }
 
 #pragma mark - 目标宽度
 
 // 方钮是正方形 ⇒「一格」= 它的高（也是它的自然宽），实测 34pt。
-// 目标 = 3.5 格：3 格 = 与「最近使用」胶囊等长，再宽半格（用户要求）。
+// 目标 = 4.5 格（153pt）。取值过程：3 格 = 与「最近使用」胶囊等长；3.5 格仍偏短；
+// 4.5 格 ≈ 胶囊再宽一个半方钮。另：按钮比内容宽得多，内容居中后左右自然留白，
+// 配合 RKVoiceDescSpacing 一起让「图标+文字」看着不挤。
 // 「一格」从同排方钮实测采样，换机型/字号自动跟随；采不到时用实测的 34pt 兜底。
-static CGFloat const RKVoiceTargetUnits = 3.5;
+static CGFloat const RKVoiceTargetUnits = 4.5;
 static CGFloat RKVoiceUnitWidth = 0;
 
 #pragma mark - Hook
