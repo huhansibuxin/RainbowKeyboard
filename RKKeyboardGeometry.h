@@ -30,8 +30,16 @@ FOUNDATION_EXPORT BOOL RKKeyboardLayoutChanged(UIView *host);
 
 // 键盘会话状态：WillShow 置 YES，DidHide / 退后台置 NO。
 // 供全局 UIKit 钩子做快速短路，键盘未显示时不承担装饰开销。
+//
+// 2.3.22：读取端由「跨编译单元函数」改为「直接读 volatile 变量」（static inline）。
+// 本项目不开 LTO（-Oz + -Wl,-dead_strip），非 inline 的 FOUNDATION_EXPORT 函数
+// 在每个调用点都是一次真实函数调用；而 UIView -drawLayer: 这类绘制钩子每帧要判
+// 上百次，函数调用本身的开销大于判定逻辑，故改为内联读。
+FOUNDATION_EXPORT volatile BOOL RKKeyboardSessionActiveValue;
 FOUNDATION_EXPORT void RKKeyboardSessionSetActive(BOOL active);
-FOUNDATION_EXPORT BOOL RKKeyboardSessionActive(void);
+static inline __attribute__((unused)) BOOL RKKeyboardSessionActive(void) {
+    return RKKeyboardSessionActiveValue;
+}
 
 // 进程守卫（2.3.17）：本插件只服务「系统键盘(InputUI)」与「微信输入法(wxkb_plugin)」，
 // 正常由注入过滤（Filter/Executables）保证。但越狱环境里过滤器未必总被尊重

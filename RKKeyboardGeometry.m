@@ -48,11 +48,12 @@ NSUInteger RKClassFeatures(Class cls) {
 
 // Always clear decoration session state on hide/background. Retaining this
 // flag cannot keep an extension alive or prevent a system termination.
-static volatile BOOL RKKeyboardSessionActiveValue;
+// 2.3.22：去掉 static —— 读取端已移到头文件做成 static inline 直读本变量，
+// 避免热路径上每个绘制钩子都付一次跨编译单元函数调用（本项目不开 LTO）。
+volatile BOOL RKKeyboardSessionActiveValue;
 void RKKeyboardSessionSetActive(BOOL active) {
     RKKeyboardSessionActiveValue = active;
 }
-BOOL RKKeyboardSessionActive(void) { return RKKeyboardSessionActiveValue; }
 
 // 进程守卫：见头文件说明。只黑名单「系统 UI 进程」，其余一律放行，
 // 避免判据过严反而把键盘进程里的功能挡掉（误伤的代价更大）。

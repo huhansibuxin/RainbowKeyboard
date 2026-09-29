@@ -15,13 +15,19 @@ static NSDictionary *RKCandidatePrefs;
 static BOOL RKCandidateGradientEnabled;
 static BOOL RKCandidateNativeEnabled;
 static BOOL RKCandidateWeTypeEnabled;
+// 上面三项的合成结果（总开关 && 至少一个子开关），在 RKCandidateRefreshSwitches() 里算好。
+// 独立缓存它的唯一理由是**短路顺序**：把它放在判定最前面，关闭「候选栏渐变」时
+// 一次普通内存读即可短路，连会话状态的 volatile 读都省掉（见下方 RKCandidateActive 注释）。
+static BOOL RKCandidateEnabled;
 
 // 总闸：所有绘制钩子的第一行。键盘没弹出、或渐变总开关关闭、或 native/wetype
-// 两个子开关全关时，成本仅为「一次 volatile 读 + 一次 BOOL 读 + 一条分支」，
-// 随即 %orig 原样放行 —— 不做链遍历、不插表、不开绘制作用域。
+// 两个子开关全关时，随即 %orig 原样放行 —— 不做链遍历、不插表、不开绘制作用域。
+//
+// 读序刻意为之：普通 static BOOL 在前、会话状态(volatile)在后。
+// 关闭渐变（本插件的常态配置）时判定成本 = 一次内存读 + 一条分支；
+// 会话守卫已内联（不再是一次跨编译单元函数调用，见 RKKeyboardGeometry.h）。
 static inline BOOL RKCandidateActive(void) {
-    return RKKeyboardSessionActive() && RKCandidateGradientEnabled &&
-           (RKCandidateNativeEnabled || RKCandidateWeTypeEnabled);
+    return RKCandidateEnabled && RKKeyboardSessionActive();
 }
 static CGGradientRef RKCandidateCachedGradient;
 static NSHashTable<UIView *> *RKCandidateViews;
@@ -137,8 +143,9 @@ static BOOL RKNativeCandidateRegion(UIView *view) {
 static BOOL RKCandidateFlag(NSString *key) {
     return !RKCandidatePrefs[key] || [RKCandidatePrefs[key] boolValue];
 }
-// 从偏好字典刷新三个缓存开关。仅在 RKCandidateReload()（Darwin 通知 / 键盘弹出 / 前台激活）
-// 里调用，不在任何绘制路径上。
+// 从偏好字典刷新四个缓存开关（含合成值）。仅在 RKCandidateReload()（Darwin 通知 /
+// 键盘弹出 / 前台激活 / %ctor 启动）里调用，**不在任何绘制路径上** ——
+// 也就是说打字过程中从不读偏好，只读这些裸 BOOL。
 // 语义刻意不对称：总开关「缺失即关」（候选栏渐变默认关闭，缺键时绝不意外开启、绝不留开销），
 // 两个子开关「缺失即开」（它们是"应用到哪种输入法"的细分，默认全开才符合直觉，也避免
 // 用户打开总开关后因子开关兜底为关而看不到任何效果）。
@@ -146,6 +153,9 @@ static void RKCandidateRefreshSwitches(void) {
     RKCandidateGradientEnabled = [RKCandidatePrefs[@"CandidateGradient"] boolValue];
     RKCandidateNativeEnabled   = RKCandidateFlag(@"CandidateNative");
     RKCandidateWeTypeEnabled   = RKCandidateFlag(@"CandidateWeType");
+    // 合成值一并算好，把 || 从绘制热路径挪到这里（每帧上百次的判定只剩一次内存读）。
+    RKCandidateEnabled = RKCandidateGradientEnabled &&
+        (RKCandidateNativeEnabled || RKCandidateWeTypeEnabled);
 }
 static BOOL RKCandidateIsWeType(UIView *view) {
     if (RKKeyboardBundleIsWeType()) return YES;
