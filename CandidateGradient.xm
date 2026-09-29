@@ -8,6 +8,21 @@
 #import "RKKeyboardGeometry.h"
 
 static NSDictionary *RKCandidatePrefs;
+// 开关缓存（2.3.19）：把设置开关摊平成裸 BOOL，专供绘制钩子的**第一道闸**使用。
+// 关闭「候选栏渐变」时必须真的零开销 —— 只有裸内存读能保证这一点，
+// 走 RKCandidatePrefs[key] 是两次字典查（objectForKey + boolValue 消息）。
+// 取值统一在 RKCandidateRefreshSwitches() 里刷新，不在任何热路径上。
+static BOOL RKCandidateGradientEnabled;
+static BOOL RKCandidateNativeEnabled;
+static BOOL RKCandidateWeTypeEnabled;
+
+// 总闸：所有绘制钩子的第一行。键盘没弹出、或渐变总开关关闭、或 native/wetype
+// 两个子开关全关时，成本仅为「一次 volatile 读 + 一次 BOOL 读 + 一条分支」，
+// 随即 %orig 原样放行 —— 不做链遍历、不插表、不开绘制作用域。
+static inline BOOL RKCandidateActive(void) {
+    return RKKeyboardSessionActive() && RKCandidateGradientEnabled &&
+           (RKCandidateNativeEnabled || RKCandidateWeTypeEnabled);
+}
 static CGGradientRef RKCandidateCachedGradient;
 static NSHashTable<UIView *> *RKCandidateViews;
 static __thread NSUInteger RKCandidateDrawingDepth;
@@ -43,7 +58,7 @@ static CGFloat RKCandidateAnimationSpeed = 0.14;
 }
 - (void)tick:(CADisplayLink *)link {
     if (!RKCandidateDisplayLink) return;
-    if (!RKCandidateFlag(@"CandidateGradient") || RKCandidateViews.count == 0) {
+    if (!RKCandidateActive() || RKCandidateViews.count == 0) {
         [link invalidate];
         RKCandidateDisplayLink = nil;
         return;
@@ -83,7 +98,7 @@ static CGFloat RKCandidateAnimationPhase(void) {
 }
 
 static void RKCandidateStartAnimationIfNeeded(void) {
-    if (!RKCandidateFlag(@"CandidateGradient") || RKCandidateViews.count == 0) return;
+    if (!RKCandidateGradientEnabled || RKCandidateViews.count == 0) return;
     if (RKCandidateDisplayLink) return;
 
     RKCandidatePhaseStart = CACurrentMediaTime();
@@ -122,11 +137,22 @@ static BOOL RKNativeCandidateRegion(UIView *view) {
 static BOOL RKCandidateFlag(NSString *key) {
     return !RKCandidatePrefs[key] || [RKCandidatePrefs[key] boolValue];
 }
+// 从偏好字典刷新三个缓存开关。仅在 RKCandidateReload()（Darwin 通知 / 键盘弹出 / 前台激活）
+// 里调用，不在任何绘制路径上。
+static void RKCandidateRefreshSwitches(void) {
+    RKCandidateGradientEnabled = RKCandidateFlag(@"CandidateGradient");
+    RKCandidateNativeEnabled   = RKCandidateFlag(@"CandidateNative");
+    RKCandidateWeTypeEnabled   = RKCandidateFlag(@"CandidateWeType");
+}
 static BOOL RKCandidateIsWeType(UIView *view) {
     if (RKKeyboardBundleIsWeType()) return YES;
-    Class label = NSClassFromString(@"WBTextItemLabel");
+    // 只在解析成功时缓存：WBTextItemLabel 所属框架可能在 %ctor 之后才被 dyld 载入，
+    // 若用 dispatch_once 把 nil 固化，微信输入法的检测会永久失效。
+    static Class labelClass;
+    if (!labelClass) labelClass = NSClassFromString(@"WBTextItemLabel");
+    if (!labelClass) return NO;
     for (UIView *parent = view; parent; parent = parent.superview)
-        if (label && [parent isKindOfClass:label]) return YES;
+        if ([parent isKindOfClass:labelClass]) return YES;
     return NO;
 }
 static UIColor *RKCandidateColor(id value, UIColor *fallback) {
@@ -142,12 +168,13 @@ static void RKCandidateReload(void) {
     NSDictionary *preferences = RKCandidateReadPreferences();
     if ([RKCandidatePrefs isEqual:preferences]) return;
     RKCandidatePrefs = preferences;
+    RKCandidateRefreshSwitches();
     if (RKCandidateCachedGradient) {
         CGGradientRelease(RKCandidateCachedGradient);
         RKCandidateCachedGradient = NULL;
     }
     RKCandidatePhaseStart = CACurrentMediaTime();
-    if (!RKCandidateFlag(@"CandidateGradient")) RKCandidateStopAnimation();
+    if (!RKCandidateGradientEnabled) RKCandidateStopAnimation();
     for (UIView *view in RKCandidateViews.allObjects) {
         // Drop our rendered pixels, not the original text, so disabled gradients
         // do not remain in a reused label's backing layer.
@@ -202,15 +229,16 @@ static void RKDrawGradientText(CGRect rect, CGRect textRect, void (^original)(vo
 static void RKDrawCandidate(UILabel *label, CGRect rect, BOOL native, void (^original)(void)) {
     if (RKCandidateDrawingDepth) { original(); return; }
     if (RKCandidateIsWeType(label)) native = NO;
-    BOOL region = native ? RKNativeCandidateRegion(label) : RKCandidateRegion(label);
-    if (!region || RKCandidateDrawingDepth) { original(); return; }
-    [RKCandidateViews addObject:label];
-    if (!RKCandidateFlag(@"CandidateGradient") ||
-        !RKCandidateFlag(native ? @"CandidateNative" : @"CandidateWeType")) {
+    // 子开关判定提到区域判定之前：该宿主对应的开关关闭时，不再做 superview 链遍历、
+    // 不再把 view 插进重绘表。depth 包装保留，语义同原实现（防 %orig 重入）。
+    if (!(native ? RKCandidateNativeEnabled : RKCandidateWeTypeEnabled)) {
         RKCandidateDrawingDepth++;
         @try { original(); } @finally { RKCandidateDrawingDepth--; }
         return;
     }
+    BOOL region = native ? RKNativeCandidateRegion(label) : RKCandidateRegion(label);
+    if (!region || RKCandidateDrawingDepth) { original(); return; }
+    [RKCandidateViews addObject:label];
     RKCandidateStartAnimationIfNeeded();
     if (native) RKNativeLabelDraws++;
     objc_setAssociatedObject(label, &RKCandidateRenderedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -218,21 +246,22 @@ static void RKDrawCandidate(UILabel *label, CGRect rect, BOOL native, void (^ori
     RKDrawGradientText(rect, textRect, original);
 }
 static BOOL RKNativeTextDrawingEnabled(void) {
-    return RKNativeDrawingScope && !RKCandidateDrawingDepth &&
-        RKCandidateFlag(@"CandidateGradient") &&
-        RKCandidateFlag(RKCandidateIsWeType(nil) ? @"CandidateWeType" : @"CandidateNative");
+    // 调用方已过 RKCandidateActive() 总闸（会话 + 总开关 + 至少一个子开关成立）。
+    // 这里只需按宿主选具体子开关 —— 读缓存 BOOL，省掉字典查与 NSClassFromString(nil) 探测。
+    if (!RKNativeDrawingScope || RKCandidateDrawingDepth) return NO;
+    return RKKeyboardBundleIsWeType() ? RKCandidateWeTypeEnabled : RKCandidateNativeEnabled;
 }
 
 // TUICandidateLabel draws CoreText directly. Capture just its drawRect glyphs, not
 // its background, and use their ink bounds so short words get both endpoint colors.
 static void RKDrawNativeGlyphView(UIView *view, CGRect dirtyRect, void (^original)(void)) {
-    if (RKAdaptiveLevel() >= 2) { original(); return; }
-    [RKCandidateViews addObject:view];
+    if (RKAdaptiveLevel() >= 2 || !RKCandidateActive()) { original(); return; }
     CGRect bounds = view.bounds;
-    if (!RKCandidateFlag(@"CandidateGradient") ||
-        !RKCandidateFlag(RKCandidateIsWeType(view) ? @"CandidateWeType" : @"CandidateNative") ||
+    if (!(RKCandidateIsWeType(view) ? RKCandidateWeTypeEnabled : RKCandidateNativeEnabled) ||
         RKCandidateDrawingDepth || !UIGraphicsGetCurrentContext() || CGRectIsEmpty(bounds) ||
         bounds.size.width > 2048 || bounds.size.height > 512) { original(); return; }
+    // 登记推迟到确实要绘制之后：关闭开关时不再往重绘表里塞无关 view。
+    [RKCandidateViews addObject:view];
     RKCandidateStartAnimationIfNeeded();
     UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat defaultFormat];
     format.opaque = NO;
@@ -292,7 +321,7 @@ static void RKDrawNativeGlyphView(UIView *view, CGRect dirtyRect, void (^origina
 - (BOOL)_usesMorphingLabelForCandidate:(id)candidate {
     // UIKit's normal-label path preserves layout and selection, unlike tinting
     // individual cached morphing images (which would restart the gradient per glyph).
-    if (RKCandidateFlag(@"CandidateGradient") && RKCandidateFlag(@"CandidateNative")) return NO;
+    if (RKCandidateGradientEnabled && RKCandidateNativeEnabled) return NO;
     return 
         %orig;
 
@@ -347,7 +376,7 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
 
 %hook UILabel
 - (void)drawTextInRect:(CGRect)rect {
-    if (!RKKeyboardSessionActive()) {
+    if (!RKCandidateActive()) {
         %orig;
         return;
     }
@@ -360,7 +389,9 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
 // Scope custom string drawing to native candidate views. Never tint their backgrounds.
 %hook UIView
 - (void)drawLayer:(CALayer *)layer inContext:(CGContextRef)context {
-    if (!RKKeyboardSessionActive()) {
+    // 总闸在前：关闭渐变时本钩子只付一次内存读，不做 superview 链遍历、
+    // 不插重绘表、不开 RKNativeDrawingScope（后者会连带唤醒下方 6 个文本钩子）。
+    if (!RKCandidateActive()) {
         %orig(layer, context);
         return;
     }
@@ -369,7 +400,7 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
         %orig;
  return; }
     [RKCandidateViews addObject:self];
-    if (RKCandidateFlag(@"CandidateGradient")) RKCandidateStartAnimationIfNeeded();
+    RKCandidateStartAnimationIfNeeded();
     NSUInteger before = RKCandidateRenderCount;
     RKNativeDrawingScope++;
     @try { 
@@ -384,7 +415,7 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
 
 %hook NSString
 - (void)drawInRect:(CGRect)rect withAttributes:(NSDictionary *)attributes {
-    if (!RKKeyboardSessionActive() || !RKNativeTextDrawingEnabled()) { 
+    if (!RKCandidateActive() || !RKNativeTextDrawingEnabled()) { 
         %orig;
  return; }
     CGSize size = [(NSString *)self boundingRectWithSize:rect.size options:NSStringDrawingUsesLineFragmentOrigin
@@ -394,7 +425,7 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
  });
 }
 - (void)drawAtPoint:(CGPoint)point withAttributes:(NSDictionary *)attributes {
-    if (!RKKeyboardSessionActive() || !RKNativeTextDrawingEnabled()) { 
+    if (!RKCandidateActive() || !RKNativeTextDrawingEnabled()) { 
         %orig;
  return; }
     CGRect rect = {point, [(NSString *)self sizeWithAttributes:attributes]};
@@ -403,7 +434,7 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
  });
 }
 - (void)drawWithRect:(CGRect)rect options:(NSStringDrawingOptions)options attributes:(NSDictionary *)attributes context:(NSStringDrawingContext *)context {
-    if (!RKKeyboardSessionActive() || !RKNativeTextDrawingEnabled()) { 
+    if (!RKCandidateActive() || !RKNativeTextDrawingEnabled()) { 
         %orig;
  return; }
     CGSize size = [(NSString *)self boundingRectWithSize:rect.size options:options attributes:attributes context:context].size;
@@ -415,7 +446,7 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
 
 %hook NSAttributedString
 - (void)drawInRect:(CGRect)rect {
-    if (!RKKeyboardSessionActive() || !RKNativeTextDrawingEnabled()) { 
+    if (!RKCandidateActive() || !RKNativeTextDrawingEnabled()) { 
         %orig;
  return; }
     CGSize size = [(NSAttributedString *)self boundingRectWithSize:rect.size
@@ -425,7 +456,7 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
  });
 }
 - (void)drawAtPoint:(CGPoint)point {
-    if (!RKKeyboardSessionActive() || !RKNativeTextDrawingEnabled()) { 
+    if (!RKCandidateActive() || !RKNativeTextDrawingEnabled()) { 
         %orig;
  return; }
     CGRect rect = {point, [(NSAttributedString *)self size]};
@@ -434,7 +465,7 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
  });
 }
 - (void)drawWithRect:(CGRect)rect options:(NSStringDrawingOptions)options context:(NSStringDrawingContext *)context {
-    if (!RKKeyboardSessionActive() || !RKNativeTextDrawingEnabled()) { 
+    if (!RKCandidateActive() || !RKNativeTextDrawingEnabled()) { 
         %orig;
  return; }
     CGSize size = [(NSAttributedString *)self boundingRectWithSize:rect.size options:options context:context].size;
@@ -447,6 +478,12 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
 // WeType overrides UILabel drawing; keep its existing concrete hook.
 %hook WBTextItemLabel
 - (void)drawTextInRect:(CGRect)rect {
+    // 本类重写了 drawTextInRect:，UILabel 的钩子拦不到，必须单独装钩；
+    // 也正因如此，它此前是唯一没有会话/开关保护的绘制入口，此处补齐总闸。
+    if (!RKCandidateActive()) {
+        %orig;
+        return;
+    }
     RKDrawCandidate((UILabel *)self, rect, NO, ^{ 
         %orig;
  });
