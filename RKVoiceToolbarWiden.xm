@@ -94,12 +94,14 @@ static void RKVoiceApplyDescIfNeeded(WBToolBarButton *button) {
 #pragma mark - 图标 / 文字排布（两者靠拢成一组，整组在按钮里居中）
 
 // 2.3.8 用的是「图标贴左、文字贴右、富余全给中间」，实机看着是「左边一坨、右边一坨、
-// 中间一大块空」；2.3.9 改成成组居中：图标 + 间距 + 文字 当成一整组居中，左右留白相等。
-static CGFloat const RKVoiceGroupGap = 10.0;      // 图标与文字之间固定间距
+// 中间一大块空」；2.3.9 改成成组居中；2.3.10 修掉成组居中的左右 1pt 偏差（右边缘镜像）。
+static CGFloat const RKVoiceGroupGap = 10.0;      // 图标与文字之间的目标间距
 
 static void RKVoiceArrangeContentIfNeeded(WBToolBarButton *button) {
-    if (!RKVoiceWidenEnabled()) return;
+    // 先做零开销的按钮身份判断，再读偏好。偏好入口每次都要拿锁 + 两次 notify 查询，
+    // 工具栏一排按钮每次 layout 都读一遍纯属白费 —— 只有语音按钮才值得读。
     if (!RKVoiceIsVoiceButton(button)) return;
+    if (!RKVoiceWidenEnabled()) return;
     if (![button showDesc]) return;
 
     UIImageView *icon = button.imageView;     // UIButton 的图标视图（麦克风）
@@ -122,21 +124,25 @@ static void RKVoiceArrangeContentIfNeeded(WBToolBarButton *button) {
     if (iconSize.width <= 0 || iconSize.height <= 0) return;
     if (labelSize.width <= 0 || labelSize.height <= 0) return;
 
-    // 成组居中：content = 图标 + 间距 + 文字，整组在格内居中 ⇒ 左右留白必然相等。
-    // 只要格宽放得下就恒定用 RKVoiceGroupGap；极端窄时（换机型/超大字号）才压缩间距，
-    // 保证不溢出按钮，任何一种情况都不会出现负的左边距。
-    CGFloat gap = RKVoiceGroupGap;
-    CGFloat content = iconSize.width + gap + labelSize.width;
-    if (content > bounds.size.width) {
-        gap = MAX(0.0, bounds.size.width - iconSize.width - labelSize.width);
-        content = iconSize.width + gap + labelSize.width;
-    }
-    CGFloat left = round(MAX(0.0, (bounds.size.width - content) * 0.5));
+    // 成组居中：free = 格宽 - 图标宽 - 文字宽（图标与文字的间距也包含在 free 里）。
+    // 左留白取整（图标位图落在整点上，不会被拉糊）；右留白**由右边缘镜像左留白反推**：
+    //     labelX = 格宽 - 左留白 - 文字宽   ⇒  右留白 == 左留白（数值上完全相等）
+    // free 是奇数/小数时多出来的那 1pt 全部由中间间距吸收（间距 9~10pt，肉眼分不出），
+    // 不会再偏到任何一侧。
+    // —— 2.3.9 的错法：左留白取整后，右侧顺着 icon+gap 累加，于是「宽」和「文字宽」的
+    //    零头全砸在右留白上，左右最多差 ~1pt（3x 屏约 3px），观感就是
+    //    「左边留白略大、右边留白略小」。所以这里**故意不再对 labelX 取整**：
+    //    一取整又会把差值搬回来。文字用亚像素定位是 iOS 常态，不会有观感问题。
+    CGFloat free = bounds.size.width - iconSize.width - labelSize.width;
+    CGFloat left = free >= RKVoiceGroupGap ? round((free - RKVoiceGroupGap) * 0.5) : 0.0;
+    CGFloat labelX = bounds.size.width - left - labelSize.width;
+    if (labelX < left + iconSize.width)                 // 极端窄(换机型/超大字号)：绝不重叠
+        labelX = left + iconSize.width;
 
     icon.frame = CGRectMake(left,
         round((bounds.size.height - iconSize.height) * 0.5),
         iconSize.width, iconSize.height);
-    label.frame = CGRectMake(round(CGRectGetMaxX(icon.frame) + gap),
+    label.frame = CGRectMake(labelX,
         round((bounds.size.height - labelSize.height) * 0.5),
         labelSize.width, labelSize.height);
 }
@@ -156,14 +162,16 @@ static CGFloat RKVoiceUnitWidth = 0;
 
 - (CGSize)sizeThatFits:(CGSize)size {
     CGSize natural = %orig;
-    if (!RKVoiceWidenEnabled()) return natural;
 
+    // 顺序同上：先判身份(零开销)再读偏好。采样只写一个 static 浮点、零分配，
+    // 关掉开关时这个值也不会被任何分支用到，所以放在身份判断之后更省。
     if (!RKVoiceIsVoiceButton(self)) {
         // 顺手采样「一个方钮」的宽度。上限 80 是为了滤掉「最近使用」胶囊(91.33)
         // 这类非方钮，避免把基准采歪。
         if (natural.width >= 18 && natural.width <= 80) RKVoiceUnitWidth = natural.width;
         return natural;
     }
+    if (!RKVoiceWidenEnabled()) return natural;
 
     RKVoiceApplyDescIfNeeded(self);
     CGFloat unit = RKVoiceUnitWidth > 0 ? RKVoiceUnitWidth : 34;
