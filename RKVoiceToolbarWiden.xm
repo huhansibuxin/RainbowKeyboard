@@ -1,4 +1,4 @@
-// RKVoiceToolbarWiden.xm — 微信输入法(WeType) 工具栏「语音按钮」加宽并显示「点击说话」
+// RKVoiceToolbarWiden.xm — 微信输入法(WeType) 工具栏「语音按钮」加宽 + 「图标/文字」散开占满
 //
 // == 为什么只能 hook ==
 // wxkb_plugin 里 WBFunctionToolBar / WBToolBarButton 都没有任何宽度属性（全量 1830 类
@@ -14,7 +14,6 @@
 // 2) 工具栏尺寸不读 frame，只认各按钮的 sizeThatFits。-layoutForAnimated: 会按新宽度
 //    重排全部按钮，所以只加宽语音按钮这一处即可，其余按钮尺寸/位置全由微信自己算
 //    （2.3.4 曾改 frame 硬推兄弟按钮，因为容器没跟着变宽，把右侧 3 个按钮挤出了可视区）。
-// 3) 截图逐像素量：方钮 102px、间距 138px、胶囊 310px，1pt = 3px ⇒ 胶囊 ≈ 3.04 个方钮宽。
 //
 // == 语音按钮的识别（精确，无模糊猜测）==
 // func == 1。依据：实机日志里工具栏顺序 (28,1,23,8,7,5) 与截图
@@ -23,12 +22,20 @@
 // 也正是 func=1。若微信日后改枚举，同步改 RKVoiceFunc 即可。
 // （2.3.4 曾用「取最左按钮」兜底，误伤了 func=37 的文件传输邀请按钮，已废弃。）
 //
-// == 「图标 + 文字」用原生能力 ==
-// WBToolBarButton 自带描述文字：_showDesc(B) / _desc(NSString) / _descLabel(WBLabel)，
-// 配套有 imageSizeWithDescLabel、imageHorInsetWithDescLabel、imageRightInsetWithDescLabel、
-// descLabelHeight 等专用布局方法（imageRightInset = 图标右侧给文字留位 ⇒ 图标在左、
-// 文字在右，正是目标形态）。所以只需 setShowDesc: + setDesc:，排布交给它自己的
-// -layoutSubviews；字体/颜色一律不碰，只把「图标与文字」的间距放开（原生默认偏紧）。
+// == 「图标重叠文字」的原生根因（反汇编 WBToolBarButton -layoutSubviews 得到）==
+// 微信显示描述文字时的排布是这么算的（desc 分支，0x1001ced54 起）：
+//      imgW   = [self imageSizeWithDescLabel]      // = imageView.image.size
+//      inset  = [self imageHorInsetWithDescLabel]  // 常量 12
+//      right  = [self imageRightInsetWithDescLabel]// 常量 4
+//      labelS = [descLabel sizeThatFits:(DBL_MAX, 3)]
+//      descLabel.frame = (12 + imgW + 4, 居中, width-(2*12+imgW+4), labelS.height)
+//      [self setContentEdgeInsets:(4, -4, 4, labelS.width)]
+// 即：文字固定在 x≈40，而图标并没有放在 12 处 —— 它由 UIButton 按 contentEdgeInsets
+// 在剩余空间里**居中**。按钮一宽（我们加宽到 4.5 格 = 153pt），居中位置 ~42pt，正好压到
+// x=40 的文字上 —— 这就是截图里「麦克风压住"点"字」的成因；而 right=4 使得间距只有 4pt，
+// 看着挤成一片。这套算法本来就是给窄按钮写的，加宽后它算不对。
+// => 结论：加宽后必须由我们接管 imageView 与 descLabel 两个 frame，不再依赖原生 desc 排布。
+//    只改 frame（在 %orig 之后），字体/颜色/间距参数一律不碰。
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -36,12 +43,14 @@
 #import <math.h>
 #import "RKPreferences.h"
 
-@interface WBToolBarButton : UIView
+// 实测该类真身是 UIButton 子类（WBToolBarButton -> WBButton -> UIButton）：
+// layoutSubviews 里调用了 imageForState: / imageView / setContentEdgeInsets:。
+@interface WBToolBarButton : UIButton
 - (unsigned long long)func;
 - (void)setShowDesc:(BOOL)showDesc;
+- (BOOL)showDesc;
 - (void)setDesc:(NSString *)desc;
-- (id)descLabel;
-- (void)setSpacingBetweenImageAndTitle:(CGFloat)spacing;   // 继承自 WBButton(_spacingBetweenImageAndTitle, double)
+- (UILabel *)descLabel;
 @end
 
 #pragma mark - 开关
@@ -64,12 +73,9 @@ static BOOL RKVoiceIsVoiceButton(UIView *button) {
     return [(WBToolBarButton *)button func] == RKVoiceFunc;
 }
 
-#pragma mark - 描述文字（图标在左，文字跟在右侧）
+#pragma mark - 描述文字
 
 static NSString * const RKVoiceDescText = @"点击说话";
-// 图标与文字之间的间距。原生默认偏紧（看着「挤在一起」），这里放开到 8pt。
-// 类型依据：WBButton 的 ivar `_spacingBetweenImageAndTitle` 编码为 `d`(double)。
-static CGFloat const RKVoiceDescSpacing = 8.0;
 static char RKVoiceDescAppliedKey;
 
 static void RKVoiceApplyDescIfNeeded(WBToolBarButton *button) {
@@ -79,26 +85,67 @@ static void RKVoiceApplyDescIfNeeded(WBToolBarButton *button) {
 
     [button setShowDesc:YES];
     [button setDesc:RKVoiceDescText];
-    [button setSpacingBetweenImageAndTitle:RKVoiceDescSpacing];
     // setShowDesc: 若没顺手建出 label，这里补一次（方法不存在就跳过）。
     if (![button descLabel] && [button respondsToSelector:@selector(initDescLabelIfNeeded)])
         ((void (*)(id, SEL))objc_msgSend)(button, @selector(initDescLabelIfNeeded));
     [button setNeedsLayout];
 }
 
+#pragma mark - 图标 / 文字排布（图标贴左、文字贴右，中间留白把整格占满）
+
+static CGFloat const RKVoiceSidePadding = 16.0;   // 图标距左、文字距右的留白
+static CGFloat const RKVoiceMinGap = 10.0;        // 图标与文字之间的最小间距
+
+static void RKVoiceArrangeContentIfNeeded(WBToolBarButton *button) {
+    if (!RKVoiceWidenEnabled()) return;
+    if (!RKVoiceIsVoiceButton(button)) return;
+    if (![button showDesc]) return;
+
+    UIImageView *icon = button.imageView;     // UIButton 的图标视图（麦克风）
+    UILabel *label = [button descLabel];      // 「点击说话」
+    if (!icon || !label) return;
+
+    CGRect bounds = button.bounds;
+    if (bounds.size.width <= 0 || bounds.size.height <= 0) return;
+
+    // 图标尺寸优先取 imageView 的图（原生 imageSizeWithDescLabel 也是这么取的），
+    // 退一步取按钮自身的 normal 图；都拿不到就保持原样（fail-safe，不乱摆）。
+    UIImage *iconImage = icon.image ?: [button imageForState:UIControlStateNormal];
+    CGSize iconSize = iconImage.size;
+    if (iconSize.width <= 0 || iconSize.height <= 0) iconSize = icon.frame.size;
+
+    CGSize labelSize = label.intrinsicContentSize;
+    if (labelSize.width <= 0 || labelSize.height <= 0)
+        labelSize = [label sizeThatFits:CGSizeMake(CGFLOAT_MAX, CGFLOAT_MAX)];
+
+    if (iconSize.width <= 0 || iconSize.height <= 0) return;
+    if (labelSize.width <= 0 || labelSize.height <= 0) return;
+
+    // 富余宽度 = 整格 - 图标 - 文字，全部给「两侧留白 + 中间间距」，两端顶格 ⇒ 占满。
+    CGFloat slack = bounds.size.width - iconSize.width - labelSize.width;
+    CGFloat pad = RKVoiceSidePadding;
+    if (slack < pad * 2 + RKVoiceMinGap) pad = MAX(0.0, (slack - RKVoiceMinGap) * 0.5);
+    CGFloat gap = MAX(RKVoiceMinGap, slack - pad * 2);
+
+    icon.frame = CGRectMake(round(pad),
+        round((bounds.size.height - iconSize.height) * 0.5),
+        iconSize.width, iconSize.height);
+    label.frame = CGRectMake(round(CGRectGetMaxX(icon.frame) + gap),
+        round((bounds.size.height - labelSize.height) * 0.5),
+        labelSize.width, labelSize.height);
+}
+
 #pragma mark - 目标宽度
 
 // 方钮是正方形 ⇒「一格」= 它的高（也是它的自然宽），实测 34pt。
-// 目标 = 4.5 格（153pt）。取值过程：3 格 = 与「最近使用」胶囊等长；3.5 格仍偏短；
-// 4.5 格 ≈ 胶囊再宽一个半方钮。另：按钮比内容宽得多，内容居中后左右自然留白，
-// 配合 RKVoiceDescSpacing 一起让「图标+文字」看着不挤。
+// 目标 = 4.5 格（153pt）：3 格 = 与「最近使用」胶囊等长，3.5 格仍偏短，4.5 格合适。
 // 「一格」从同排方钮实测采样，换机型/字号自动跟随；采不到时用实测的 34pt 兜底。
 static CGFloat const RKVoiceTargetUnits = 4.5;
 static CGFloat RKVoiceUnitWidth = 0;
 
 #pragma mark - Hook
 
-%group RKVoiceButtonGroup
+%group RKVoiceGroup
 %hook WBToolBarButton
 
 - (CGSize)sizeThatFits:(CGSize)size {
@@ -117,12 +164,19 @@ static CGFloat RKVoiceUnitWidth = 0;
     return CGSizeMake(round(RKVoiceTargetUnits * unit), natural.height);
 }
 
+// 微信原生的 desc 排布在加宽后会把图标与文字摆重叠（见文件头），所以在它算完之后
+// 接管这两个 frame —— 这是唯一被我们改动的原生布局点。
+- (void)layoutSubviews {
+    %orig;
+    RKVoiceArrangeContentIfNeeded(self);
+}
+
 %end
 %end
 
 %ctor {
     // 只在微信输入法扩展里生效；注入到系统键盘(InputUI)时该类不存在，直接跳过。
     if (objc_getClass("WBToolBarButton")) {
-        %init(RKVoiceButtonGroup);
+        %init(RKVoiceGroup);
     }
 }

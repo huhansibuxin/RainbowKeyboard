@@ -1,8 +1,18 @@
 Package: com.minis.rainbowkeyboard
 Name: 彩虹键盘光效
-Version: 2.3.7
+Version: 2.3.8
 Architecture: iphoneos-arm64
 Description: 霓虹键床光效，支持原生键盘和微信输入法
+ 2.3.8 语音按钮：图标与「点击说话」散开、两端顶格占满整格：
+ 2.3.7 长度(4.5 格)已合适，但实机出现「麦克风压住首字、文字紧贴图标」。反汇编
+ WBToolBarButton -layoutSubviews 的 desc 分支找到原生根因：文字固定在
+ x = 12+图标宽+4（常量 imageHorInsetWithDescLabel=12、imageRightInsetWithDescLabel=4），
+ 而图标是由 UIButton 按 contentEdgeInsets(4,-4,4,文字宽) 在剩余空间里居中摆放的——
+ 按钮一宽，图标居中位置(~42pt)正好压在 x≈40 的文字上；4pt 的间距也让两者挤成一片。
+ 本版在 layoutSubviews 之后接管这两个 frame（唯二被动过的原生布局点）：
+ 图标贴左、文字贴右、两侧留白 16pt，富余宽度全给中间间距（两端顶格 ⇒ 占满整格）；
+ 字体/颜色/字号/间距参数一律不碰。同时删掉 2.3.7 里已无用的
+ setSpacingBetweenImageAndTitle: 调用。识别判据仍是单一 func==1。
  2.3.7 语音按钮：加宽到 4.5 格并放开图标/文字间距：
  2.3.6 已确认「加宽 + 显示点击说话」生效，但用户反馈 3.5 格仍略短，且图标与文字
  挨得太紧。本版仅调两处：
