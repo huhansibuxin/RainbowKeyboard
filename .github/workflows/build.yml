@@ -50,7 +50,9 @@ jobs:
       - name: Verify artifact
         run: |
           set -euxo pipefail
+          python3 check_control.py control
           test -s build/RainbowKeyboard-rootless.deb
+          python3 check_control.py --deb build/RainbowKeyboard-rootless.deb
           echo "Package info:"
           dpkg-deb --info build/RainbowKeyboard-rootless.deb
           echo "Installed layout:"
@@ -103,7 +105,9 @@ jobs:
       - name: Verify artifact
         run: |
           set -euxo pipefail
+          python3 check_control.py control
           test -s build/RainbowKeyboard-roothide.deb
+          python3 check_control.py --deb build/RainbowKeyboard-roothide.deb
           echo "Package info:"
           dpkg-deb --info build/RainbowKeyboard-roothide.deb
           echo "Installed layout:"
