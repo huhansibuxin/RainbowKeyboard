@@ -27,6 +27,7 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 
 @interface RKBRootListController : PSListController <UIColorPickerViewControllerDelegate>
 @property(nonatomic, copy) NSString *editingColorKey;
+- (void)rkRebuildFollowAppearanceSpecifier;
 @end
 
 @interface RKBCandidateListController : RKBRootListController
@@ -37,8 +38,44 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 - (NSMutableArray *)specifiers {
     if (!_specifiers) {
         _specifiers = [self loadSpecifiersFromPlistName:@"RainbowKeyboard" target:self];
+        [self rkRebuildFollowAppearanceSpecifier];
     }
     return _specifiers;
+}
+
+// reloadSpecifiers 会把列表重新载入成 plist 原样，重建必须跟着再来一次。
+- (void)reloadSpecifiers {
+    [super reloadSpecifiers];
+    [self rkRebuildFollowAppearanceSpecifier];
+}
+
+// 「跟随系统深浅色」在 plist 里定义（面板顺序与文案由 gen_prefs.py 统一管理），
+// 但这里要把它换成代码构造的 specifier：plist 载入的项走 Preferences 默认写盘路径，
+// 不经过本类的 setPreferenceValue:specifier:，「开启时顺手打开轻弹」的联动就做不了。
+// 幂等判据用自定义属性 rkRebuilt（plist 载入的项没有它），重复调用不会反复替换。
+// 标题文案与 gen_prefs.py 中同名开关保持一致，由 check_settings_items.py 断言。
+- (void)rkRebuildFollowAppearanceSpecifier {
+    NSMutableArray *items = _specifiers;
+    if (!items) return;
+    for (NSUInteger i = 0; i < items.count; i++) {
+        PSSpecifier *item = items[i];
+        if (![[item propertyForKey:@"key"] isEqualToString:@"LightPopFollowAppearance"]) continue;
+        if ([item propertyForKey:@"rkRebuilt"]) return;
+        PSSpecifier *rebuilt = [PSSpecifier preferenceSpecifierNamed:@"跟随系统深浅色"
+                                                              target:self
+                                                                 set:@selector(setPreferenceValue:specifier:)
+                                                                 get:@selector(readPreferenceValue:)
+                                                              detail:nil
+                                                                cell:PSSwitchCell
+                                                                edit:nil];
+        [rebuilt setProperty:@"LightPopFollowAppearance" forKey:@"key"];
+        [rebuilt setProperty:@NO forKey:@"default"];
+        [rebuilt setProperty:@"com.minis.rainbowkeyboard" forKey:@"defaults"];
+        [rebuilt setProperty:kRKChangedNotification forKey:@"PostNotification"];
+        [rebuilt setProperty:@YES forKey:@"rkRebuilt"];
+        items[i] = rebuilt;
+        return;
+    }
 }
 
 - (void)viewDidLoad {
@@ -65,6 +102,12 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
         values[@"Preset"] = @(-1);
     } else if ([key isEqualToString:@"Enabled"] || [key isEqualToString:@"CandidateGradient"]) {
         values[key] = @([value boolValue]);
+    } else if ([key isEqualToString:@"LightPopFollowAppearance"]) {
+        values[key] = @([value boolValue]);
+        // 开启跟随的那一刻，如果轻弹还是关的，一并帮你打开（否则深色切回浅色时
+        // 你会以为开了跟随却什么都没有）。只写这一次 —— 之后你手动关掉轻弹，
+        // 浅色模式不会再自动打开它：渲染层只按「存储值 + 系统外观」合成，不反向写盘。
+        if ([value boolValue] && ![values[@"LightPop"] boolValue]) values[@"LightPop"] = @YES;
     } else {
         values[key] = value;
     }

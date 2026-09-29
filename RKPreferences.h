@@ -52,6 +52,10 @@ static inline NSDictionary *RKPresetSelfUseTable(void) {
             @"LightPop": @(0),
             // 轻弹配色是否跟随键底光效（默认跟随，两种效果同色；关掉则用轻弹自己的取色）。
             @"LightPopMatchColor": @(1),
+            // 跟随系统深浅色（2.3.27 新增，默认关）：开启后浅色模式用轻弹、深色模式自动关掉
+            // 轻弹只留键底光效。深色下的关闭是渲染时合成的，不改动 LightPop 的存储值，
+            // 因此切回浅色会自动恢复用户原来的轻弹设置。
+            @"LightPopFollowAppearance": @(0),
             @"PressColorMode": @(0),
             // 键帽上色亮度：2.3.24 由 0.9013840556144714（1.6.0 时代留下的默认）降到 0.6，
             // 原值在键帽上过亮。历史值由 RKNormalizeLegacyPreferences 一并折算。

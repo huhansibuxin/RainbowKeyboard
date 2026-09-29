@@ -13,6 +13,7 @@
     RippleEnabled = 1;
     LightPop = 0;
     LightPopMatchColor = 1;
+    LightPopFollowAppearance = 0;
     PressBrightness = 0.6;
     Duration = 0.45;
     Spread = 2.25;

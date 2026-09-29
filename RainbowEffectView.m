@@ -237,6 +237,29 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
 - (CGFloat)neonSaturation:(CGFloat)base {
     return base * [self number:@"NeonSaturation" fallback:.72 low:0 high:1];
 }
+// 有效轻弹 = 轻弹开关 合成「跟随系统深浅色」。
+// 读序按开销从低到高：存储的轻弹开关为关就直接返回（跟随关闭时零额外开销，
+// 与 2.3.26 的判据逐位等价）；开了才继续看跟随开关，跟随时才读 traitCollection。
+- (BOOL)effectiveLightPop {
+    if (![self.config[@"LightPop"] boolValue]) return NO;
+    if (![self.config[@"LightPopFollowAppearance"] boolValue]) return YES;
+    // 深色模式自动关掉键帽上色，只留键底光效；浅色模式按用户的轻弹设置走。
+    // 只改本拍的渲染判据，不写偏好 —— 系统外观切回来即自动恢复。
+    return self.traitCollection.userInterfaceStyle != UIUserInterfaceStyleDark;
+}
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    [super traitCollectionDidChange:previousTraitCollection];
+    if (previousTraitCollection.userInterfaceStyle == self.traitCollection.userInterfaceStyle) return;
+    // 系统深浅色切换（键盘窗口还开着时立刻生效，不用等下一次按键）：
+    // 深色下必须主动撤掉已渲染的键帽上色层 —— 长动画层走完不会自己离开 sublayers，
+    // 只能靠显式清理或驱逐。风格戳同步对齐到新组合，免得下一拍再整体清一遍
+    // 正在扩散的键底光效。
+    NSInteger style = (NSInteger)[self number:@"EffectStyle" fallback:0 low:0 high:3];
+    if (style == 2) style = 1;
+    BOOL lightPop = [self effectiveLightPop];
+    self.lastStyle = style * 2 + (lightPop ? 1 : 0);
+    if (!lightPop) [self clearLegacyKeycapFeedback];
+}
 - (void)layoutSubviews {
     [super layoutSubviews];
     // Old animations must not float over a new keyboard after rotation/resizing.
@@ -881,9 +904,11 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
     // 叠加），旧档遗留的 2 在常态归一化里已折成 1，这里再兜一道底。
     NSInteger style = (NSInteger)[self number:@"EffectStyle" fallback:0 low:0 high:3];
     if (style == 2) style = 1;
-    BOOL lightPop = [self.config[@"LightPop"] boolValue];
+    // 2.3.27：轻弹可跟随系统深浅色（深色自动关），判据统一走 effectiveLightPop。
+    BOOL lightPop = [self effectiveLightPop];
     // 关掉轻弹时清掉上一拍留下的键帽图层；风格或轻弹任一变化则整体重来，
-    // 避免两套效果跨配置互相叠加残留。
+    // 避免两套效果跨配置互相叠加残留。深色压制也走这条 —— 切到深色后下一拍
+    // 就把残留的键帽上色层撤掉。
     if (!lightPop) [self clearLegacyKeycapFeedback];
     NSInteger stamp = style * 2 + (lightPop ? 1 : 0);
     if (stamp != self.lastStyle) {

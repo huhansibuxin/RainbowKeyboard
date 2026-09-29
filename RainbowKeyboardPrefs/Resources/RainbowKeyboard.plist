@@ -54,7 +54,7 @@
 			<key>label</key>
 			<string>按键光效</string>
 			<key>footerText</key>
-			<string>轻弹让按下的那个键帽上色并轻弹一下：可单独开关，与上面的光效风格并行生效；配色默认跟随光效。</string>
+			<string>轻弹让按下的那个键帽上色并轻弹一下：可单独开关，与上面的光效风格并行生效；配色默认跟随光效。「跟随系统深浅色」开启后：浅色模式自动打开轻弹，深色模式自动关掉轻弹、只保留键底光效；深色下的关闭不改动上面的轻弹开关，切回浅色自动恢复。开启时会顺手把轻弹打开；之后你手动关掉轻弹，浅色模式也不再自动打开。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -111,6 +111,20 @@
 			<string>轻弹与光效同色</string>
 			<key>default</key>
 			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>key</key>
+			<string>LightPopFollowAppearance</string>
+			<key>label</key>
+			<string>跟随系统深浅色</string>
+			<key>default</key>
+			<false/>
 			<key>defaults</key>
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>
