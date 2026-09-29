@@ -106,7 +106,7 @@ static CGFloat RKVoiceUnitWidth = 0;
 
     RKVoiceApplyDescIfNeeded(self);
     CGFloat unit = RKVoiceUnitWidth > 0 ? RKVoiceUnitWidth : 34;
-    return CGSizeMake(ROUND(RKVoiceTargetUnits * unit), natural.height);
+    return CGSizeMake(round(RKVoiceTargetUnits * unit), natural.height);
 }
 
 %end
