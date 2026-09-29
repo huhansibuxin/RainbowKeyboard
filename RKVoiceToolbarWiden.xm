@@ -30,7 +30,7 @@
 // == 语音按钮的识别 ==
 // 主：func == 1（实测工具栏顺序 (28,1,23,8,7,5) 与用户截图的
 //     「最近使用胶囊 -> 麦克风 -> …」逐一对应，且 focusedFunc=1）。
-// 备：按钮图标 == icon_bar_voice_24（指针 / imageAsset / PNG 字节比对），
+// 备：按钮图标 == icon_bar_voice_24（指针相等 / PNG 字节比对），
 //     命中后把 func 学进静态变量，之后只比 func，零额外开销。
 // 兜底：都不中则原样返回（fail-safe：宁可不生效，也不乱动别的按钮）。
 
@@ -117,7 +117,7 @@ static void RKVoiceLearn(UIView *button, NSString *rule) {
     RKVoiceLog(@"识别到语音按钮: %@ func=%llu", rule, RKVoiceLearnedFunc);
 }
 
-// 图标比对：优先指针，再 imageAsset 名，最后 PNG 字节。命中一次即缓存 func。
+// 图标比对：先指针相等，再 PNG 字节比对。命中一次即缓存 func。
 static BOOL RKButtonIconIsVoice(UIView *button) {
     UIImage *reference = [UIImage imageNamed:@"icon_bar_voice_24"];
     if (!reference) return NO;
@@ -140,9 +140,8 @@ static BOOL RKButtonIconIsVoice(UIView *button) {
     if (!image) return NO;
     if (image == reference) return YES;
 
-    NSString *name = image.imageAsset.assetName;
-    if ([name isKindOfClass:NSString.class] && [name containsString:@"voice"]) return YES;
-
+    // 注意：UIImageAsset.assetName 未在 iOS 16.5 公开头里声明，编译不过，故不用。
+    // 扩展包内图标是扁平 PNG（非 asset catalog），直接比 PNG 字节即可。
     if (CGSizeEqualToSize(image.size, reference.size)) {
         NSData *a = UIImagePNGRepresentation(image);
         NSData *b = UIImagePNGRepresentation(reference);
