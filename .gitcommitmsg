@@ -1,0 +1,10 @@
+RainbowKeyboard 2.3.18: 移除冗余资源 SliderHelp.plist
+
+SliderHelp.plist 是彻底死资源：
+- 设置页（RainbowKeyboard.plist / RainbowKeyboardAdvanced.plist / RainbowKeyboardCandidate.plist）
+  由 PreferenceLoader 直接渲染，滑条说明走 specifier 的 footerText，从不经过它；
+- RKBRootListController.m 只读 defaults.plist（全文件唯一的 pathForResource 调用）；
+- 全仓库唯一引用是 Publishing/validate-release.py 里「deb 应含这些文件」的断言。
+
+处理：删除文件 + 同步移除发布校验清单里的对应断言。
+无功能变化，bundle 体积略减。

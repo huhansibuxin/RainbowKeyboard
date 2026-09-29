@@ -46,7 +46,7 @@ for entry in entries:
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         files = tar.getnames()
         for name in ["icon.png", "icon@2x.png", "icon@3x.png", "PackageIcon.png",
-                     "PackageInfo.json", "SliderHelp.plist", "preview-neon.png", "preview-colors.png"]:
+                     "PackageInfo.json", "preview-neon.png", "preview-colors.png"]:
             assert any(f"/RainbowKeyboardPrefs.bundle/{name}" in item for item in files), name
         assert sum(item.endswith("/Preferences/com.minis.rainbowkeyboard.prefs.plist") for item in files) == 1
         info_paths = [item for item in files if item.endswith("/RainbowKeyboardPrefs.bundle/Info.plist")]
