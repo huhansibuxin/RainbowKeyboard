@@ -14,3 +14,6 @@ wetype_kbd.plist
 wetype_toolbar.plist
 verify_deb.py
 
+# 本地写 commit message 用的临时文件（易被 git add -A 误带，务必忽略）
+.gitcommitmsg
+
