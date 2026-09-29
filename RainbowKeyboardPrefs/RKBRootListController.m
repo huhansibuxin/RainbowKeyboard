@@ -6,7 +6,9 @@
 static NSString * const kRKChangedNotification = @"com.minis.rainbowkeyboard.changed";
 
 static NSDictionary *RKReadPreferences(void) {
-    return RKReadStoredPreferences() ?: @{};
+    // 与键盘渲染层同一套旧档归一化（RKPreferences.h）：旧档的「风格 = 轻弹(2)」在这里
+    // 就已折成「扩散(1) + 轻弹开」，历史亮度默认值折成 0.6，设置页因此不会显示过期值。
+    return RKNormalizeLegacyPreferences(RKReadStoredPreferences() ?: @{});
 }
 
 static void RKSaveAndNotify(NSMutableDictionary *values) {
@@ -110,10 +112,11 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 // 读写，键盘进程里没有任何消费方 —— 真正生效的只有「启用候选词渐变」这个开关
 // （CandidateGradient）与两个颜色（CandidateStart / CandidateEnd）。
 - (void)chooseEffectStyle {
+    // 轻弹自 2.3.24 起是独立开关（可与风格叠加），不再占用风格选项里的一个位置。
     [self chooseSimpleOptionForKey:@"EffectStyle"
                              title:@"光效风格"
-                           options:@[@"波纹", @"扩散", @"轻弹", @"流光底韵"]
-                            values:@[@0, @1, @2, @3]];
+                           options:@[@"波纹", @"扩散", @"流光底韵"]
+                            values:@[@0, @1, @3]];
 }
 
 - (void)chooseColorMode {
@@ -132,9 +135,10 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
         NSInteger value = [RKReadPreferences()[key] integerValue];
         cell.detailTextLabel.text = (value >= 0 && value < (NSInteger)titles.count) ? titles[value] : @"自定义";
     } else if ([key isEqualToString:@"EffectStyle"]) {
-        NSArray *titles = @[@"波纹", @"扩散", @"轻弹", @"流光底韵"];
+        // 0 波纹 / 1 扩散 / 3 流光底韵。2 是旧档的「轻弹」（2.3.24 起拆成独立开关），
+        // 归一化后不会出现，这里兜底按扩散显示。
         NSInteger value = [RKReadPreferences()[key] integerValue];
-        cell.detailTextLabel.text = (value >= 0 && value < (NSInteger)titles.count) ? titles[value] : @"波纹";
+        cell.detailTextLabel.text = value == 0 ? @"波纹" : (value == 3 ? @"流光底韵" : @"扩散");
     } else if ([key isEqualToString:@"ColorMode"]) {
         NSArray *titles = @[@"彩虹", @"固定颜色", @"横向渐变"];
         NSInteger value = [RKReadPreferences()[key] integerValue];

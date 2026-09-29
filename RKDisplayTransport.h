@@ -25,7 +25,7 @@ static inline NSArray<NSString *> *RKDisplayColors(void) {
 static inline NSArray<NSString *> *RKDisplayKeys(void) {
     return [[[[RKDisplayNumbers() arrayByAddingObjectsFromArray:RKDisplayFlags()]
         arrayByAddingObjectsFromArray:RKDisplayColors()]
-        arrayByAddingObjectsFromArray:@[@"PressColorMode", @"PressBrightness", @"PressColor", @"Theme", @"SmartPerformance", @"KeyboardLock"]]
+        arrayByAddingObjectsFromArray:@[@"PressColorMode", @"PressBrightness", @"PressColor", @"Theme", @"SmartPerformance", @"KeyboardLock", @"LightPop"]]
         arrayByAddingObject:@"WidenVoiceButton"];
 }
 static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[RKDisplayWordCount]) {
@@ -113,6 +113,20 @@ static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[R
         words[1] |= UINT64_C(1) << 54;
         if ([widenVoice boolValue]) words[1] |= UINT64_C(1) << 55;
     }
+    // 轻弹（键帽上色）独立开关：words[5] 整字空闲，用最低几位承载。
+    // 不并入 RKDisplayFlags() —— 那个数组的顺序即位序，追加第 11 项会落到已占用的
+    // 31/41 位；words[1] 的 56..63 也已被版本魔数 0xD1 占满。
+    //   位 0/1 = LightPop（存在 / 值），位 2/3 = LightPopMatchColor（与光效同色）。
+    id lightPop = prefs[@"LightPop"];
+    if ([lightPop isKindOfClass:NSNumber.class]) {
+        words[5] |= UINT64_C(1) << 0;
+        if ([lightPop boolValue]) words[5] |= UINT64_C(1) << 1;
+    }
+    id lightPopMatch = prefs[@"LightPopMatchColor"];
+    if ([lightPopMatch isKindOfClass:NSNumber.class]) {
+        words[5] |= UINT64_C(1) << 2;
+        if ([lightPopMatch boolValue]) words[5] |= UINT64_C(1) << 3;
+    }
 }
 static inline uint64_t RKDisplayChecksum(const uint64_t words[RKDisplayWordCount]) {
     uint64_t hash = UINT64_C(14695981039346656037);
@@ -165,6 +179,9 @@ static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDispl
         result[@"PressColor"] = @[@((words[2] >> 48) / 65535.0),
             @((words[3] >> 48) / 65535.0), @((words[4] >> 48) / 65535.0)];
     if (words[1] & (UINT64_C(1) << 54)) result[@"WidenVoiceButton"] = @((words[1] >> 55) & 1);
+    // 轻弹开关与「与光效同色」开关：words[5] 低位，与编码端一一对应。
+    if (words[5] & UINT64_C(1)) result[@"LightPop"] = @((words[5] >> 1) & 1);
+    if (words[5] & (UINT64_C(1) << 2)) result[@"LightPopMatchColor"] = @((words[5] >> 3) & 1);
     return result;
 }
 static inline int RKDisplayToken(NSUInteger index) {

@@ -53,6 +53,8 @@
 			<string>PSGroupCell</string>
 			<key>label</key>
 			<string>按键光效</string>
+			<key>footerText</key>
+			<string>轻弹让按下的那个键帽上色并轻弹一下：可单独开关，与上面的光效风格并行生效；配色默认跟随光效。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -81,6 +83,34 @@
 			<string>光效颜色</string>
 			<key>default</key>
 			<integer>0</integer>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>key</key>
+			<string>LightPop</string>
+			<key>label</key>
+			<string>轻弹（键帽上色）</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>key</key>
+			<string>LightPopMatchColor</string>
+			<key>label</key>
+			<string>轻弹与光效同色</string>
+			<key>default</key>
+			<true/>
 			<key>defaults</key>
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>

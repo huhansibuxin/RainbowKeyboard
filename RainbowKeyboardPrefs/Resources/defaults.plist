@@ -11,6 +11,9 @@
     Brightness = 1.0;
     Opacity = 0.7991349101066589;
     RippleEnabled = 1;
+    LightPop = 0;
+    LightPopMatchColor = 1;
+    PressBrightness = 0.6;
     Duration = 0.45;
     Spread = 2.25;
     Softness = 7;

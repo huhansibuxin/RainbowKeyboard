@@ -182,6 +182,35 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
+			<string>光效细节
+键帽灯光亮度</string>
+			<key>footerText</key>
+			<string>轻弹填在键帽上的颜色有多亮。调低更含蓄、更贴键帽底色，调高更抢眼。只影响轻弹的键帽上色，不改变键底光效与背景。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>key</key>
+			<string>PressBrightness</string>
+			<key>label</key>
+			<string>键帽灯光亮度</string>
+			<key>default</key>
+			<real>0.6</real>
+			<key>min</key>
+			<real>0.0</real>
+			<key>max</key>
+			<real>1.0</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
 			<string>背景效果
 背景强度</string>
 			<key>footerText</key>

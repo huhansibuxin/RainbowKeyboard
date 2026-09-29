@@ -27,6 +27,15 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 @end
 @implementation RKKeyWaveGeometry
 @end
+// 命中索引的一「行」：键位表按行的顶边分桶，行内按键的 x 升序排列。
+// 有了它，落点判定不必每次把整张键位表扫一遍 —— 先按 y 定位候选行（键盘只有
+// 三到五行），再在行内二分定位键，比较次数从「键数」降到「行数 + log 列数」。
+@interface RKKeyRow : NSObject
+@property(nonatomic) CGRect bounds;                 // 该行的联合包围盒
+@property(nonatomic,strong) NSArray<NSValue *> *keys; // 行内键，按 minX 升序
+@end
+@implementation RKKeyRow
+@end
 @interface RainbowEffectView ()
 @property(nonatomic,strong) NSDictionary *config;
 @property(nonatomic,strong) UIImage *underlightMaskImage;
@@ -38,9 +47,12 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 @property(nonatomic,strong) NSArray<UIBezierPath *> *cachedFacePaths;
 @property(nonatomic,strong) NSArray<NSValue *> *cachedCenters;
 @property(nonatomic,strong) NSArray<RKKeyWaveGeometry *> *cachedWaveGeometries;
+// 命中索引（随 keyFrames 一起重建，见 setKeyFrames:）：行分桶 + 整表包围盒。
+@property(nonatomic,strong) NSArray<RKKeyRow *> *keyHitRows;
+@property(nonatomic) CGRect keyBedBounds;
 @end
 
-// 落点 → 按压键解析（仅服务于扩散/波纹，即 showBedEffectAtPoint）。
+// 落点 → 按压键解析（扩散/波纹、原生扩散、轻弹三处共用同一套判据）。
 // 原生键盘的 displayFrame 就是命中单元，落点基本总落在某个键内；
 // WeType 收集到的是键帽视觉 frame（圆角 + 间距），按进键缝时落点处于几何空洞，
 // 而微信自身按更大的命中单元仍会上屏字符 —— 于是出现「出了字却没有光效」。
@@ -48,37 +60,83 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 // 约束一：落点须落在键区包围盒外扩 8pt 内，挡住候选栏 / 工具条误触发。
 // 约束二：吸附距离须 ≤ clamp(最近键高 × 0.6, 8, 26)pt，键缝实际仅 2~6pt，余量充足。
 // 返回 CGRectNull 表示此落点不算有效按键，调用方保持原样放弃。
-static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint point) {
-    CGRect pressed = CGRectNull;
-    CGFloat pressedArea = CGFLOAT_MAX;
-    for (NSValue *value in keyFrames) {
+//
+// 2.3.24：判定改走「行索引 + 行内二分」。此前每按一次键都要把整张键位表
+// （全键盘约五十个键）扫一到两遍；现在先按 y 落到候选行（键盘只有三到五行），
+// 再在行内二分定位键 —— 候选集与全表遍历等价、结果逐位相同，但不再遍历全表。
+// 索引随键位表在 setKeyFrames: 重建，按键路径只读不建。
+
+// 键位表 → 行索引：按行的顶边分桶（容差取行高的半数），行按 y 升序、行内按 x 升序。
+static NSArray<RKKeyRow *> *RKBuildKeyHitRows(NSArray<NSValue *> *keyFrames) {
+    if (!keyFrames.count) return @[];
+    NSArray<NSValue *> *sorted = [keyFrames sortedArrayUsingComparator:^NSComparisonResult(NSValue *a, NSValue *b) {
+        CGRect ra = a.CGRectValue, rb = b.CGRectValue;
+        if (ra.origin.y != rb.origin.y) return ra.origin.y < rb.origin.y ? NSOrderedAscending : NSOrderedDescending;
+        if (ra.origin.x != rb.origin.x) return ra.origin.x < rb.origin.x ? NSOrderedAscending : NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+    NSMutableArray<RKKeyRow *> *rows = [NSMutableArray array];
+    for (NSValue *value in sorted) {
         CGRect rect = value.CGRectValue;
-        CGFloat area = rect.size.width * rect.size.height;
-        if (area < pressedArea && CGRectContainsPoint(rect, point)) {
-            pressedArea = area;
-            pressed = rect;
+        RKKeyRow *row = rows.lastObject;
+        if (row) {
+            CGFloat tolerance = MAX(2.0, row.bounds.size.height * .5);
+            if (fabs(rect.origin.y - CGRectGetMinY(row.bounds)) > tolerance) row = nil;
         }
+        if (!row) {
+            row = [RKKeyRow new];
+            row.bounds = rect;
+            row.keys = [NSMutableArray array];
+            [rows addObject:row];
+        }
+        row.bounds = CGRectUnion(row.bounds, rect);
+        // 输入已按 y 再 x 排序，同一行内追加即天然有序（构建期临时用可变数组）。
+        [(NSMutableArray *)row.keys addObject:value];
     }
-    if (!CGRectIsNull(pressed)) return pressed;
-    CGRect bed = CGRectNull;
-    for (NSValue *value in keyFrames) bed = CGRectUnion(bed, value.CGRectValue);
-    if (CGRectIsNull(bed) || !CGRectContainsPoint(CGRectInset(bed, -8, -8), point)) return CGRectNull;
-    CGRect nearest = CGRectNull;
-    CGFloat nearestDistance = CGFLOAT_MAX;
-    for (NSValue *value in keyFrames) {
-        CGRect rect = value.CGRectValue;
-        CGFloat dx = 0, dy = 0;
-        if (point.x < CGRectGetMinX(rect)) dx = CGRectGetMinX(rect) - point.x;
-        else if (point.x > CGRectGetMaxX(rect)) dx = point.x - CGRectGetMaxX(rect);
-        if (point.y < CGRectGetMinY(rect)) dy = CGRectGetMinY(rect) - point.y;
-        else if (point.y > CGRectGetMaxY(rect)) dy = point.y - CGRectGetMaxY(rect);
-        CGFloat distance = hypot(dx, dy);
-        if (distance < nearestDistance) { nearestDistance = distance; nearest = rect; }
+    return rows;
+}
+
+// 行内按 x 定位「盖住落点」的键。键互不重叠，命中即返回；NSNotFound = 本行没有。
+static NSInteger RKKeyRowIndexCoveringX(RKKeyRow *row, CGFloat x) {
+    NSArray<NSValue *> *keys = row.keys;
+    NSUInteger lo = 0, hi = keys.count;
+    while (lo < hi) {
+        NSUInteger mid = lo + (hi - lo) / 2;
+        CGRect rect = keys[mid].CGRectValue;
+        if (x < CGRectGetMinX(rect)) hi = mid;
+        // 半开区间，与 CGRectContainsPoint 的右边界语义保持一致。
+        else if (x >= CGRectGetMaxX(rect)) lo = mid + 1;
+        else return (NSInteger)mid;
     }
-    if (CGRectIsNull(nearest)) return CGRectNull;
-    CGFloat maxSnap = MIN(26.0, MAX(8.0, nearest.size.height * .6));
-    if (nearestDistance > maxSnap) return CGRectNull;
-    return nearest;
+    return NSNotFound;
+}
+
+// 行内按 x 找水平距离最近的键：二分出落点两侧相邻的两个键，取距离小者。
+static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
+    NSArray<NSValue *> *keys = row.keys;
+    if (!keys.count) return NSNotFound;
+    NSUInteger lo = 0, hi = keys.count;
+    while (lo < hi) {
+        NSUInteger mid = lo + (hi - lo) / 2;
+        if (x < CGRectGetMinX(keys[mid].CGRectValue)) hi = mid;
+        else lo = mid + 1;
+    }
+    NSInteger candidates[2] = {
+        lo > 0 ? (NSInteger)(lo - 1) : NSNotFound,
+        lo < keys.count ? (NSInteger)lo : NSNotFound,
+    };
+    NSInteger best = NSNotFound;
+    CGFloat bestDistance = CGFLOAT_MAX;
+    for (NSUInteger i = 0; i < 2; i++) {
+        NSInteger index = candidates[i];
+        if (index == NSNotFound) continue;
+        CGRect rect = keys[index].CGRectValue;
+        CGFloat dx = 0;
+        if (x < CGRectGetMinX(rect)) dx = CGRectGetMinX(rect) - x;
+        else if (x > CGRectGetMaxX(rect)) dx = x - CGRectGetMaxX(rect);
+        if (dx < bestDistance) { bestDistance = dx; best = index; }
+    }
+    return best;
 }
 
 @implementation RainbowEffectView
@@ -176,6 +234,11 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
     self.cachedFacePaths = faces;
     self.cachedCenters = centers;
     self.cachedWaveGeometries = geometries;
+    // 命中索引与键位表同生命周期：布局一变就重建，按键路径只读不建。
+    self.keyHitRows = RKBuildKeyHitRows(_keyFrames);
+    CGRect bed = CGRectNull;
+    for (NSValue *value in _keyFrames) bed = CGRectUnion(bed, value.CGRectValue);
+    self.keyBedBounds = bed;
     for (CALayer *pulse in self.layer.sublayers.copy) [pulse removeFromSuperlayer];
 }
 // 注：原 addAmbientGlowToPulse:（背景光晕/背景扩散）于 2.3.17 删除 ——
@@ -215,8 +278,8 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
 // Keep this inside the existing pulse so both regions share its fade/limits.
 - (CALayer *)nativeGutterMask {
     if (!self.keyFrames.count) return nil;
-    CGRect bed = CGRectNull;
-    for (NSValue *value in self.keyFrames) bed = CGRectUnion(bed,value.CGRectValue);
+    // 键区包围盒随键位表缓存（见 setKeyFrames:），此处不再逐键求并集。
+    CGRect bed = self.keyBedBounds;
     CGRect area = CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds);
     if (CGRectIsNull(area) || CGRectIsEmpty(area)) return nil;
     UIBezierPath *path = [UIBezierPath bezierPathWithRect:area];
@@ -328,8 +391,8 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
         CGContextRef context = UIGraphicsGetCurrentContext();
         if (!context) { UIGraphicsEndImageContext(); return nil; }
         CGContextTranslateCTM(context,-self.bounds.origin.x,-self.bounds.origin.y);
-        CGRect bed = CGRectNull;
-        for (NSValue *value in self.keyFrames) bed = CGRectUnion(bed,value.CGRectValue);
+        // 键区包围盒随键位表缓存（见 setKeyFrames:），此处不再逐键求并集。
+        CGRect bed = self.keyBedBounds;
         [[UIColor whiteColor] setFill];
         UIRectFill(CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds));
         CGContextSetBlendMode(context,kCGBlendModeClear);
@@ -358,12 +421,55 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
     mask.contents = (__bridge id)self.underlightMaskImage.CGImage;
     return mask;
 }
+// 落点 → 生效按键。候选集与「全表遍历」等价：先按 y 取覆盖落点的行（精准命中），
+// 落进键缝时再取 y 距离不超过吸附上限的行（最近键吸附），都不遍历整张键位表。
+- (CGRect)resolvePressedKeyFrameAtPoint:(CGPoint)point {
+    NSArray<RKKeyRow *> *rows = self.keyHitRows;
+    if (!rows.count) return CGRectNull;
+    // 一、落点盖在键帽内：取面积最小的那个键（与旧实现同为「面积优先」）。
+    CGRect pressed = CGRectNull;
+    CGFloat pressedArea = CGFLOAT_MAX;
+    for (RKKeyRow *row in rows) {
+        if (point.y < CGRectGetMinY(row.bounds) || point.y > CGRectGetMaxY(row.bounds)) continue;
+        NSInteger index = RKKeyRowIndexCoveringX(row, point.x);
+        if (index == NSNotFound) continue;
+        CGRect rect = row.keys[index].CGRectValue;
+        CGFloat area = rect.size.width * rect.size.height;
+        if (area < pressedArea) { pressedArea = area; pressed = rect; }
+    }
+    if (!CGRectIsNull(pressed)) return pressed;
+    // 二、落点在键缝里：仍须落在键区包围盒外扩 8pt 内，否则视为候选栏/工具条的误触发。
+    if (CGRectIsNull(self.keyBedBounds) ||
+        !CGRectContainsPoint(CGRectInset(self.keyBedBounds, -8, -8), point)) return CGRectNull;
+    CGRect nearest = CGRectNull;
+    CGFloat nearestDistance = CGFLOAT_MAX;
+    for (RKKeyRow *row in rows) {
+        CGFloat dy = 0;
+        if (point.y < CGRectGetMinY(row.bounds)) dy = CGRectGetMinY(row.bounds) - point.y;
+        else if (point.y > CGRectGetMaxY(row.bounds)) dy = point.y - CGRectGetMaxY(row.bounds);
+        // 吸附上限最松也只有 26pt：y 距离已经超出的行不可能产生更近的键，跳过整行。
+        if (dy > 26.0) continue;
+        NSInteger index = RKKeyRowNearestIndexAtX(row, point.x);
+        if (index == NSNotFound) continue;
+        CGRect rect = row.keys[index].CGRectValue;
+        CGFloat dx = 0;
+        if (point.x < CGRectGetMinX(rect)) dx = CGRectGetMinX(rect) - point.x;
+        else if (point.x > CGRectGetMaxX(rect)) dx = point.x - CGRectGetMaxX(rect);
+        CGFloat distance = hypot(dx, dy);
+        if (distance < nearestDistance) { nearestDistance = distance; nearest = rect; }
+    }
+    if (CGRectIsNull(nearest)) return CGRectNull;
+    CGFloat maxSnap = MIN(26.0, MAX(8.0, nearest.size.height * .6));
+    if (nearestDistance > maxSnap) return CGRectNull;
+    return nearest;
+}
 // Both effects live in the exposed keyboard bed. Neither outlines keycaps.
-- (void)showBedEffectAtPoint:(CGPoint)point style:(NSInteger)style {
+// hue 由调用方统一推进（一拍一次），键底光效与轻弹因此共用同一色相。
+- (void)showBedEffectAtPoint:(CGPoint)point style:(NSInteger)style hue:(CGFloat)hue {
     // 键缝落点吸附：原「落点必须落在键帽矩形内」的判据会让 WeType 全键盘的
-    // 宽键缝整段丢光效（微信仍会上屏字符）。改用 RKResolvePressedKeyFrame
-    // 还原命中判定；包含落点的场景逐位等同原逻辑，观感零变化。
-    CGRect pressed = RKResolvePressedKeyFrame(self.keyFrames, point);
+    // 宽键缝整段丢光效（微信仍会上屏字符）。改用命中索引还原命中判定；
+    // 包含落点的场景逐位等同原逻辑，观感零变化。
+    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point];
     if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
     CALayer *mask = [self waveUnderCapMask];
     if (!mask) return;
@@ -374,10 +480,6 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
     BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
     NSUInteger limit = style == 0 ? 3 : (fast ? 1 : 2);
     while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
-    NSInteger mode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
-    self.hue = fmod(self.hue+.137,1);
-    CGFloat hue = mode == 1 ? [self number:@"Hue" fallback:.55 low:0 high:1] :
-        (mode == 2 ? point.x/MAX(1,self.bounds.size.width) : self.hue);
     UIColor *color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:brightness alpha:1];
     CGFloat reach = MIN(210,MAX(100,[self number:@"BackgroundRadius" fallback:180 low:60 high:360]));
     CGFloat duration = MIN(.75,MAX(.42,[self number:@"Duration" fallback:.55 low:.15 high:1.2]));
@@ -472,14 +574,9 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
 }
 
 // Native-only variant of WeType's spread. Keep showBedEffectAtPoint unchanged.
-- (void)showNativeWeTypeSpreadAtPoint:(CGPoint)point {
+- (void)showNativeWeTypeSpreadAtPoint:(CGPoint)point hue:(CGFloat)hue {
     if (![self usesNativeKeycapGlow]) return;
-    CGRect pressed = CGRectNull;
-    for (NSValue *value in self.keyFrames) {
-        CGRect rect = value.CGRectValue;
-        if (CGRectContainsPoint(rect, point) && (CGRectIsNull(pressed) ||
-            rect.size.width*rect.size.height < pressed.size.width*pressed.size.height)) pressed = rect;
-    }
+    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point];
     if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
     // Native hit cells may tile the whole keyboard. Cut out inset faces,
     // not full hit cells, to preserve the seams on both 9/26-key layouts.
@@ -492,10 +589,6 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
     BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
     NSUInteger limit = fast ? 1 : 2;
     while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
-    NSInteger mode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
-    self.hue = fmod(self.hue+.137,1);
-    CGFloat hue = mode == 1 ? [self number:@"Hue" fallback:.55 low:0 high:1] :
-        (mode == 2 ? point.x/MAX(1,self.bounds.size.width) : self.hue);
     UIColor *color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:brightness alpha:1];
     CGFloat reach = MIN(210,MAX(100,[self number:@"BackgroundRadius" fallback:180 low:60 high:360]));
     CGFloat duration = MIN(.75,MAX(.42,[self number:@"Duration" fallback:.55 low:.15 high:1.2]));
@@ -562,6 +655,43 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
     // Shared lifetime and eviction: no timers, snapshots or per-neighbor waves.
 }
 
+// 轻弹：给「实际按下的那个键」的键帽面上色，并让它轻轻弹一下。
+// 2.3.24 起它是独立开关（LightPop），与光效风格叠加共存 —— 不再占用 EffectStyle 的
+// 一个选项，因此也不再有「开了扩散就不能开轻弹」的限制。
+// 命中复用索引化的精准解析：按在键帽缝隙里的那一下，同样会落到真正生效的那个键上。
+// 配色默认与键底光效同色（LightPopMatchColor），可切回轻弹自己的取色。
+- (void)showKeycapFeedbackAtPoint:(CGPoint)point sourceView:(UIView *)sourceView hue:(CGFloat)hue {
+    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point];
+    if (CGRectIsNull(pressed)) return;
+    CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
+    CGFloat duration = [self number:@"Duration" fallback:.55 low:.15 high:1.2];
+    NSUInteger limit = (NSUInteger)[self number:@"MaxEffects" fallback:4 low:1 high:8];
+    while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
+    // 轻弹自己的色相照常推进：关掉「与光效同色」后接着用，行为与旧版一致。
+    self.pressHue = fmod(self.pressHue + .38196601125, 1);
+    BOOL single = [self number:@"PressColorMode" fallback:0 low:0 high:1] == 1;
+    // 默认同色（键缺失即同色）：直接用本拍键底光效的色相，两种效果对上色；
+    // 亮度仍由「键帽灯光亮度」单独决定，所以键帽会比键底暗一档。
+    BOOL matchGlow = !self.config[@"LightPopMatchColor"] ||
+        [self.config[@"LightPopMatchColor"] boolValue];
+    UIColor *color = matchGlow ?
+        [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:1 alpha:1] :
+        (single ? RKKeyboardColor(self.config, @"PressColor") :
+            [UIColor colorWithHue:self.pressHue saturation:1 brightness:1 alpha:1]);
+    // 2.3.24：键帽上色的默认亮度由 1.0 降到 0.6（原值在键帽上过亮），
+    // 具体数值可在高级设置「键帽灯光亮度」里调整。
+    CGFloat pressBrightness = [self number:@"PressBrightness" fallback:.6 low:0 high:1];
+    NSInteger theme = [self.config[@"Theme"] integerValue];
+    if (theme >= 1 && theme <= 9) {
+        // Preset themes take priority; Custom retains independent press colors.
+        color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1]
+                           brightness:1 alpha:1];
+        pressBrightness = brightness;
+    }
+    RKShowNeonKeyPress(self, pressed, color, pressBrightness, duration,
+        UIAccessibilityIsReduceMotionEnabled() || [self flag:@"SmartPerformance"], sourceView);
+}
+
 - (void)showRippleAtPoint:(CGPoint)point {
     [self showRippleAtPoint:point sourceView:nil];
 }
@@ -575,13 +705,8 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
         }
     }
 }
-- (void)showCrispUnderlightAtPoint:(CGPoint)point {
-    CGRect pressed = CGRectNull;
-    for (NSValue *value in self.keyFrames) {
-        CGRect r = value.CGRectValue;
-        if (CGRectContainsPoint(r, point) &&
-            (CGRectIsNull(pressed) || r.size.width*r.size.height < pressed.size.width*pressed.size.height)) pressed = r;
-    }
+- (void)showCrispUnderlightAtPoint:(CGPoint)point hue:(CGFloat)hue {
+    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point];
     if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
     CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
     CGFloat opacity = [self number:@"Opacity" fallback:.65 low:0 high:1];
@@ -598,8 +723,8 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
         CGContextRef context = UIGraphicsGetCurrentContext();
         if (!context) { UIGraphicsEndImageContext(); return; }
         CGContextTranslateCTM(context,-self.bounds.origin.x,-self.bounds.origin.y);
-        CGRect bed = CGRectNull;
-        for (NSValue *value in self.keyFrames) bed = CGRectUnion(bed,value.CGRectValue);
+        // 键区包围盒随键位表缓存（见 setKeyFrames:），此处不再逐键求并集。
+        CGRect bed = self.keyBedBounds;
         [[UIColor whiteColor] setFill];
         UIRectFill(CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds));
         CGContextSetBlendMode(context,kCGBlendModeClear);
@@ -626,10 +751,6 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
     BOOL reduce = UIAccessibilityIsReduceMotionEnabled();
     NSUInteger limit = fast ? 1 : 2;
     while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
-    NSInteger mode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
-    self.hue = fmod(self.hue + .137,1);
-    CGFloat hue = mode == 1 ? [self number:@"Hue" fallback:.55 low:0 high:1] :
-        (mode == 2 ? point.x/MAX(1,self.bounds.size.width) : self.hue);
     UIColor *color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:brightness alpha:1];
     CALayer *pulse = [CALayer layer];
     pulse.name = @"RKExpandingUnderlight";
@@ -697,54 +818,32 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
         return;
     }
     if (!self.window || self.hidden) return;
+    // 光效风格：0 波纹 / 1 扩散 / 3 流光底韵。轻弹自 2.3.24 起是独立开关（可与任一风格
+    // 叠加），旧档遗留的 2 在常态归一化里已折成 1，这里再兜一道底。
     NSInteger style = (NSInteger)[self number:@"EffectStyle" fallback:0 low:0 high:3];
-    // Bed-only styles must not coexist with a captured keycap feedback layer.
-    if (style == 0 || style == 1 || style == 3) [self clearLegacyKeycapFeedback];
-    // Keep the user's original configured style; adaptive mode only reduces work.
-    if (style != self.lastStyle) {
+    if (style == 2) style = 1;
+    BOOL lightPop = [self.config[@"LightPop"] boolValue];
+    // 关掉轻弹时清掉上一拍留下的键帽图层；风格或轻弹任一变化则整体重来，
+    // 避免两套效果跨配置互相叠加残留。
+    if (!lightPop) [self clearLegacyKeycapFeedback];
+    NSInteger stamp = style * 2 + (lightPop ? 1 : 0);
+    if (stamp != self.lastStyle) {
         for (CALayer *layer in self.layer.sublayers.copy) [layer removeFromSuperlayer];
-        self.lastStyle = style;
+        self.lastStyle = stamp;
     }
-    if (style == 1 && !weType && [self usesNativeKeycapGlow]) {
-        [self showNativeWeTypeSpreadAtPoint:point];
-        return;
-    }
-    if (style == 3) {
-        [self showCrispUnderlightAtPoint:point];
-        return;
-    }
-    if (style == 0 || style == 1) {
-        [self showBedEffectAtPoint:point style:style];
-        return;
-    }
-    CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
-    CGFloat duration = [self number:@"Duration" fallback:.55 low:.15 high:1.2];
-    NSUInteger limit = (NSUInteger)[self number:@"MaxEffects" fallback:4 low:1 high:8];
-    while (self.layer.sublayers.count >= limit) [self.layer.sublayers.firstObject removeFromSuperlayer];
-    NSInteger mode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
+    // 一拍只推进一次色相，键底光效与轻弹共用它 —— 「与光效同色」能对上色的前提。
     self.hue = fmod(self.hue + .137, 1);
-    CGFloat hue = mode == 1 ? [self number:@"Hue" fallback:.55 low:0 high:1] : (mode == 2 ? point.x / MAX(1,self.bounds.size.width) : self.hue);
-    if (style == 2) {
-        for (NSValue *value in self.keyFrames) {
-            if (!CGRectContainsPoint(value.CGRectValue, point)) continue;
-            self.pressHue = fmod(self.pressHue + .38196601125, 1);
-            BOOL single = [self number:@"PressColorMode" fallback:0 low:0 high:1] == 1;
-            UIColor *color = single ? RKKeyboardColor(self.config, @"PressColor") :
-                [UIColor colorWithHue:self.pressHue saturation:1 brightness:1 alpha:1];
-            CGFloat pressBrightness = [self number:@"PressBrightness" fallback:1 low:0 high:1];
-            NSInteger theme = [self.config[@"Theme"] integerValue];
-            if (theme >= 1 && theme <= 9) {
-                // Preset themes take priority; Custom retains independent press colors.
-                color = [UIColor colorWithHue:hue saturation:[self neonSaturation:1]
-                                   brightness:1 alpha:1];
-                pressBrightness = brightness;
-            }
-            RKShowNeonKeyPress(self, value.CGRectValue, color,
-                pressBrightness,
-                duration, UIAccessibilityIsReduceMotionEnabled() || [self flag:@"SmartPerformance"], sourceView);
-            break;
-        }
-        return;
+    NSInteger colorMode = (NSInteger)[self number:@"ColorMode" fallback:0 low:0 high:2];
+    CGFloat hue = colorMode == 1 ? [self number:@"Hue" fallback:.55 low:0 high:1] :
+        (colorMode == 2 ? point.x / MAX(1, self.bounds.size.width) : self.hue);
+    // 键底光效（风格）：先铺底，再叠轻弹 —— 两者互不排斥。
+    if (style == 1 && !weType && [self usesNativeKeycapGlow]) {
+        [self showNativeWeTypeSpreadAtPoint:point hue:hue];
+    } else if (style == 3) {
+        [self showCrispUnderlightAtPoint:point hue:hue];
+    } else {
+        [self showBedEffectAtPoint:point style:style hue:hue];
     }
+    if (lightPop) [self showKeycapFeedbackAtPoint:point sourceView:sourceView hue:hue];
 }
 @end

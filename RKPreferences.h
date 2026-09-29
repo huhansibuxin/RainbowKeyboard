@@ -47,8 +47,15 @@ static inline NSDictionary *RKPresetSelfUseTable(void) {
             @"NativeKeyboard": @(0),
             @"WeChatKeyboard": @(1),
             @"RippleEnabled": @(1),
+            // 轻弹（键帽上色）自 2.3.24 起是独立开关，可与光效风格同时开；默认关，
+            // 与 1.6.0 的 LightPop 一致（键帽快照有额外开销，由用户显式开启）。
+            @"LightPop": @(0),
+            // 轻弹配色是否跟随键底光效（默认跟随，两种效果同色；关掉则用轻弹自己的取色）。
+            @"LightPopMatchColor": @(1),
             @"PressColorMode": @(0),
-            @"PressBrightness": @(0.9013840556144714),
+            // 键帽上色亮度：2.3.24 由 0.9013840556144714（1.6.0 时代留下的默认）降到 0.6，
+            // 原值在键帽上过亮。历史值由 RKNormalizeLegacyPreferences 一并折算。
+            @"PressBrightness": @(0.6),
             @"SmartPerformance": @(0),
             @"Theme": @(0),
             @"CandidateStart": @[@(0.6627452373504639), @(0.40784311294555664), @(0.0)],
@@ -72,6 +79,31 @@ static inline NSDictionary *RKApplySelfUseFallback(NSDictionary *values) {
     NSMutableDictionary *merged = [table mutableCopy];
     if (values.count) [merged addEntriesFromDictionary:values];
     return merged;
+}
+
+// 2.3.24 旧档归一化：读时迁移、幂等、不写盘（键盘扩展沙盒写不了偏好文件；
+// 设置页那边改动任意一项时，会把归一化后的字典自然落盘）。
+//   一、「光效风格 = 轻弹」已废弃：轻弹拆成独立开关 LightPop，可与扩散/波纹/流光叠加。
+//       旧档（EffectStyle == 2）迁移为「扩散(1) + 轻弹开」，升级前后观感一致。
+//   二、键帽上色亮度：历史固化默认 0.9013840556144714 视为「从未自定义」，
+//       折到新的 0.6；用户手动调过的其它值原样保留。
+static inline NSDictionary *RKNormalizeLegacyPreferences(NSDictionary *values) {
+    if (!values.count) return values ?: @{};
+    id style = values[@"EffectStyle"];
+    id pop = values[@"LightPop"];
+    id press = values[@"PressBrightness"];
+    BOOL legacyPop = [style isKindOfClass:NSNumber.class] && [style integerValue] == 2;
+    BOOL legacyPress = [press isKindOfClass:NSNumber.class] &&
+        fabs([press doubleValue] - 0.9013840556144714) < 1e-9;
+    if (!legacyPop && !legacyPress) return values;
+    NSMutableDictionary *migrated = [values mutableCopy];
+    if (legacyPop) {
+        migrated[@"EffectStyle"] = @(1);
+        // 只在键缺失时补开：用户若已在新版本里显式关掉轻弹，尊重其选择。
+        if (!pop) migrated[@"LightPop"] = @(1);
+    }
+    if (legacyPress) migrated[@"PressBrightness"] = @(0.6);
+    return migrated;
 }
 
 static inline void RKRequestPreferencesRelay(void) {
@@ -190,7 +222,8 @@ static inline NSDictionary *RKReadEffectivePreferences(void) {
     // Commit checks keep same-process saves immediate, even before Darwin callbacks.
     // Missing transport is retried at a bounded rate, never once per keystroke.
     if (!cached || changed || commit != lastCommit || (!complete && now - lastRead > 2)) {
-        cached = RKApplySelfUseFallback(RKReadUncachedEffectivePreferences());
+        // 固化表补齐之后再过一遍旧档归一化：EffectStyle==2 与历史亮度默认值都在这里折算。
+        cached = RKNormalizeLegacyPreferences(RKApplySelfUseFallback(RKReadUncachedEffectivePreferences()));
         lastRead = now;
         lastCommit = commit;
     }
