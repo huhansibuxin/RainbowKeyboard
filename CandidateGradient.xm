@@ -20,7 +20,6 @@ static NSUInteger RKTUIGlyphDraws;
 static NSUInteger RKNativeLabelDraws;
 static os_unfair_lock RKHookLock = OS_UNFAIR_LOCK_INIT;
 static BOOL RKHookInstallQueued;
-static void RKWriteNativeDiagnostic(void);
 
 #pragma mark - Candidate gradient animation
 
@@ -124,7 +123,7 @@ static BOOL RKCandidateFlag(NSString *key) {
     return !RKCandidatePrefs[key] || [RKCandidatePrefs[key] boolValue];
 }
 static BOOL RKCandidateIsWeType(UIView *view) {
-    if ([NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"]) return YES;
+    if (RKKeyboardBundleIsWeType()) return YES;
     Class label = NSClassFromString(@"WBTextItemLabel");
     for (UIView *parent = view; parent; parent = parent.superview)
         if (label && [parent isKindOfClass:label]) return YES;
@@ -275,11 +274,6 @@ static void RKDrawNativeGlyphView(UIView *view, CGRect dirtyRect, void (^origina
                             (maxX - minX + 1) / glyphs.scale, bounds.size.height);
     RKTUIGlyphDraws++;
     objc_setAssociatedObject(view, &RKCandidateRenderedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (RKTUIGlyphDraws == 1) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            RKWriteNativeDiagnostic();
-        });
-    }
     RKDrawGradientText(CGRectIntersection(bounds, dirtyRect), ink, ^{ [glyphs drawInRect:bounds]; });
 }
 
@@ -346,31 +340,10 @@ static void RKCandidateImageLoaded(const struct mach_header *header, intptr_t sl
         RKInstallNativeCandidateHook();
     });
 }
-static void RKWriteNativeDiagnostic(void) {
-    RKInstallNativeCandidateHook();
-    NSMutableSet *classes = [NSMutableSet set];
-    for (UIView *view in RKCandidateViews) [classes addObject:NSStringFromClass(view.class)];
-    Class cls = NSClassFromString(@"TUICandidateLabel");
-    Method draw = cls ? class_getInstanceMethod(cls, @selector(drawRect:)) : NULL;
-    NSDictionary *report = @{@"version":@"samsung8",
-        @"systemVersion":UIDevice.currentDevice.systemVersion,
-        @"processBundle":NSBundle.mainBundle.bundleIdentifier ?: @"unknown",
-        @"nativeClassLoaded":@(cls != Nil), @"nativeGlyphHookInstalled":@(RKTUIHookInstalled),
-        @"nativePredictionHookInstalled":@(RKPredictionHookInstalled),
-        @"nativeLabelDrawCount":@(RKNativeLabelDraws),
-        @"nativeGlyphDrawCount":@(RKTUIGlyphDraws),
-        @"drawEncoding":draw ? @(method_getTypeEncoding(draw)) : @"missing",
-        @"observedViewClasses":classes.allObjects,
-        @"CandidateGradient":@(RKCandidateFlag(@"CandidateGradient")),
-        @"CandidateNative":@(RKCandidateFlag(@"CandidateNative")),
-        @"CandidateWeType":@(RKCandidateFlag(@"CandidateWeType")),
-        @"settingsRevision":@(RKPreferencesRevision(RKCandidatePrefs))};
-    NSString *file = [NSString stringWithFormat:@"RainbowKeyboard-native-probe-%@.plist",
-        NSBundle.mainBundle.bundleIdentifier ?: @"unknown"];
-    NSString *path = [@"/var/mobile/Library/Preferences" stringByAppendingPathComponent:file];
-    if (![report writeToFile:path atomically:YES])
-        [report writeToFile:[NSTemporaryDirectory() stringByAppendingPathComponent:file] atomically:YES];
-}
+// 原 RKWriteNativeDiagnostic：把「本进程看到哪些候选类 / 命中几次」写成 plist 落到
+// /var/mobile/Library/Preferences（写失败再落 tmp）。它挂在 UIKeyboardDidShow 上 ⇒
+// **每次键盘弹出后 1 秒都要写一次盘**，是纯粹的诊断残留（验证期产物）。
+// 2.3.17 整体移除：诊断早已验完，键盘弹出路径不该有任何文件 IO。
 
 %hook UILabel
 - (void)drawTextInRect:(CGRect)rect {
@@ -481,6 +454,11 @@ static void RKWriteNativeDiagnostic(void) {
 %end
 %ctor {
     @autoreleasepool {
+        // 进程守卫：本文件装的是 %hook UILabel / %hook NSString / %hook NSAttributedString /
+        // %hook UIView -drawLayer: 这类**全进程级**文本与图层绘制钩子 —— 一旦宿主是系统 UI
+        // 进程，锁屏上的文本绘制也会走进候选栏判定（表现为锁屏字体被染成渐变）。
+        // 在安装任何钩子之前先挡住：系统 UI 进程里一个钩子都不装，零副作用。
+        if (RKKeyboardProcessIsSystemUI()) return;
         RKCandidateViews = [NSHashTable weakObjectsHashTable];
         RKCandidateReload();
         %init;
@@ -493,9 +471,6 @@ static void RKWriteNativeDiagnostic(void) {
         candidateObserverTokens[0] = [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) { RKCandidateReload(); }];
         candidateObserverTokens[1] = [[NSNotificationCenter defaultCenter] addObserverForName:UIKeyboardDidShowNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
             RKCandidateReload();
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                RKWriteNativeDiagnostic();
-            });
         }];
     }
 }

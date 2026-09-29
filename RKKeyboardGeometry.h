@@ -32,3 +32,15 @@ FOUNDATION_EXPORT BOOL RKKeyboardLayoutChanged(UIView *host);
 // 供全局 UIKit 钩子做快速短路，键盘未显示时不承担装饰开销。
 FOUNDATION_EXPORT void RKKeyboardSessionSetActive(BOOL active);
 FOUNDATION_EXPORT BOOL RKKeyboardSessionActive(void);
+
+// 进程守卫（2.3.17）：本插件只服务「系统键盘(InputUI)」与「微信输入法(wxkb_plugin)」，
+// 正常由注入过滤（Filter/Executables）保证。但越狱环境里过滤器未必总被尊重
+//（本项目已出现过 Choicy 选择性注入在 ElleKit 下失效的先例），所以再兜一层**黑名单**：
+// 一旦被注入到 SpringBoard / backboardd 这类系统 UI 进程，所有钩子一律放行。
+// 采用「只黑名单、不白名单」是为避免判据过严反而把功能挡掉（误伤的代价更大）。
+// 结果 dispatch_once 缓存：进程身份在生命周期内不变。
+FOUNDATION_EXPORT BOOL RKKeyboardProcessIsSystemUI(void);
+
+// 「当前进程是不是微信输入法」：bundle 判断做一次性缓存（原来是每次调用都做
+// mainBundle 取值 + lowercaseString + containsString，位于按键/绘制热路径上）。
+FOUNDATION_EXPORT BOOL RKKeyboardBundleIsWeType(void);

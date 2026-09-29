@@ -37,13 +37,13 @@ static inline NSDictionary *RKPresetSelfUseTable(void) {
             @"CandidateGradient": @(0),
             @"CandidateNative": @(0),
             @"CandidateWeType": @(0),
+            // 纯黑键帽引擎（RKBlackKeyboardHost 已为空实现）已移除：此键无设置入口、
+            // 无渲染消费方，仅作为跨进程位协议字段保留，勿删（位序对齐）。
             @"PureBlackKeyboard": @(0),
             @"Enabled": @(1),
             @"NativeKeyboard": @(0),
             @"WeChatKeyboard": @(1),
             @"RippleEnabled": @(1),
-            @"AmbientGlow": @(1),
-            @"BackgroundFeedback": @(1),
             @"PressColorMode": @(0),
             @"PressBrightness": @(0.9013840556144714),
             @"SmartPerformance": @(0),
@@ -213,44 +213,11 @@ static inline BOOL RKPublishPreferences(NSDictionary *values) {
     return full && committed;
 }
 
-static inline NSDictionary *RKPreferencesDiagnostic(void) {
-    NSDictionary *stored = RKReadStoredPreferences(), *transport = RKReceiveDisplaySnapshot();
-    NSDictionary *effective = RKReadEffectivePreferences();
-    return @{@"transportVersion":@2, @"snapshotAvailable":@(transport != nil),
-        @"storedRevision":@(RKPreferencesRevision(stored)),
-        @"receivedRevision":@(RKPreferencesRevision(transport)),
-        @"effectiveRevision":@(RKPreferencesRevision(effective)),
-        @"keyboardBackground":RKKeyboardRGB(effective[@"KeyboardBackgroundColor"]),
-        @"keycap":RKKeyboardRGB(effective[@"KeycapColor"])};
-}
-
-static inline void RKRestorePreferencesRelay(void) {
-    NSDictionary *stored = RKReadStoredPreferences();
-    // Only a real saved configuration can repopulate the cross-process state.
-    if (!RKPreferencesRevision(stored)) return;
-    NSDictionary *current = RKReceiveDisplaySnapshot();
-    if (RKPreferencesRevision(current) > RKPreferencesRevision(stored)) return;
-    uint64_t words[RKDisplayWordCount], currentWords[RKDisplayWordCount];
-    RKEncodeDisplaySnapshot(stored, words);
-    RKEncodeDisplaySnapshot(current, currentWords);
-    if (current && RKDisplayChecksum(words) == RKDisplayChecksum(currentWords)) return;
-    RKPublishPreferences(stored);
-}
-static inline void RKInstallPreferencesRelayObservers(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        static int requestToken, changeToken;
-        notify_register_dispatch("com.minis.rainbowkeyboard.settings.request.v2", &requestToken,
-            dispatch_get_main_queue(), ^(int token) { RKRestorePreferencesRelay(); });
-        notify_register_dispatch("com.minis.rainbowkeyboard.changed", &changeToken,
-            dispatch_get_main_queue(), ^(int token) { RKRestorePreferencesRelay(); });
-        RKRestorePreferencesRelay();
-    });
-}
-static inline void RKStartPreferencesRelay(void) {
-    if ([NSBundle.mainBundle.bundleIdentifier isEqual:@"com.apple.springboard"])
-        RKInstallPreferencesRelayObservers();
-}
+// 2.3.17 删除一条**零调用链**与一个零调用诊断函数：
+//   RKStartPreferencesRelay → RKInstallPreferencesRelayObservers → RKRestorePreferencesRelay
+// 这组中继只对 SpringBoard 注册（`bundleIdentifier == com.apple.springboard`），而 2.3.0 起
+// 注入范围已收窄为 InputUI / wxkb_plugin（不含 SpringBoard），因此从未被执行过。
+// 一并删除零调用的 RKPreferencesDiagnostic（及其对 springboard 的字符串判断）。
 
 static inline BOOL RKSavePreferences(NSMutableDictionary *values) {
     uint64_t revision = MAX(RKPreferencesRevision(values) + 1,

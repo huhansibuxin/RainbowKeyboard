@@ -2,6 +2,7 @@
 #import "RainbowEffectView.h"
 #import "RKPreferences.h"
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <math.h>
 
 #pragma mark - 类名特征缓存（P0-1：每个 Class 只做一次字符串分析）
@@ -47,11 +48,39 @@ NSUInteger RKClassFeatures(Class cls) {
 
 // Always clear decoration session state on hide/background. Retaining this
 // flag cannot keep an extension alive or prevent a system termination.
-static BOOL RKKeyboardSessionActiveValue;
+static volatile BOOL RKKeyboardSessionActiveValue;
 void RKKeyboardSessionSetActive(BOOL active) {
     RKKeyboardSessionActiveValue = active;
 }
 BOOL RKKeyboardSessionActive(void) { return RKKeyboardSessionActiveValue; }
+
+// 进程守卫：见头文件说明。只黑名单「系统 UI 进程」，其余一律放行，
+// 避免判据过严反而把键盘进程里的功能挡掉（误伤的代价更大）。
+BOOL RKKeyboardProcessIsSystemUI(void) {
+    static BOOL systemUI;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *bundle = NSBundle.mainBundle.bundleIdentifier.lowercaseString ?: @"";
+        NSString *process = NSProcessInfo.processInfo.processName.lowercaseString ?: @"";
+        systemUI = [bundle isEqualToString:@"com.apple.springboard"]
+            || [bundle isEqualToString:@"com.apple.backboardd"]
+            || [process isEqualToString:@"springboard"]
+            || [process isEqualToString:@"backboardd"];
+    });
+    return systemUI;
+}
+
+// 「当前进程是不是微信输入法」：进程身份在生命周期内不变，缓存一次。
+// 老写法每处调用都要 mainBundle 取值 + lowercaseString + containsString（每次都新建字符串），
+// 而它挂在「每次按键」与「每次候选文字绘制」的路径上 —— 属于纯白烧的分配。
+BOOL RKKeyboardBundleIsWeType(void) {
+    static BOOL weType;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        weType = [NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"];
+    });
+    return weType;
+}
 
 // addObserverForName 返回的 observer token 必须被持有，否则 ARC 下立即释放、
 // 通知注册随之失效（iOS 经典坑）。此前的实现丢弃了 token，导致会话开关
@@ -133,7 +162,7 @@ UIBezierPath *RKKeyboardKeyFacePath(CGRect keyFrame) {
 
 #pragma mark - 私有 getter（P1-2：缓存 selector 可用性与签名）
 
-static NSMapTable *RKGetterSignatureCache(void) {
+static NSMapTable *RKGetterCache(void) {
     static NSMapTable *cache;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
@@ -143,52 +172,55 @@ static NSMapTable *RKGetterSignatureCache(void) {
     return cache;
 }
 
-// 对 (Class, selector) 一次性判定 ABI 兼容性并缓存签名，避免每次调用重复
-// respondsToSelector / methodSignatureForSelector 的运行时查找。
-static NSMethodSignature *RKGetterSignature(Class cls, NSString *name, const char *type) {
-    NSMutableDictionary *byName = [RKGetterSignatureCache() objectForKey:cls];
+// 对 (Class, selector) 一次性判定 ABI 兼容性并缓存**选择子**，避免每次调用都要走
+// respondsToSelector / methodSignatureForSelector；调用方拿到 SEL 后直接消息发送。
+static SEL RKGetterSelector(Class cls, NSString *name, const char *type) {
+    NSMutableDictionary *byName = [RKGetterCache() objectForKey:cls];
     if (!byName) {
         byName = [NSMutableDictionary dictionary];
-        [RKGetterSignatureCache() setObject:byName forKey:cls];
+        [RKGetterCache() setObject:byName forKey:cls];
     }
-    id signature = byName[name];
-    if (signature) return signature == NSNull.null ? nil : signature;
+    id cached = byName[name];
+    if (cached) return cached == NSNull.null ? NULL : (SEL)[(NSValue *)cached pointerValue];
     SEL selector = NSSelectorFromString(name);
-    NSMethodSignature *candidate = nil;
+    SEL result = NULL;
     if ([cls instancesRespondToSelector:selector]) {
-        candidate = [cls instanceMethodSignatureForSelector:selector];
-        if (candidate && (candidate.numberOfArguments != 2 || strcmp(candidate.methodReturnType, type)))
-            candidate = nil;
+        NSMethodSignature *signature = [cls instanceMethodSignatureForSelector:selector];
+        if (signature && signature.numberOfArguments == 2 && !strcmp(signature.methodReturnType, type))
+            result = selector;
     }
-    byName[name] = candidate ?: NSNull.null;
-    return candidate;
+    // 缓存的是**选择子**（不兼容记为 NSNull），而不是 NSInvocation —— 见下方说明。
+    byName[name] = result ? [NSValue valueWithPointer:(void *)result] : (id)NSNull.null;
+    return result;
 }
 
-// Private selectors vary by OS release. Validate their ABI before invoking them.
-static NSInvocation *RKGetter(id object, NSString *name, const char *type) {
+// 私有选择子随系统版本变化，调用前必须校验 ABI（由 RKGetterSelector 缓存判定结果）。
+// 校验通过后**直接消息发送**，不再构造 NSInvocation：
+// 老写法每次调用都要 new 一个 NSInvocation 并封送参数，而这两条读取在热路径上极频繁 ——
+// 每次按键读 2 次（keyplane/keys），每 0.2 秒的全量扫描按「每键 3 次」调用
+//（ghost/visible/displayFrame，30 键即 90 次）⇒ 每秒上百个 NSInvocation。
+// 这里仍走 objc_msgSend 而不是缓存 IMP 直跳，是为了保留消息转发 / swizzle 语义，
+// 只把最贵的「对象分配 + 参数封送」去掉，行为与老实现逐位一致。
+static id RKObject(id object, NSString *name) {
+    if (!object) return nil;
     // 注意：不能用点语法 object.class —— id 类型上编译器会做属性查找而报错；
     // 消息发送 [object class] 对 id 永远合法且语义一致。
-    NSMethodSignature *signature = RKGetterSignature([object class], name, type);
-    if (!signature) return nil;
-    NSInvocation *call = [NSInvocation invocationWithMethodSignature:signature];
-    call.target = object;
-    call.selector = NSSelectorFromString(name);
-    [call invoke];
-    return call;
-}
-
-static id RKObject(id object, NSString *name) {
-    NSInvocation *call = RKGetter(object, name, @encode(id));
-    __unsafe_unretained id result = nil;
-    [call getReturnValue:&result];
-    return result;
+    SEL selector = RKGetterSelector([object class], name, @encode(id));
+    return selector ? ((id (*)(id, SEL))objc_msgSend)(object, selector) : nil;
 }
 
 static CGRect RKRect(id object, NSString *name) {
-    NSInvocation *call = RKGetter(object, name, @encode(CGRect));
-    CGRect result = CGRectZero;
-    [call getReturnValue:&result];
-    return result;
+    if (!object) return CGRectZero;
+    SEL selector = RKGetterSelector([object class], name, @encode(CGRect));
+    return selector ? ((CGRect (*)(id, SEL))objc_msgSend)(object, selector) : CGRectZero;
+}
+
+// fallback 必须显式传入：老实现里 `.ghost` 取不到按 NO、`.visible` 取不到按 YES，
+// 语义不同，不能用一个默认值糊过去。
+static BOOL RKFlag(id object, NSString *name, BOOL fallback) {
+    if (!object) return fallback;
+    SEL selector = RKGetterSelector([object class], name, @encode(BOOL));
+    return selector ? ((BOOL (*)(id, SEL))objc_msgSend)(object, selector) : fallback;
 }
 
 #pragma mark - 键位几何（P1-1：布局变化检测）
@@ -231,14 +263,9 @@ NSArray<NSValue *> *RKKeyboardKeyFrames(UIView *host) {
     id keys = RKObject(plane, @"keys");
     if ([keys isKindOfClass:NSArray.class] || [keys isKindOfClass:NSSet.class]) {
         for (id key in keys) {
-            BOOL ghost = NO;
-            NSInvocation *visibility = RKGetter(key, @"ghost", @encode(BOOL));
-            [visibility getReturnValue:&ghost];
-            if (ghost) continue;
-            BOOL visible = YES;
-            NSInvocation *visibleGetter = RKGetter(key, @"visible", @encode(BOOL));
-            [visibleGetter getReturnValue:&visible];
-            if (!visible) continue;
+            // 取不到时保持老实现的默认值：ghost 按 NO、visible 按 YES（两种都保留该键）。
+            if (RKFlag(key, @"ghost", NO)) continue;
+            if (!RKFlag(key, @"visible", YES)) continue;
             CGRect rect = RKRect(key, @"displayFrame");
             UIView *keyplaneView = [plane isKindOfClass:UIView.class] ? plane : nil;
             if (keyplaneView) rect = [keyplaneView convertRect:rect toView:host];
@@ -257,21 +284,37 @@ NSArray<NSValue *> *RKKeyboardKeyFrames(UIView *host) {
 }
 
 // keyplane / keys 指针与 bounds 均未变化时返回 NO，调用方直接复用缓存的键位集合。
+// 快照用一块「按 host 一次性分配」的裸结构，只存**非持有**指针做相等比较：
+//   ① 老实现每次调用都构造 NSDictionary + NSValue 再写关联对象（每按键 4 次堆分配）；
+//   ② 那个 NSDictionary 会**强引用** keyplane / keys —— 无谓延长键盘内部对象寿命。
+// 现在每次调用只剩两次选择子缓存读取 + 几次指针比较，零分配。
+typedef struct {
+    __unsafe_unretained id plane;
+    __unsafe_unretained id keys;
+    CGRect bounds;
+} RKKeyboardLayoutSnapshot;
+
 BOOL RKKeyboardLayoutChanged(UIView *host) {
+    static char RKLayoutSnapshotKey;
     id plane = RKObject(host, @"keyplane");
-    id keys = nil;
-    if (plane) keys = RKObject(plane, @"keys");
-    static char RKLayoutObservationKey;
-    NSDictionary *current = @{
-        @"plane": plane ?: NSNull.null,
-        @"keys": keys ?: NSNull.null,
-        @"bounds": [NSValue valueWithCGRect:host.bounds],
-    };
-    NSDictionary *previous = objc_getAssociatedObject(host, &RKLayoutObservationKey);
-    BOOL changed = !previous ||
-        previous[@"plane"] != current[@"plane"] ||
-        previous[@"keys"] != current[@"keys"] ||
-        !CGRectEqualToRect([previous[@"bounds"] CGRectValue], host.bounds);
-    objc_setAssociatedObject(host, &RKLayoutObservationKey, current, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    id keys = plane ? RKObject(plane, @"keys") : nil;
+    NSValue *boxed = objc_getAssociatedObject(host, &RKLayoutSnapshotKey);
+    RKKeyboardLayoutSnapshot *snapshot = boxed ? (RKKeyboardLayoutSnapshot *)boxed.pointerValue : NULL;
+    if (!snapshot) {
+        snapshot = calloc(1, sizeof(RKKeyboardLayoutSnapshot));
+        if (!snapshot) return YES;                 // 极罕见：分配失败就当作「已变化」保守处理
+        objc_setAssociatedObject(host, &RKLayoutSnapshotKey, [NSValue valueWithPointer:snapshot],
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        snapshot->plane = plane;
+        snapshot->keys = keys;
+        snapshot->bounds = host.bounds;
+        return YES;
+    }
+    CGRect bounds = host.bounds;
+    BOOL changed = snapshot->plane != plane || snapshot->keys != keys ||
+        !CGRectEqualToRect(snapshot->bounds, bounds);
+    snapshot->plane = plane;
+    snapshot->keys = keys;
+    snapshot->bounds = bounds;
     return changed;
 }

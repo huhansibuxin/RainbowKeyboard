@@ -30,6 +30,7 @@ static inline BOOL RKPublishColorState(NSDictionary *prefs) {
     if (!prefs[@"CandidateGradient"] || [prefs[@"CandidateGradient"] boolValue]) state |= UINT64_C(1) << 48;
     if (!prefs[@"CandidateNative"] || [prefs[@"CandidateNative"] boolValue]) state |= UINT64_C(1) << 49;
     if (!prefs[@"CandidateWeType"] || [prefs[@"CandidateWeType"] boolValue]) state |= UINT64_C(1) << 50;
+    // bit 51：纯黑键帽引擎已移除，此位仅作协议兼容保留（无消费方）。
     if (!prefs[@"PureBlackKeyboard"] || [prefs[@"PureBlackKeyboard"] boolValue]) state |= UINT64_C(1) << 51;
     state |= UINT64_C(1) << 52; // Presence bit keeps older color-only messages compatible.
     if (!prefs[@"Enabled"] || [prefs[@"Enabled"] boolValue]) state |= UINT64_C(1) << 53;

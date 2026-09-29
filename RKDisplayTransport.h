@@ -13,6 +13,9 @@ static inline NSArray<NSString *> *RKDisplayNumbers(void) {
         @"Hue", @"EffectStyle", @"Preset"];
 }
 static inline NSArray<NSString *> *RKDisplayFlags(void) {
+    // 注意：本数组顺序即位序（words[1] 的 21+i / 31+i 位），增删会整体平移。
+    // AmbientGlow / BackgroundFeedback / PureBlackKeyboard 的功能均已移除（2.3.17），
+    // 但这里保留占位，以免位序平移导致与已发布的旧快照错位解包。
     return @[@"CandidateGradient", @"CandidateNative", @"CandidateWeType", @"PureBlackKeyboard",
         @"Enabled", @"NativeKeyboard", @"WeChatKeyboard", @"RippleEnabled", @"AmbientGlow", @"BackgroundFeedback"];
 }

@@ -106,10 +106,9 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
     for (NSInteger i=0;i<(NSInteger)titles.count;i++) [values addObject:@(i)];
     [self chooseSimpleOptionForKey:@"Theme" title:@"键盘主题" options:titles values:values];
 }
-- (void)chooseCandidateGradientMode {
-    [self chooseSimpleOptionForKey:@"CandidateGradientMode" title:@"候选栏渐变" options:@[@"关闭", @"静态渐变", @"流动渐变", @"呼吸渐变", @"彩虹渐变", @"跟随输入"] values:@[@0,@1,@2,@3,@4,@5]];
-}
-
+// 2.3.17 删除「候选栏渐变模式」选择器：CandidateGradientMode 全项目只有设置页自己
+// 读写，键盘进程里没有任何消费方 —— 真正生效的只有「启用候选词渐变」这个开关
+// （CandidateGradient）与两个颜色（CandidateStart / CandidateEnd）。
 - (void)chooseEffectStyle {
     [self chooseSimpleOptionForKey:@"EffectStyle"
                              title:@"光效风格"
@@ -132,10 +131,6 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
         NSArray *titles = @[@"自定义", @"🌌 深空", @"💜 极夜紫", @"💙 赛博蓝", @"❤️ 赤焰", @"💚 极光", @"🌈 Rainbow", @"🧊 冰晶", @"🟣 Neon", @"⚡ Cyberpunk"];
         NSInteger value = [RKReadPreferences()[key] integerValue];
         cell.detailTextLabel.text = (value >= 0 && value < (NSInteger)titles.count) ? titles[value] : @"自定义";
-    } else if ([key isEqualToString:@"CandidateGradientMode"]) {
-        NSArray *titles = @[@"关闭", @"静态渐变", @"流动渐变", @"呼吸渐变", @"彩虹渐变", @"跟随输入"];
-        NSInteger value = [RKReadPreferences()[key] integerValue];
-        cell.detailTextLabel.text = (value >= 0 && value < (NSInteger)titles.count) ? titles[value] : @"静态渐变";
     } else if ([key isEqualToString:@"EffectStyle"]) {
         NSArray *titles = @[@"波纹", @"扩散", @"轻弹", @"流光底韵"];
         NSInteger value = [RKReadPreferences()[key] integerValue];
@@ -310,8 +305,7 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 // PSListController's normal switch/slider behavior.
 - (BOOL)isCandidateActionSpecifier:(PSSpecifier *)specifier {
     NSString *identifier = [specifier propertyForKey:@"id"];
-    return [identifier isEqualToString:@"candidate.mode"] ||
-           [identifier isEqualToString:@"candidate.start"] ||
+    return [identifier isEqualToString:@"candidate.start"] ||
            [identifier isEqualToString:@"candidate.end"];
 }
 
@@ -328,9 +322,7 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
                                     reuseIdentifier:@"RKCandidateAction"];
     }
     NSString *identifier = [specifier propertyForKey:@"id"];
-    BOOL isMode = [identifier isEqualToString:@"candidate.mode"];
-    cell.textLabel.text = isMode ? @"渐变模式" :
-        ([identifier isEqualToString:@"candidate.start"] ? @"起始颜色" : @"结束颜色");
+    cell.textLabel.text = [identifier isEqualToString:@"candidate.start"] ? @"起始颜色" : @"结束颜色";
     cell.textLabel.textColor = UIColor.labelColor;
     cell.detailTextLabel.textColor = UIColor.secondaryLabelColor;
     cell.textLabel.enabled = YES;
@@ -341,12 +333,6 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
     cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
     cell.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
     cell.detailTextLabel.text = nil;
-    if (isMode) {
-        NSArray *titles = @[@"关闭", @"静态渐变", @"流动渐变", @"呼吸渐变", @"彩虹渐变", @"跟随输入"];
-        id saved = RKReadPreferences()[@"CandidateGradientMode"];
-        NSInteger value = saved ? [saved integerValue] : 1;
-        cell.detailTextLabel.text = (value >= 0 && value < (NSInteger)titles.count) ? titles[value] : titles[1];
-    }
     return cell;
 }
 
@@ -364,8 +350,7 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
     if (self.presentedViewController) return;
     NSString *identifier = [specifier propertyForKey:@"id"];
-    if ([identifier isEqualToString:@"candidate.mode"]) [self chooseCandidateGradientMode];
-    else if ([identifier isEqualToString:@"candidate.start"]) [self chooseCandidateStart];
+    if ([identifier isEqualToString:@"candidate.start"]) [self chooseCandidateStart];
     else if ([identifier isEqualToString:@"candidate.end"]) [self chooseCandidateEnd];
 }
 
@@ -394,19 +379,6 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
         [enabled setProperty:@"com.minis.rainbowkeyboard" forKey:@"defaults"];
         [enabled setProperty:kRKChangedNotification forKey:@"PostNotification"];
         [items addObject:enabled];
-
-        PSSpecifier *mode = [PSSpecifier preferenceSpecifierNamed:@"渐变模式"
-                                                            target:self
-                                                               set:nil
-                                                               get:nil
-                                                            detail:nil
-                                                              cell:PSButtonCell
-                                                              edit:nil];
-        [mode setProperty:@"CandidateGradientMode" forKey:@"key"];
-        [mode setProperty:@"candidate.mode" forKey:@"id"];
-        [mode setProperty:@YES forKey:@"enabled"];
-        [mode setButtonAction:@selector(chooseCandidateGradientMode)];
-        [items addObject:mode];
 
         PSSpecifier *colorGroup = [PSSpecifier preferenceSpecifierNamed:@"候选词颜色"
                                                                   target:self
@@ -472,29 +444,9 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
         [wetype setProperty:@YES forKey:@"default"];
         [items addObject:wetype];
 
-        PSSpecifier *animationGroup = [PSSpecifier preferenceSpecifierNamed:@"动画"
-                                                                       target:self
-                                                                          set:nil
-                                                                          get:nil
-                                                                       detail:nil
-                                                                         cell:PSGroupCell
-                                                                         edit:nil];
-        [items addObject:animationGroup];
-
-        PSSpecifier *speed = [PSSpecifier preferenceSpecifierNamed:@"动画速度"
-                                                              target:self
-                                                                 set:@selector(setPreferenceValue:specifier:)
-                                                                 get:@selector(readPreferenceValue:)
-                                                              detail:nil
-                                                                cell:PSSliderCell
-                                                                edit:nil];
-        [speed setProperty:@"CandidateGradientSpeed" forKey:@"key"];
-        [speed setProperty:@0.5 forKey:@"default"];
-        [speed setProperty:@0.05 forKey:@"min"];
-        [speed setProperty:@2.0 forKey:@"max"];
-        [speed setProperty:@YES forKey:@"showValue"];
-        [items addObject:speed];
-
+        // 2.3.17 删除「动画」分组与「动画速度」滑条：CandidateGradientSpeed 在键盘进程里
+        // 没有任何消费方 —— 候选栏渐变的相位速度写死在 CandidateGradient.xm 的
+        // RKCandidateAnimationSpeed(=0.14)，拖滑条不改变任何观感。
         _specifiers = items;
     }
     return _specifiers;

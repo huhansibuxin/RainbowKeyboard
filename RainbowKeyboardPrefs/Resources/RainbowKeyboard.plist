@@ -4,11 +4,6 @@
 <dict>
 	<key>items</key>
 	<array>
-        <dict>
-            <key>cell</key><string>PSGroupCell</string>
-            <key>label</key><string>流畅度保护</string>
-            <key>footerText</key><string>打字卡顿时自动降低光效，稳定后逐步恢复；不记录输入内容。</string>
-        </dict>
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
@@ -146,12 +141,6 @@
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>
 			<string>com.minis.rainbowkeyboard.changed</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>label</key>
-			<string>性能</string>
 		</dict>
 		<dict>
 			<key>cell</key>

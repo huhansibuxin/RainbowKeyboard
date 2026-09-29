@@ -34,13 +34,10 @@ static void RKEffectPreferencesChanged(CFNotificationCenterRef center, void *obs
 @property(nonatomic) BOOL underlightMaskIncludesNativeFaces;
 @property(nonatomic) CGFloat hue;
 @property(nonatomic) CGFloat pressHue;
-@property(nonatomic,strong) CALayer *fastFeedback;
 @property(nonatomic) NSInteger lastStyle;
-@property(nonatomic,strong) UIBezierPath *cachedGutterPath;
 @property(nonatomic,strong) NSArray<UIBezierPath *> *cachedFacePaths;
 @property(nonatomic,strong) NSArray<NSValue *> *cachedCenters;
 @property(nonatomic,strong) NSArray<RKKeyWaveGeometry *> *cachedWaveGeometries;
-@property(nonatomic) CGRect cachedGeometryBounds;
 @end
 
 // 落点 → 按压键解析（仅服务于扩散/波纹，即 showBedEffectAtPoint）。
@@ -130,28 +127,8 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
 - (CGFloat)neonSaturation:(CGFloat)base {
     return base * [self number:@"NeonSaturation" fallback:.72 low:0 high:1];
 }
-- (BOOL)preservesBlackFaces {
-    return [self flag:@"PureBlackKeyboard"];
-}
-- (CAShapeLayer *)keyGutterMask {
-    if (!self.cachedGutterPath || !CGRectEqualToRect(self.cachedGeometryBounds, self.bounds)) {
-        UIBezierPath *gaps = [UIBezierPath bezierPathWithRect:self.bounds];
-        for (UIBezierPath *face in self.cachedFacePaths) [gaps appendPath:face];
-        self.cachedGutterPath = gaps;
-        self.cachedGeometryBounds = self.bounds;
-    }
-    CAShapeLayer *mask = [CAShapeLayer layer];
-    mask.frame = self.bounds;
-    mask.path = self.cachedGutterPath.CGPath;
-    mask.fillRule = kCAFillRuleEvenOdd;
-    return mask;
-}
 - (void)layoutSubviews {
     [super layoutSubviews];
-    if (!CGRectEqualToRect(self.cachedGeometryBounds, self.bounds)) {
-        self.cachedGutterPath = nil;
-        self.cachedGeometryBounds = CGRectNull;
-    }
     // Old animations must not float over a new keyboard after rotation/resizing.
     for (CALayer *pulse in self.layer.sublayers.copy) {
         if (!CGRectEqualToRect(pulse.frame, self.bounds)) [pulse removeFromSuperlayer];
@@ -193,64 +170,15 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
     self.cachedFacePaths = faces;
     self.cachedCenters = centers;
     self.cachedWaveGeometries = geometries;
-    self.cachedGutterPath = nil;
-    self.cachedGeometryBounds = CGRectNull;
     for (CALayer *pulse in self.layer.sublayers.copy) [pulse removeFromSuperlayer];
 }
-- (void)addAmbientGlowToPulse:(CALayer *)pulse origin:(CGPoint)origin radius:(CGFloat)radius
-                         hue:(CGFloat)hue mode:(NSInteger)mode duration:(CGFloat)duration {
-    if (![self flag:@"AmbientGlow"] || ![self flag:@"BackgroundFeedback"]) return;
-    CGFloat strength = [self number:@"AmbientStrength" fallback:.85 low:0 high:1];
-    CGFloat alpha = [self number:@"Opacity" fallback:.65 low:0 high:1] * strength;
-    if (alpha <= 0) return;
-    CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
-    CALayer *ambient = [CALayer layer];
-    ambient.name = @"keyboardAmbientGlow";
-    ambient.frame = self.bounds;
-    [pulse addSublayer:ambient];
-
-    // Solid black mode has backlighting only; the optional wash belongs to other themes.
-    for (NSUInteger pass = [self preservesBlackFaces] ? 1 : 0; pass < 2; pass++) {
-        CALayer *field = [CALayer layer];
-        field.name = pass ? @"gutterLight" : @"keyFaceWash";
-        field.frame = self.bounds;
-        [ambient addSublayer:field];
-        if (pass) field.mask = [self keyGutterMask];
-        CAGradientLayer *bloom = [CAGradientLayer layer];
-        bloom.type = kCAGradientLayerRadial;
-        bloom.frame = CGRectMake(origin.x - radius, origin.y - radius, radius * 2, radius * 2);
-        bloom.startPoint = CGPointMake(.5, .5);
-        bloom.endPoint = CGPointMake(1, 1);
-        CGFloat level = alpha * (pass ? 1 : .24);
-        UIColor *inner = [UIColor colorWithHue:hue saturation:[self neonSaturation:.82] brightness:brightness alpha:1];
-        UIColor *middle = [UIColor colorWithHue:mode == 1 ? hue : fmod(hue + .13, 1)
-                                    saturation:[self neonSaturation:.75] brightness:brightness alpha:1];
-        UIColor *outer = [UIColor colorWithHue:mode == 1 ? hue : fmod(hue + .25, 1)
-                                   saturation:[self neonSaturation:.9] brightness:brightness alpha:1];
-        bloom.colors = @[(id)[inner colorWithAlphaComponent:level * .22].CGColor,
-            (id)[inner colorWithAlphaComponent:level * .6].CGColor,
-            (id)[middle colorWithAlphaComponent:level].CGColor,
-            (id)[outer colorWithAlphaComponent:level * .5].CGColor,
-            (id)[outer colorWithAlphaComponent:0].CGColor];
-        bloom.locations = @[@0, @.22, @.52, @.78, @1];
-        bloom.opacity = 0;
-        [field addSublayer:bloom];
-        CAKeyframeAnimation *spread = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
-        spread.values = @[@.04, @.64, @1, @1.08];
-        spread.keyTimes = @[@0, @.32, @.7, @1];
-        spread.duration = duration;
-        [bloom addAnimation:spread forKey:@"ambientExpansion"];
-        CAKeyframeAnimation *fade = [CAKeyframeAnimation animationWithKeyPath:@"opacity"];
-        fade.values = @[@0, @1, @.9, @0];
-        fade.keyTimes = @[@0, @.08, @.52, @1];
-        fade.duration = duration;
-        [bloom addAnimation:fade forKey:@"ambientFade"];
-    }
-}
+// 注：原 addAmbientGlowToPulse:（背景光晕/背景扩散）于 2.3.17 删除 ——
+// 该方法全项目零调用，与之配套的「背景光晕」「背景扩散」两个开关是死开关，
+// 已一并从高级设置移除。keyGutterMask / cachedGutterPath 为其独占依赖，同批删除。
 // Only positively identified native layouts may illuminate key faces.
 // WeType keeps its existing cut-out mask, even if a native-looking view exists.
 - (BOOL)usesNativeKeycapGlow {
-    if ([NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"]) return NO;
+    if (RKKeyboardBundleIsWeType()) return NO;
     for (UIView *v = self.superview; v && ![v isKindOfClass:UIWindow.class]; v = v.superview) {
         if (RKClassFeatures(v.class) & RKFeatureLayoutStar) return YES;
     }
@@ -259,7 +187,7 @@ static CGRect RKResolvePressedKeyFrame(NSArray<NSValue *> *keyFrames, CGPoint po
 
 // Conservative native nine-key detection: never change WeType's mask.
 - (BOOL)usesNativeNineKeyBed {
-    if ([NSBundle.mainBundle.bundleIdentifier.lowercaseString containsString:@"wetype"]) return NO;
+    if (RKKeyboardBundleIsWeType()) return NO;
     BOOL native = NO;
     for (UIView *v = self.superview; v && ![v isKindOfClass:UIWindow.class]; v = v.superview) {
         if (RKClassFeatures(v.class) & RKFeatureLayoutStar) { native = YES; break; }

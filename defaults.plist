@@ -1,11 +1,7 @@
 {
     Enabled = 1;
     Theme = 0;
-    CandidateGradientMode = 1;
-    CandidateGradientSpeed = 0.65;
-    CandidateGradientIntensity = 1.0;
     EffectStyle = 1;
-    AmbientGlow = 1;
     AmbientStrength = 0.85;
     PureBlackKeyboard = 0;
     KeyboardBackgroundColor = (0.7960782647132874, 0.9411764740943909, 0.9999999403953552);
@@ -20,7 +16,6 @@
     Softness = 7;
     CoreStrength = 0.62;
     MaxEffects = 6;
-    BackgroundFeedback = 1;
     BackgroundDuration = 0.4;
     BackgroundRadius = 100.65743255615234;
     BackgroundBand = 0.29783737659454346;

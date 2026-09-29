@@ -37,6 +37,8 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
 %hook UIApplication
 - (void)sendEvent:(UIEvent *)event {
     %orig;
+    // 进程守卫：系统 UI 进程（SpringBoard / backboardd）不参与任何装饰，直接放行。
+    if (RKKeyboardProcessIsSystemUI()) return;
     if (event.type != UIEventTypeTouches) return;
     if (!RKKeyboardSessionActive()) {
         // 自愈兜底：触摸能解析出键盘宿主 = 键盘真实在场（通知可能未达），
@@ -130,6 +132,7 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
 %hook UIKeyboardLayoutStar
 - (void)didMoveToWindow {
     %orig;
+    if (RKKeyboardProcessIsSystemUI()) return;
     // UIKeyboardLayoutStar 仅有前置声明（@class），编译器不知道其继承 UIView，
     // 显式转 UIView 才能访问 window 属性；运行时类型安全（本类即 UIView 子类）。
     RKKeyboardSessionSetActive([(UIView *)self window] != nil);
