@@ -1,8 +1,19 @@
 Package: com.minis.rainbowkeyboard
 Name: 彩虹键盘光效
-Version: 2.3.5
+Version: 2.3.6
 Architecture: iphoneos-arm64
 Description: 霓虹键床光效，支持原生键盘和微信输入法
+ 2.3.6 语音按钮：加宽到 3.5 格并显示「点击说话」：
+ 2.3.5 诊断日志已确认加宽生效（sizeThatFits 34→102，工具栏宽 242→310，与算式吻合），
+ 但用户反馈仍略短、且按钮中间只有一个图标显得空。本版：
+ 一、目标宽度 3 格 → 3.5 格（119pt），仍按同排方钮实测自适应。
+ 二、启用微信原生描述文字：WBToolBarButton 自带 _showDesc/_desc/_descLabel 及
+ imageRightInsetWithDescLabel 等专用布局方法（图标在左、文字在右），显示
+ “点击说话”；字体/颜色/间距全部交给原生 layoutSubviews，不干预。
+ 三、删除全部冗余：诊断日志、布局后置兜底（2.3.4 改 frame + 推兄弟按钮，因容器
+ 未跟着变宽而把右侧 3 个按钮挤出可视区）、“取最左按钮”模糊判据（曾误伤
+ func=37 的文件传输邀请按钮）、图标比对与 func 学习缓存。现只保留 func==1
+ 这一条精确判据（实机日志确认）与 sizeThatFits 单一 hook，无写盘、无额外遍历。
  2.3.5 修正语音按钮加宽（2.3.4 失败复盘）：
  2.3.4 的错法：改按钮 frame 把同排按钮右推，但工具栏宽度不读 frame、只读各按钮
  sizeThatFits 之和，所以工具栏没变宽 → 右侧按钮被推出可视区（表现为“没变大 + 右边
