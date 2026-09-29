@@ -1,8 +1,20 @@
 Package: com.minis.rainbowkeyboard
 Name: 彩虹键盘光效
-Version: 2.3.4
+Version: 2.3.5
 Architecture: iphoneos-arm64
 Description: 霓虹键床光效，支持原生键盘和微信输入法
+ 2.3.5 修正语音按钮加宽（2.3.4 失败复盘）：
+ 2.3.4 的错法：改按钮 frame 把同排按钮右推，但工具栏宽度不读 frame、只读各按钮
+ sizeThatFits 之和，所以工具栏没变宽 → 右侧按钮被推出可视区（表现为“没变大 + 右边
+ 3 个按钮消失”）；且宽度公式取 3×钮宽+2×间距(126) 也偏长。
+ 本版改为微信原生机制：只 hook WBToolBarButton 的 sizeThatFits:，让语音按钮多报
+ 2 个方钮宽(34→102)。工具栏 width 随之变大、父视图把工具栏整体向左扩，微信自己的
+ layoutForAnimated: 重排所有按钮——不碰任何别人的 frame，不可能再有按钮被挤出。
+ 目标宽改按实测校准：截图逐像素量得方钮 102px、胶囊 310px(1pt=3px)，即「最近使用」
+ 胶囊 = 3 个方钮宽 → 目标 = 3 × 方钮宽 = 102pt。识别语音按钮：主用 func=1
+ （实测工具栏顺序 (28,1,23,8,7,5) 对应截图「最近使用胶囊→麦克风→…」，focusedFunc=1），
+ 备用图标比对 icon_bar_voice_24，命中后缓存 func，识别失败则完全不动。
+ 仍含布局后置兜底与诊断日志（rk_voicetoolbar.log），确认生效后下一版去日志。
  2.3.4 微信输入法工具栏「语音按钮」放大（新增设置开关，默认开）：语音按钮原为一个
  小圆形图标，现横向拉宽到约 3 格（3×钮宽+2×间距，按同排按钮实测自适应），其余按钮
  尺寸与位置保持不变。实现=hook WBFunctionToolBar 的 layoutSubviews 与
