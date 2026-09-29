@@ -20,7 +20,7 @@
 			<key>label</key>
 			<string>启用候选词渐变</string>
 			<key>default</key>
-			<true/>
+			<false/>
 			<key>defaults</key>
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>

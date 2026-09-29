@@ -1,8 +1,13 @@
 Package: com.minis.rainbowkeyboard
 Name: 彩虹键盘光效
-Version: 2.3.19
+Version: 2.3.20
 Architecture: iphoneos-arm64
 Description: 霓虹键床光效，支持原生键盘和微信输入法
+ 2.3.20 候选栏渐变改为默认关闭。此前三处默认值互相矛盾：设置页开关默认「开」，
+ 而键盘侧固化兜底表与恢复默认用的 defaults.plist 都是「关」，于是开关显示开、
+ 实际却不渲染。现统一为「关」，并把总开关判定改为「键缺失即关」（不再依赖任何
+ 表兜底，跨进程位协议同步该语义）。同时把「原生候选栏 / WeType 候选栏」两个子开关
+ 的兜底值由关修正为开 —— 原先打开总开关会因子开关取到关而完全无效果。
  2.3.19 关闭候选栏渐变后保证零开销：全进程级绘制钩子（UILabel / UIView -drawLayer: /
  NSString / NSAttributedString / WBTextItemLabel）原先都把开关判定排在 superview
  链遍历、重绘表登记、绘制作用域开关之后，关掉开关仍要白做这些活。现改为在钩子第一行

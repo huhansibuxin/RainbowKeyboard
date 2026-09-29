@@ -27,7 +27,10 @@ static inline BOOL RKPublishColorState(NSDictionary *prefs) {
             state |= byte << ((c * 3 + j) * 8);
         }
     }
-    if (!prefs[@"CandidateGradient"] || [prefs[@"CandidateGradient"] boolValue]) state |= UINT64_C(1) << 48;
+    // bit 48：候选栏渐变。语义与键盘侧一致 —— **缺失即关**（候选栏渐变默认关闭）。
+    // 切勿写回 `!prefs[key] || ...`：那会把「键不存在」编码成「开」，
+    // 让"默认关闭"的意图在跨进程传输时被静默翻转成开。
+    if ([prefs[@"CandidateGradient"] boolValue]) state |= UINT64_C(1) << 48;
     if (!prefs[@"CandidateNative"] || [prefs[@"CandidateNative"] boolValue]) state |= UINT64_C(1) << 49;
     if (!prefs[@"CandidateWeType"] || [prefs[@"CandidateWeType"] boolValue]) state |= UINT64_C(1) << 50;
     // bit 51：纯黑键帽引擎已移除，此位仅作协议兼容保留（无消费方）。

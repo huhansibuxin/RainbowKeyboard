@@ -375,7 +375,7 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
                                                                   cell:PSSwitchCell
                                                                   edit:nil];
         [enabled setProperty:@"CandidateGradient" forKey:@"key"];
-        [enabled setProperty:@YES forKey:@"default"];
+        [enabled setProperty:@NO forKey:@"default"];
         [enabled setProperty:@"com.minis.rainbowkeyboard" forKey:@"defaults"];
         [enabled setProperty:kRKChangedNotification forKey:@"PostNotification"];
         [items addObject:enabled];

@@ -23,8 +23,8 @@
     NativeKeyboard = 0;
     WeChatKeyboard = 1;
     CandidateGradient = 0;
-    CandidateNative = 0;
-    CandidateWeType = 0;
+    CandidateNative = 1;
+    CandidateWeType = 1;
     KeyboardLock = 0;
     CandidateStart = (0.6627452373504639, 0.40784311294555664, 0);
     CandidateEnd = (0.803921639919281, 0.9098039269447327, 0.7098039984703064);

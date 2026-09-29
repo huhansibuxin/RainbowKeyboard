@@ -139,8 +139,11 @@ static BOOL RKCandidateFlag(NSString *key) {
 }
 // 从偏好字典刷新三个缓存开关。仅在 RKCandidateReload()（Darwin 通知 / 键盘弹出 / 前台激活）
 // 里调用，不在任何绘制路径上。
+// 语义刻意不对称：总开关「缺失即关」（候选栏渐变默认关闭，缺键时绝不意外开启、绝不留开销），
+// 两个子开关「缺失即开」（它们是"应用到哪种输入法"的细分，默认全开才符合直觉，也避免
+// 用户打开总开关后因子开关兜底为关而看不到任何效果）。
 static void RKCandidateRefreshSwitches(void) {
-    RKCandidateGradientEnabled = RKCandidateFlag(@"CandidateGradient");
+    RKCandidateGradientEnabled = [RKCandidatePrefs[@"CandidateGradient"] boolValue];
     RKCandidateNativeEnabled   = RKCandidateFlag(@"CandidateNative");
     RKCandidateWeTypeEnabled   = RKCandidateFlag(@"CandidateWeType");
 }

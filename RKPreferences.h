@@ -35,8 +35,11 @@ static inline NSDictionary *RKPresetSelfUseTable(void) {
             @"EffectStyle": @(1.0),
             @"Preset": @(-1.0),
             @"CandidateGradient": @(0),
-            @"CandidateNative": @(0),
-            @"CandidateWeType": @(0),
+            // 子开关「缺失即开」（2026-09-30 由 0 修正为 1）：总闸判据是
+            // `总开关 && (原生 || WeType)`。此处若兜底为 0，用户打开总开关后
+            // 两个子开关仍取到 0 → 总闸恒不成立 → 表现为"开了完全没效果"。
+            @"CandidateNative": @(1),
+            @"CandidateWeType": @(1),
             // 纯黑键帽引擎（RKBlackKeyboardHost 已为空实现）已移除：此键无设置入口、
             // 无渲染消费方，仅作为跨进程位协议字段保留，勿删（位序对齐）。
             @"PureBlackKeyboard": @(0),
