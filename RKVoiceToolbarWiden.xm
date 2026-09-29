@@ -150,10 +150,10 @@ static void RKVoiceArrangeContentIfNeeded(WBToolBarButton *button) {
 #pragma mark - 目标宽度
 
 // 方钮是正方形 ⇒「一格」= 它的高（也是它的自然宽），实测 34pt。
-// 目标 = 3 格（102pt）：与「最近使用」胶囊等长。实机比对 3.5/4/4.5 格后定为 3 格：
-// 再长就会比同排其他按钮明显出挑，3 格宽度刚好装下「图标 + 点击说话」且留白舒展。
+// 目标 = 3.5 格（119pt）：3 格（102pt）实机排版偏紧（左右各仅剩 ~8pt，图标+文字
+// 几乎顶格），3.5 格留白舒展且仍与同排其他按钮齐平；再长（4 格以上）就会明显出挑。
 // 「一格」从同排方钮实测采样，换机型/字号自动跟随；采不到时用实测的 34pt 兜底。
-static CGFloat const RKVoiceTargetUnits = 3.0;
+static CGFloat const RKVoiceTargetUnits = 3.5;
 static CGFloat RKVoiceUnitWidth = 0;
 
 #pragma mark - Hook
