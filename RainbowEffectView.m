@@ -185,6 +185,71 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
     return best;
 }
 
+// ---- 微信自己的命中结果（2.3.28）------------------------------------------------
+// 本插件采集键位表用的是通用尺寸规则（见 RKKeyboardGeometry.m 的 RKValidKeyRect），
+// 它漏掉了九宫格「空格条」这种与同桌其余键几何不一致的键：末行的 123 / 中英切换 /
+// 回车都进了表，偏偏空格没进 ⇒ 落点落不进任何键帽 ⇒ 只能走下面的「最近键吸附」，
+// 而空格条正上方的最近键恰好是 7/8/9（九宫格行距仅 56pt，吸附上限 26pt 足够跨过去）
+// ⇒ 按空格亮 7/8/9、字符却仍是空格（字符由微信自己处理，我们只画光）。
+//
+// 微信自己早已给出正确答案：touch.view 是它重写过的 hitTest 选中的那个视图，
+// 即「微信认为这一下打在了哪个按钮上」。轻弹那条路本来就在用它 —— RKShowNeonKeyPress
+// 的 sourceView 入参就是靠它渲染键帽字形，说明它在微信输入法下确实是键视图。
+// 这里把同一份信息用在命中判定上：沿 touch.view 的祖先链取最近的一个「尺寸像一块键」
+// 的视图，直接用它的矩形 —— 不再受本插件采集规则的任何约束。
+// 只取最近（最靠内）的一个：再往上就是键行 / 键区容器，整行宽会被下面的上限挡掉。
+static CGRect RKKeyRectFromSourceView(UIView *source, UIView *host) {
+    if (!source || !host) return CGRectNull;
+    CGRect bounds = host.bounds;
+    CGFloat maxHeight = MIN(160, bounds.size.height * .8);
+    for (UIView *view = source; view && view != host; view = view.superview) {
+        // 撞到排除类说明这条链已经不是键了（正常情况下 host 判定已挡掉，这里再兜一道）。
+        if (RKKeyboardExcludedView(view)) break;
+        // 键帽内部的文字 / 图标子视图：它们的 frame 只是字形，不是键。
+        if ([view isKindOfClass:UILabel.class] || [view isKindOfClass:UIImageView.class]) continue;
+        CGRect rect = [view convertRect:view.bounds toView:host];
+        if (!isfinite(rect.origin.x) || !isfinite(rect.origin.y) ||
+            !isfinite(rect.size.width) || !isfinite(rect.size.height)) continue;
+        // 比采集规则宽松：不再限制「≤ 宿主宽 × 0.9」—— 空格条正是不满足采集规则才漏的。
+        // 但它仍须是一块完整的键（不占满整行、不高于一行），下面两条守住这个边界；
+        // 越界即说明当前这个视图是容器，再往上只会更大，直接收工。
+        if (rect.size.width < 10 || rect.size.height < 14) continue;
+        if (rect.size.width >= bounds.size.width * .97 || rect.size.height > maxHeight) break;
+        if (!CGRectContainsRect(CGRectInset(bounds, -1, -1), rect)) continue;
+        return rect;
+    }
+    return CGRectNull;
+}
+
+// 2.3.28 临时诊断（验证后随下一版删除）：微信命中的键不在本插件键位表里时，
+// 把现场落一行到容器 tmp（PluginKitPlugin 沙盒内，SSH 可直接读）。
+// 只在「表里查不到这个矩形」时才写，所以正常的键缝落点（拾取到的就是表内相邻键）
+// 不会污染日志；同一进程只写第一例，此后只剩一次内存读。
+static void RKLogHitOutsideTableIfNeeded(UIView *source, CGRect rect,
+                                         NSArray<NSValue *> *keyFrames, CGPoint point, CGRect bed) {
+    static BOOL logged;
+    if (logged) return;
+    for (NSValue *value in keyFrames) {
+        CGRect other = value.CGRectValue;
+        if (fabs(other.origin.x - rect.origin.x) <= 1 && fabs(other.origin.y - rect.origin.y) <= 1 &&
+            fabs(other.size.width - rect.size.width) <= 1 && fabs(other.size.height - rect.size.height) <= 1)
+            return;
+    }
+    logged = YES;
+    NSMutableString *chain = [NSMutableString string];
+    for (UIView *view = source; view; view = view.superview) {
+        [chain appendFormat:@"%@(%.1f,%.1f %.1fx%.1f) < ", NSStringFromClass(view.class),
+            view.frame.origin.x, view.frame.origin.y, view.frame.size.width, view.frame.size.height];
+        if ([view isKindOfClass:UIWindow.class]) break;
+    }
+    NSString *line = [NSString stringWithFormat:
+        @"[RK] hit outside key table\n  rect  = %@\n  point = %@\n  keys  = %lu  bed = %@\n  chain = %@\n",
+        NSStringFromCGRect(rect), NSStringFromCGPoint(point),
+        (unsigned long)keyFrames.count, NSStringFromCGRect(bed), chain];
+    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"rk_hit.log"];
+    [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
 @implementation RainbowEffectView
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
@@ -502,8 +567,9 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
     return mask;
 }
 // 落点 → 生效按键。候选集与「全表遍历」等价：先按 y 取覆盖落点的行（精准命中），
-// 落进键缝时再取 y 距离不超过吸附上限的行（最近键吸附），都不遍历整张键位表。
-- (CGRect)resolvePressedKeyFrameAtPoint:(CGPoint)point {
+// 落点被采集规则漏掉的那个键（九宫格空格条）走「微信自己的命中」，
+// 都不行才取 y 距离不超过吸附上限的行（最近键吸附），全程不遍历整张键位表。
+- (CGRect)resolvePressedKeyFrameAtPoint:(CGPoint)point sourceView:(UIView *)sourceView {
     NSArray<RKKeyRow *> *rows = self.keyHitRows;
     if (!rows.count) return CGRectNull;
     // 一、落点盖在键帽内：取面积最小的那个键（与旧实现同为「面积优先」）。
@@ -518,7 +584,19 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
         if (area < pressedArea) { pressedArea = area; pressed = rect; }
     }
     if (!CGRectIsNull(pressed)) return pressed;
-    // 二、落点在键缝里：仍须落在键区包围盒外扩 8pt 内，否则视为候选栏/工具条的误触发。
+    // 二、落点不在任何键帽里：先采信微信自己的命中（见 RKKeyRectFromSourceView）。
+    //     它必然包含落点（touch.view 就是 hitTest 为这个点选中的视图），故只做一次复核；
+    //     键位表里没有的键（九宫格空格条）就靠这一步找回正确位置。
+    //     这里刻意不复用第三支的「键区包围盒 ±8pt」约束 —— 那个包围盒来自键位表，
+    //     对「表里本来就没有的键」不成立。候选栏 / 工具条也不可能走到这里：
+    //     RKKeyboardEffectHost 撞到它们会直接放弃注入（整条链一点光都没有）。
+    CGRect button = RKKeyRectFromSourceView(sourceView, self.superview);
+    if (!CGRectIsNull(button) && CGRectContainsPoint(CGRectInset(button, -2, -2), point)) {
+        RKLogHitOutsideTableIfNeeded(sourceView, button, self.keyFrames, point, self.keyBedBounds);
+        return button;
+    }
+    // 三、微信也认不出（如原生键盘的触摸落在键缝）：回落最近键吸附。
+    //     仍须落在键区包围盒外扩 8pt 内，否则视为候选栏/工具条的误触发。
     if (CGRectIsNull(self.keyBedBounds) ||
         !CGRectContainsPoint(CGRectInset(self.keyBedBounds, -8, -8), point)) return CGRectNull;
     CGRect nearest = CGRectNull;
@@ -545,11 +623,12 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
 }
 // Both effects live in the exposed keyboard bed. Neither outlines keycaps.
 // hue 由调用方统一推进（一拍一次），键底光效与轻弹因此共用同一色相。
-- (void)showBedEffectAtPoint:(CGPoint)point style:(NSInteger)style hue:(CGFloat)hue {
+- (void)showBedEffectAtPoint:(CGPoint)point sourceView:(UIView *)sourceView
+                       style:(NSInteger)style hue:(CGFloat)hue {
     // 键缝落点吸附：原「落点必须落在键帽矩形内」的判据会让 WeType 全键盘的
     // 宽键缝整段丢光效（微信仍会上屏字符）。改用命中索引还原命中判定；
     // 包含落点的场景逐位等同原逻辑，观感零变化。
-    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point];
+    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point sourceView:sourceView];
     if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
     CALayer *mask = [self waveUnderCapMask];
     if (!mask) return;
@@ -655,9 +734,9 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
 }
 
 // Native-only variant of WeType's spread. Keep showBedEffectAtPoint unchanged.
-- (void)showNativeWeTypeSpreadAtPoint:(CGPoint)point hue:(CGFloat)hue {
+- (void)showNativeWeTypeSpreadAtPoint:(CGPoint)point sourceView:(UIView *)sourceView hue:(CGFloat)hue {
     if (![self usesNativeKeycapGlow]) return;
-    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point];
+    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point sourceView:sourceView];
     if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
     // Native hit cells may tile the whole keyboard. Cut out inset faces,
     // not full hit cells, to preserve the seams on both 9/26-key layouts.
@@ -742,7 +821,7 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
 // 命中复用索引化的精准解析：按在键帽缝隙里的那一下，同样会落到真正生效的那个键上。
 // 配色默认与键底光效同色（LightPopMatchColor），可切回轻弹自己的取色。
 - (void)showKeycapFeedbackAtPoint:(CGPoint)point sourceView:(UIView *)sourceView hue:(CGFloat)hue {
-    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point];
+    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point sourceView:sourceView];
     if (CGRectIsNull(pressed)) return;
     CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
     CGFloat duration = [self number:@"Duration" fallback:.55 low:.15 high:1.2];
@@ -787,8 +866,8 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
         }
     }
 }
-- (void)showCrispUnderlightAtPoint:(CGPoint)point hue:(CGFloat)hue {
-    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point];
+- (void)showCrispUnderlightAtPoint:(CGPoint)point sourceView:(UIView *)sourceView hue:(CGFloat)hue {
+    CGRect pressed = [self resolvePressedKeyFrameAtPoint:point sourceView:sourceView];
     if (CGRectIsNull(pressed) || CGRectIsEmpty(self.bounds)) return;
     CGFloat brightness = [self number:@"Brightness" fallback:.95 low:0 high:1];
     CGFloat opacity = [self number:@"Opacity" fallback:.65 low:0 high:1];
@@ -922,11 +1001,11 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
         (colorMode == 2 ? point.x / MAX(1, self.bounds.size.width) : self.hue);
     // 键底光效（风格）：先铺底，再叠轻弹 —— 两者互不排斥。
     if (style == 1 && !weType && [self usesNativeKeycapGlow]) {
-        [self showNativeWeTypeSpreadAtPoint:point hue:hue];
+        [self showNativeWeTypeSpreadAtPoint:point sourceView:sourceView hue:hue];
     } else if (style == 3) {
-        [self showCrispUnderlightAtPoint:point hue:hue];
+        [self showCrispUnderlightAtPoint:point sourceView:sourceView hue:hue];
     } else {
-        [self showBedEffectAtPoint:point style:style hue:hue];
+        [self showBedEffectAtPoint:point sourceView:sourceView style:style hue:hue];
     }
     if (lightPop) [self showKeycapFeedbackAtPoint:point sourceView:sourceView hue:hue];
 }
