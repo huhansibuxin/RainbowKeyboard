@@ -198,10 +198,11 @@ static NSInteger RKKeyRowNearestIndexAtX(RKKeyRow *row, CGFloat x) {
 // 这里把同一份信息用在命中判定上：沿 touch.view 的祖先链取最近的一个「尺寸像一块键」
 // 的视图，直接用它的矩形 —— 不再受本插件采集规则的任何约束。
 // 只取最近（最靠内）的一个：再往上就是键行 / 键区容器，整行宽会被下面的上限挡掉。
-static CGRect RKKeyRectFromSourceView(UIView *source, UIView *host) {
+static CGRect RKKeyRectFromSourceView(UIView *source, UIView *host, CGPoint point) {
     if (!source || !host) return CGRectNull;
     CGRect bounds = host.bounds;
     CGFloat maxHeight = MIN(160, bounds.size.height * .8);
+    UIView *rowContainer = nil;
     for (UIView *view = source; view && view != host; view = view.superview) {
         // 撞到排除类说明这条链已经不是键了（正常情况下 host 判定已挡掉，这里再兜一道）。
         if (RKKeyboardExcludedView(view)) break;
@@ -211,43 +212,158 @@ static CGRect RKKeyRectFromSourceView(UIView *source, UIView *host) {
         if (!isfinite(rect.origin.x) || !isfinite(rect.origin.y) ||
             !isfinite(rect.size.width) || !isfinite(rect.size.height)) continue;
         // 比采集规则宽松：不再限制「≤ 宿主宽 × 0.9」—— 空格条正是不满足采集规则才漏的。
-        // 但它仍须是一块完整的键（不占满整行、不高于一行），下面两条守住这个边界；
-        // 越界即说明当前这个视图是容器，再往上只会更大，直接收工。
         if (rect.size.width < 10 || rect.size.height < 14) continue;
-        if (rect.size.width >= bounds.size.width * .97 || rect.size.height > maxHeight) break;
+        // 比一行还高 ⇒ 已经是键区/键盘容器，再往上只会更大，收工。
+        if (rect.size.height > maxHeight) break;
+        // 占满整行 ⇒ 这是「键行容器」而非键（微信九宫格末行把空格等并进一条行视图）。
+        // 不能采信行矩形，改为在这一条行视图内部找「包含落点的最小视图」。
+        if (rect.size.width >= bounds.size.width * .97) { rowContainer = view; break; }
         if (!CGRectContainsRect(CGRectInset(bounds, -1, -1), rect)) continue;
         return rect;
+    }
+    if (rowContainer) {
+        UIView *best = nil;
+        CGFloat bestArea = CGFLOAT_MAX;
+        NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:rowContainer];
+        NSUInteger guard = 0;
+        while (stack.count && guard++ < 200) {
+            UIView *view = stack.lastObject;
+            [stack removeLastObject];
+            if (view != rowContainer && (view.hidden || view.alpha < .01)) continue;
+            if (view != rowContainer && [view isKindOfClass:UILabel.class]) continue;
+            CGRect rect = [view convertRect:view.bounds toView:host];
+            if (view != rowContainer && rect.size.width >= 10 && rect.size.height >= 14 &&
+                rect.size.height <= maxHeight && CGRectContainsPoint(rect, point)) {
+                CGFloat area = rect.size.width * rect.size.height;
+                if (area < bestArea) { bestArea = area; best = view; }
+            }
+            for (UIView *sub in view.subviews) [stack addObject:sub];
+        }
+        if (best) return [best convertRect:best.bounds toView:host];
     }
     return CGRectNull;
 }
 
-// 2.3.28 临时诊断（验证后随下一版删除）：微信命中的键不在本插件键位表里时，
-// 把现场落一行到容器 tmp（PluginKitPlugin 沙盒内，SSH 可直接读）。
-// 只在「表里查不到这个矩形」时才写，所以正常的键缝落点（拾取到的就是表内相邻键）
-// 不会污染日志；同一进程只写第一例，此后只剩一次内存读。
-static void RKLogHitOutsideTableIfNeeded(UIView *source, CGRect rect,
-                                         NSArray<NSValue *> *keyFrames, CGPoint point, CGRect bed) {
-    static BOOL logged;
-    if (logged) return;
+// ---- 2.3.29 临时诊断（验完随下一版删除）--------------------------------------------
+// 目标：抓九宫格空格这一下 —— touch.view 的真实类名链、坐标系与键位表真实内容。
+// 上一版只在「微信命中且该矩形不在表里」这一窄条件下才写，结果设备上一个字节都没落，
+// 白跑一趟。这一版把覆盖放到最宽：加载即写标记，之后按键都记（表内覆盖留 3 条样本、
+// 其余分支留 200 条），命中记单行、未命中记完整现场。落盘位置按候选列表逐个探测，
+// 首个可写者即定为日志文件，并把最终路径写进文件头 —— 不会再出现「不知道写到哪去了」。
+static NSString *const RKHitLogName = @"rk_hit.log";
+// 预算分两份：「表内覆盖」是正常按键，只留少量样本（否则打字几下就把额度吃光，
+// 真正要抓的空格那一下反而没记上）；其余分支（键缝 / 表外键 / 无光）留足量。
+static NSUInteger RKHitLogSummaryLeft;
+static NSUInteger RKHitLogDetailLeft;
+static NSUInteger RKHitLogSeq;
+static CGPoint RKHitLogLastPoint;
+static CFTimeInterval RKHitLogLastTime;
+static NSString *RKHitLogPath;
+
+static NSArray<NSString *> *RKHitLogCandidates(void) {
+    return @[
+        // 1) 本进程自己的沙盒容器（appex 里 NSTemporaryDirectory 即 PluginKitPlugin/<uuid>/tmp）
+        [NSTemporaryDirectory() stringByAppendingPathComponent:RKHitLogName],
+        // 2) 微信输入法扩展的数据容器（设备上已知固定，SSH 可直接读）
+        [@"/var/mobile/Containers/Data/PluginKitPlugin/E32204AF-AD8A-4F63-8E37-B80F683040A8/tmp"
+            stringByAppendingPathComponent:RKHitLogName],
+        // 3) 系统日志目录与系统临时目录（沙盒可能拒写；能成哪个算哪个，加载时每个都写一份标记）
+        [@"/var/mobile/Library/Logs" stringByAppendingPathComponent:RKHitLogName],
+        [@"/tmp" stringByAppendingPathComponent:RKHitLogName],
+    ];
+}
+
+static void RKHitLogWrite(NSString *text, BOOL reset) {
+    if (!RKHitLogPath) {
+        for (NSString *candidate in RKHitLogCandidates()) {
+            if ([@"" writeToFile:candidate atomically:NO encoding:NSUTF8StringEncoding error:NULL]) {
+                RKHitLogPath = candidate;
+                break;
+            }
+        }
+    }
+    if (!RKHitLogPath) return;
+    if (reset) [@"" writeToFile:RKHitLogPath atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:RKHitLogPath];
+    if (!handle) return;
+    [handle seekToEndOfFile];
+    [handle writeData:[text dataUsingEncoding:NSUTF8StringEncoding]];
+    [handle closeFile];
+}
+
+// 加载即写：既证明落盘通道可用，也证明装到设备上的确实是这一版；同时把标记写到
+// 每一个能写的候选路径，这样无论从哪个位置找都能看到。
+void RKHitLogMarkLoaded(void) {
+    RKHitLogSummaryLeft = 3;
+    RKHitLogDetailLeft = 200;
+    RKHitLogSeq = 0;
+    RKHitLogLastTime = 0;
+    RKHitLogPath = nil;
+    RKHitLogWrite(@"", YES);
+    NSString *note = [NSString stringWithFormat:
+        @"=== RainbowKeyboard 2.3.29 loaded\n  file = %@\n  tmp  = %@\n  pid  = %d\n  main = %@\n",
+        RKHitLogPath ?: @"(no writable path)", NSTemporaryDirectory(),
+        (int)NSProcessInfo.processInfo.processIdentifier,
+        NSStringFromClass(NSBundle.mainBundle.principalClass)];
+    RKHitLogWrite(note, NO);
+    for (NSString *candidate in RKHitLogCandidates()) {
+        if ([candidate isEqualToString:RKHitLogPath]) continue;
+        [note writeToFile:candidate atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+    }
+}
+
+// branch: 0=表内覆盖 1=微信命中 2=最近键吸附 3=键位表为空 4=出界/超距（无光）
+// 只有 0 走单行摘要 —— 那是绝大多数正常按键，原逻辑逐位未动、无需现场；
+// 其余分支都写完整现场（落点、宿主、键区、微信命中结果、键位表内容、类名链）。
+static void RKLogResolve(UIView *source, UIView *host, CGPoint point, NSInteger branch,
+                         CGRect result, NSArray<NSValue *> *keyFrames, CGRect bed) {
+    if (branch == 0) { if (!RKHitLogSummaryLeft) return; }
+    else if (!RKHitLogDetailLeft) return;
+    CFTimeInterval now = CACurrentMediaTime();
+    // 节流：同一落点 0.10s 内的重复调用合并成一条（一拍会经扩散/波纹/轻弹多条路径调用）。
+    if (now - RKHitLogLastTime < .10 &&
+        fabs(point.x - RKHitLogLastPoint.x) < .5 && fabs(point.y - RKHitLogLastPoint.y) < .5) return;
+    RKHitLogLastPoint = point;
+    RKHitLogLastTime = now;
+    if (branch == 0) RKHitLogSummaryLeft--; else RKHitLogDetailLeft--;
+    NSUInteger seq = ++RKHitLogSeq;
+    if (branch == 0) {
+        RKHitLogWrite([NSString stringWithFormat:@"#%lu p=%.0f,%.0f TABLE r=%.0f,%.0f %.0fx%.0f\n",
+            (unsigned long)seq, point.x, point.y,
+            result.origin.x, result.origin.y, result.size.width, result.size.height], NO);
+        return;
+    }
+    NSMutableString *text = [NSMutableString string];
+    [text appendFormat:@"#%lu p=%.0f,%.0f branch=%ld r=%.1f,%.1f %.1fx%.1f\n",
+        (unsigned long)seq, point.x, point.y, (long)branch,
+        result.origin.x, result.origin.y, result.size.width, result.size.height];
+    [text appendFormat:@"  host=%@  bed=%@\n",
+        NSStringFromCGRect(host ? host.bounds : CGRectZero), NSStringFromCGRect(bed)];
+    [text appendFormat:@"  keys(%lu) = ", (unsigned long)keyFrames.count];
+    NSUInteger index = 0;
     for (NSValue *value in keyFrames) {
-        CGRect other = value.CGRectValue;
-        if (fabs(other.origin.x - rect.origin.x) <= 1 && fabs(other.origin.y - rect.origin.y) <= 1 &&
-            fabs(other.size.width - rect.size.width) <= 1 && fabs(other.size.height - rect.size.height) <= 1)
-            return;
+        if (index++ >= 60) { [text appendString:@"..."]; break; }
+        CGRect rect = value.CGRectValue;
+        [text appendFormat:@"%.0f,%.0f %.0fx%.0f | ",
+            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height];
     }
-    logged = YES;
-    NSMutableString *chain = [NSMutableString string];
-    for (UIView *view = source; view; view = view.superview) {
-        [chain appendFormat:@"%@(%.1f,%.1f %.1fx%.1f) < ", NSStringFromClass(view.class),
-            view.frame.origin.x, view.frame.origin.y, view.frame.size.width, view.frame.size.height];
-        if ([view isKindOfClass:UIWindow.class]) break;
+    [text appendString:@"\n  chain:\n"];
+    if (!source) {
+        [text appendString:@"    (touch.view = nil)\n"];
+    } else {
+        NSUInteger depth = 0;
+        for (UIView *view = source; view && depth < 10; view = view.superview, depth++) {
+            CGRect rect = host ? [view convertRect:view.bounds toView:host] : view.frame;
+            [text appendFormat:@"    [%lu] %@  %.1f,%.1f %.1fx%.1f%@%@%@\n",
+                (unsigned long)depth, NSStringFromClass(view.class),
+                rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,
+                RKKeyboardExcludedView(view) ? @" [EXCL]" : @"",
+                ([view isKindOfClass:UILabel.class] || [view isKindOfClass:UIImageView.class]) ? @" [TEXT]" : @"",
+                view == host ? @" [HOST]" : @""];
+            if (view == host) break;
+        }
     }
-    NSString *line = [NSString stringWithFormat:
-        @"[RK] hit outside key table\n  rect  = %@\n  point = %@\n  keys  = %lu  bed = %@\n  chain = %@\n",
-        NSStringFromCGRect(rect), NSStringFromCGPoint(point),
-        (unsigned long)keyFrames.count, NSStringFromCGRect(bed), chain];
-    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"rk_hit.log"];
-    [line writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    RKHitLogWrite(text, NO);
 }
 
 @implementation RainbowEffectView
@@ -570,56 +686,64 @@ static void RKLogHitOutsideTableIfNeeded(UIView *source, CGRect rect,
 // 落点被采集规则漏掉的那个键（九宫格空格条）走「微信自己的命中」，
 // 都不行才取 y 距离不超过吸附上限的行（最近键吸附），全程不遍历整张键位表。
 - (CGRect)resolvePressedKeyFrameAtPoint:(CGPoint)point sourceView:(UIView *)sourceView {
+    // 用 do/while(0) + break 收成单一出口，便于在末尾统一记录这一拍的判定结果
+    // （2.3.29 临时诊断；命中路径的算式逐位未动）。
+    CGRect resolved = CGRectNull;
+    NSInteger branch = 4;
     NSArray<RKKeyRow *> *rows = self.keyHitRows;
-    if (!rows.count) return CGRectNull;
-    // 一、落点盖在键帽内：取面积最小的那个键（与旧实现同为「面积优先」）。
-    CGRect pressed = CGRectNull;
-    CGFloat pressedArea = CGFLOAT_MAX;
-    for (RKKeyRow *row in rows) {
-        if (point.y < CGRectGetMinY(row.bounds) || point.y > CGRectGetMaxY(row.bounds)) continue;
-        NSInteger index = RKKeyRowIndexCoveringX(row, point.x);
-        if (index == NSNotFound) continue;
-        CGRect rect = row.keys[index].CGRectValue;
-        CGFloat area = rect.size.width * rect.size.height;
-        if (area < pressedArea) { pressedArea = area; pressed = rect; }
-    }
-    if (!CGRectIsNull(pressed)) return pressed;
-    // 二、落点不在任何键帽里：先采信微信自己的命中（见 RKKeyRectFromSourceView）。
-    //     它必然包含落点（touch.view 就是 hitTest 为这个点选中的视图），故只做一次复核；
-    //     键位表里没有的键（九宫格空格条）就靠这一步找回正确位置。
-    //     这里刻意不复用第三支的「键区包围盒 ±8pt」约束 —— 那个包围盒来自键位表，
-    //     对「表里本来就没有的键」不成立。候选栏 / 工具条也不可能走到这里：
-    //     RKKeyboardEffectHost 撞到它们会直接放弃注入（整条链一点光都没有）。
-    CGRect button = RKKeyRectFromSourceView(sourceView, self.superview);
-    if (!CGRectIsNull(button) && CGRectContainsPoint(CGRectInset(button, -2, -2), point)) {
-        RKLogHitOutsideTableIfNeeded(sourceView, button, self.keyFrames, point, self.keyBedBounds);
-        return button;
-    }
-    // 三、微信也认不出（如原生键盘的触摸落在键缝）：回落最近键吸附。
-    //     仍须落在键区包围盒外扩 8pt 内，否则视为候选栏/工具条的误触发。
-    if (CGRectIsNull(self.keyBedBounds) ||
-        !CGRectContainsPoint(CGRectInset(self.keyBedBounds, -8, -8), point)) return CGRectNull;
-    CGRect nearest = CGRectNull;
-    CGFloat nearestDistance = CGFLOAT_MAX;
-    for (RKKeyRow *row in rows) {
-        CGFloat dy = 0;
-        if (point.y < CGRectGetMinY(row.bounds)) dy = CGRectGetMinY(row.bounds) - point.y;
-        else if (point.y > CGRectGetMaxY(row.bounds)) dy = point.y - CGRectGetMaxY(row.bounds);
-        // 吸附上限最松也只有 26pt：y 距离已经超出的行不可能产生更近的键，跳过整行。
-        if (dy > 26.0) continue;
-        NSInteger index = RKKeyRowNearestIndexAtX(row, point.x);
-        if (index == NSNotFound) continue;
-        CGRect rect = row.keys[index].CGRectValue;
-        CGFloat dx = 0;
-        if (point.x < CGRectGetMinX(rect)) dx = CGRectGetMinX(rect) - point.x;
-        else if (point.x > CGRectGetMaxX(rect)) dx = point.x - CGRectGetMaxX(rect);
-        CGFloat distance = hypot(dx, dy);
-        if (distance < nearestDistance) { nearestDistance = distance; nearest = rect; }
-    }
-    if (CGRectIsNull(nearest)) return CGRectNull;
-    CGFloat maxSnap = MIN(26.0, MAX(8.0, nearest.size.height * .6));
-    if (nearestDistance > maxSnap) return CGRectNull;
-    return nearest;
+    do {
+        if (!rows.count) { branch = 3; break; }
+        // 一、落点盖在键帽内：取面积最小的那个键（与旧实现同为「面积优先」）。
+        CGRect pressed = CGRectNull;
+        CGFloat pressedArea = CGFLOAT_MAX;
+        for (RKKeyRow *row in rows) {
+            if (point.y < CGRectGetMinY(row.bounds) || point.y > CGRectGetMaxY(row.bounds)) continue;
+            NSInteger index = RKKeyRowIndexCoveringX(row, point.x);
+            if (index == NSNotFound) continue;
+            CGRect rect = row.keys[index].CGRectValue;
+            CGFloat area = rect.size.width * rect.size.height;
+            if (area < pressedArea) { pressedArea = area; pressed = rect; }
+        }
+        if (!CGRectIsNull(pressed)) { resolved = pressed; branch = 0; break; }
+        // 二、落点不在任何键帽里：先采信微信自己的命中（见 RKKeyRectFromSourceView）。
+        //     它必然包含落点（touch.view 就是 hitTest 为这个点选中的视图），故只做一次复核；
+        //     键位表里没有的键（九宫格空格条）就靠这一步找回正确位置。
+        //     这里刻意不复用第三支的「键区包围盒 ±8pt」约束 —— 那个包围盒来自键位表，
+        //     对「表里本来就没有的键」不成立。候选栏 / 工具条也不可能走到这里：
+        //     RKKeyboardEffectHost 撞到它们会直接放弃注入（整条链一点光都没有）。
+        CGRect button = RKKeyRectFromSourceView(sourceView, self.superview, point);
+        if (!CGRectIsNull(button) && CGRectContainsPoint(CGRectInset(button, -2, -2), point)) {
+            resolved = button; branch = 1; break;
+        }
+        // 三、微信也认不出（如原生键盘的触摸落在键缝）：回落最近键吸附。
+        //     仍须落在键区包围盒外扩 8pt 内，否则视为候选栏/工具条的误触发。
+        if (CGRectIsNull(self.keyBedBounds) ||
+            !CGRectContainsPoint(CGRectInset(self.keyBedBounds, -8, -8), point)) break;
+        CGRect nearest = CGRectNull;
+        CGFloat nearestDistance = CGFLOAT_MAX;
+        for (RKKeyRow *row in rows) {
+            CGFloat dy = 0;
+            if (point.y < CGRectGetMinY(row.bounds)) dy = CGRectGetMinY(row.bounds) - point.y;
+            else if (point.y > CGRectGetMaxY(row.bounds)) dy = point.y - CGRectGetMaxY(row.bounds);
+            // 吸附上限最松也只有 26pt：y 距离已经超出的行不可能产生更近的键，跳过整行。
+            if (dy > 26.0) continue;
+            NSInteger index = RKKeyRowNearestIndexAtX(row, point.x);
+            if (index == NSNotFound) continue;
+            CGRect rect = row.keys[index].CGRectValue;
+            CGFloat dx = 0;
+            if (point.x < CGRectGetMinX(rect)) dx = CGRectGetMinX(rect) - point.x;
+            else if (point.x > CGRectGetMaxX(rect)) dx = point.x - CGRectGetMaxX(rect);
+            CGFloat distance = hypot(dx, dy);
+            if (distance < nearestDistance) { nearestDistance = distance; nearest = rect; }
+        }
+        if (CGRectIsNull(nearest)) break;
+        CGFloat maxSnap = MIN(26.0, MAX(8.0, nearest.size.height * .6));
+        if (nearestDistance > maxSnap) break;
+        resolved = nearest; branch = 2;
+    } while (0);
+    // 2.3.29 临时诊断：每次按键记一条（前 60 条）。表内覆盖走单行摘要，其余写完整现场。
+    RKLogResolve(sourceView, self.superview, point, branch, resolved, self.keyFrames, self.keyBedBounds);
+    return resolved;
 }
 // Both effects live in the exposed keyboard bed. Neither outlines keycaps.
 // hue 由调用方统一推进（一拍一次），键底光效与轻弹因此共用同一色相。

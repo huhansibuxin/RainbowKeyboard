@@ -188,6 +188,9 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
     @autoreleasepool {
         // 系统 UI 进程不参与装饰（见 RKKeyboardProcessIsSystemUI），连总闸都不必维护。
         if (RKKeyboardProcessIsSystemUI()) return;
+        // 2.3.29 临时诊断（验完随下一版删除）：加载即落一条标记，用于区分
+        // 「诊断分支没走到」与「写盘通道不可用」这两件事。
+        RKHitLogMarkLoaded();
         RKDecorationRefresh();
         // block observer 的 token 必须持有，否则 ARC 下立即释放导致通知静默失效。
         static id decorationObserverTokens[2];
