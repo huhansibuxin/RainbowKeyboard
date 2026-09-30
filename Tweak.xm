@@ -48,8 +48,7 @@ static void RKDecorationPreferencesChanged(CFNotificationCenterRef center, void 
 @property(nonatomic) CGPoint point;
 @property(nonatomic) CFTimeInterval time, lastRendered;
 // 2.3.30：改强引用。UITouch.view 本身是 weak，九宫格末行那种「运行时合并出来」的键视图
-// 随时可能被重建；我们又在 dispatch_async 之后才用它，weak 很容易已经变 nil ——
-// 于是「微信命中」那一支拿不到视图，只能回落到最近键吸附（亮 7/8/9）。
+// 随时可能被重建；我们又在 dispatch_async 之后才用它，weak 很容易已经变 nil。
 @property(nonatomic, strong) UIView *source;
 // 更进一步：命中矩形在触摸发生的那一刻就算好并存成值类型，彻底不依赖视图生命周期。
 @property(nonatomic) CGRect sourceKeyRect;
@@ -200,9 +199,6 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
     @autoreleasepool {
         // 系统 UI 进程不参与装饰（见 RKKeyboardProcessIsSystemUI），连总闸都不必维护。
         if (RKKeyboardProcessIsSystemUI()) return;
-        // 2.3.29 临时诊断（验完随下一版删除）：加载即落一条标记，用于区分
-        // 「诊断分支没走到」与「写盘通道不可用」这两件事。
-        RKHitLogMarkLoaded();
         RKDecorationRefresh();
         // block observer 的 token 必须持有，否则 ARC 下立即释放导致通知静默失效。
         static id decorationObserverTokens[2];
