@@ -47,7 +47,12 @@ static void RKDecorationPreferencesChanged(CFNotificationCenterRef center, void 
 @interface RKPendingPress : NSObject
 @property(nonatomic) CGPoint point;
 @property(nonatomic) CFTimeInterval time, lastRendered;
-@property(nonatomic, weak) UIView *source;
+// 2.3.30：改强引用。UITouch.view 本身是 weak，九宫格末行那种「运行时合并出来」的键视图
+// 随时可能被重建；我们又在 dispatch_async 之后才用它，weak 很容易已经变 nil ——
+// 于是「微信命中」那一支拿不到视图，只能回落到最近键吸附（亮 7/8/9）。
+@property(nonatomic, strong) UIView *source;
+// 更进一步：命中矩形在触摸发生的那一刻就算好并存成值类型，彻底不依赖视图生命周期。
+@property(nonatomic) CGRect sourceKeyRect;
 @property(nonatomic) BOOL queued;
 @end
 @implementation RKPendingPress
@@ -108,6 +113,9 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
         pending.point = point;
         pending.time = CACurrentMediaTime();
         pending.source = touch.view;
+        // 触摸刚发生时 touch.view 一定有效 —— 就在此刻问一次「微信认为你按的是哪一块键」，
+        // 把结果存成矩形值类型。纯几何（几次 convertRect:），无分配、无字符串。
+        pending.sourceKeyRect = RKKeyRectForTouchView(touch.view, host, point);
         // Coalesce decoration only. Every original input event was already delivered.
         if (pending.queued) continue;
         pending.queued = YES;
@@ -126,6 +134,7 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
             if ((RKAdaptiveFastInput() || RKAdaptiveLevel() >= 2) && now - pending.lastRendered < .10) return;
             CGPoint touchPoint = pending.point;
             UIView *sourceView = pending.source;
+            CGRect touchKeyRect = pending.sourceKeyRect;
             RainbowEffectView *effect = objc_getAssociatedObject(liveHost, &RKOverlayKey);
             if (!effect) {
                 effect = [[RainbowEffectView alloc] initWithFrame:liveHost.bounds];
@@ -165,6 +174,9 @@ static void RKCollectExclusions(UIView *node, UIView *host, UIBezierPath *path, 
             CGPoint effectPoint = [liveHost convertPoint:touchPoint toView:effect];
             if (CACurrentMediaTime() - pending.time > .080) return;
             pending.lastRendered = CACurrentMediaTime();
+            // 命中矩形是触摸那一刻的快照（宿主坐标，与 effectPoint 同基准），
+            // 交给光效侧直接用，不再回头去问一个可能已经失效的视图。
+            effect.touchKeyRect = touchKeyRect;
             [effect showRippleAtPoint:effectPoint sourceView:sourceView];
         });
     }

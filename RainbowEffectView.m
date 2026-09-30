@@ -244,6 +244,13 @@ static CGRect RKKeyRectFromSourceView(UIView *source, UIView *host, CGPoint poin
     return CGRectNull;
 }
 
+// 2.3.30：给 Tweak.xm 在「触摸刚发生」那一刻调用的导出包装。
+// 那时 touch.view 一定有效；错过那一刻，九宫格末行这类运行时合并出来的键视图
+// 就可能已经被重建（UITouch.view 与我们的 pending 都持不住它）。
+CGRect RKKeyRectForTouchView(UIView *sourceView, UIView *host, CGPoint point) {
+    return RKKeyRectFromSourceView(sourceView, host, point);
+}
+
 // ---- 2.3.29 临时诊断（验完随下一版删除）--------------------------------------------
 // 目标：抓九宫格空格这一下 —— touch.view 的真实类名链、坐标系与键位表真实内容。
 // 上一版只在「微信命中且该矩形不在表里」这一窄条件下才写，结果设备上一个字节都没落，
@@ -316,7 +323,7 @@ void RKHitLogMarkLoaded(void) {
 // 只有 0 走单行摘要 —— 那是绝大多数正常按键，原逻辑逐位未动、无需现场；
 // 其余分支都写完整现场（落点、宿主、键区、微信命中结果、键位表内容、类名链）。
 static void RKLogResolve(UIView *source, UIView *host, CGPoint point, NSInteger branch,
-                         CGRect result, NSArray<NSValue *> *keyFrames, CGRect bed) {
+                         CGRect result, CGRect stored, NSArray<NSValue *> *keyFrames, CGRect bed) {
     if (branch == 0) { if (!RKHitLogSummaryLeft) return; }
     else if (!RKHitLogDetailLeft) return;
     CFTimeInterval now = CACurrentMediaTime();
@@ -339,6 +346,9 @@ static void RKLogResolve(UIView *source, UIView *host, CGPoint point, NSInteger 
         result.origin.x, result.origin.y, result.size.width, result.size.height];
     [text appendFormat:@"  host=%@  bed=%@\n",
         NSStringFromCGRect(host ? host.bounds : CGRectZero), NSStringFromCGRect(bed)];
+    // stored = 触摸那一刻存下来的「微信命中」矩形；若这里是 null 而非某个矩形，
+    // 说明连触摸发生的那一瞬都没认出来（那就是视图结构问题，不是生命周期问题）。
+    [text appendFormat:@"  stored=%@\n", NSStringFromCGRect(stored)];
     [text appendFormat:@"  keys(%lu) = ", (unsigned long)keyFrames.count];
     NSUInteger index = 0;
     for (NSValue *value in keyFrames) {
@@ -371,6 +381,7 @@ static void RKLogResolve(UIView *source, UIView *host, CGPoint point, NSInteger 
     if ((self = [super initWithFrame:frame])) {
         self.userInteractionEnabled = NO;
         self.backgroundColor = UIColor.clearColor;
+        _touchKeyRect = CGRectNull;
         self.clipsToBounds = YES;
         self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(reloadConfiguration) name:UIApplicationDidBecomeActiveNotification object:nil];
@@ -705,13 +716,17 @@ static void RKLogResolve(UIView *source, UIView *host, CGPoint point, NSInteger 
             if (area < pressedArea) { pressedArea = area; pressed = rect; }
         }
         if (!CGRectIsNull(pressed)) { resolved = pressed; branch = 0; break; }
-        // 二、落点不在任何键帽里：先采信微信自己的命中（见 RKKeyRectFromSourceView）。
-        //     它必然包含落点（touch.view 就是 hitTest 为这个点选中的视图），故只做一次复核；
+        // 二、落点不在任何键帽里：先采信微信自己的命中。
+        //     首选「触摸那一刻就存下来的矩形」（值类型，不受视图生命周期影响）；
+        //     它缺失时再回头问一次 sourceView（原生键盘等场景仍然有效）。
         //     键位表里没有的键（九宫格空格条）就靠这一步找回正确位置。
         //     这里刻意不复用第三支的「键区包围盒 ±8pt」约束 —— 那个包围盒来自键位表，
         //     对「表里本来就没有的键」不成立。候选栏 / 工具条也不可能走到这里：
         //     RKKeyboardEffectHost 撞到它们会直接放弃注入（整条链一点光都没有）。
-        CGRect button = RKKeyRectFromSourceView(sourceView, self.superview, point);
+        CGRect button = self.touchKeyRect;
+        if (CGRectIsNull(button) || CGRectIsEmpty(button)) {
+            button = sourceView ? RKKeyRectFromSourceView(sourceView, self.superview, point) : CGRectNull;
+        }
         if (!CGRectIsNull(button) && CGRectContainsPoint(CGRectInset(button, -2, -2), point)) {
             resolved = button; branch = 1; break;
         }
@@ -742,7 +757,8 @@ static void RKLogResolve(UIView *source, UIView *host, CGPoint point, NSInteger 
         resolved = nearest; branch = 2;
     } while (0);
     // 2.3.29 临时诊断：每次按键记一条（前 60 条）。表内覆盖走单行摘要，其余写完整现场。
-    RKLogResolve(sourceView, self.superview, point, branch, resolved, self.keyFrames, self.keyBedBounds);
+    RKLogResolve(sourceView, self.superview, point, branch, resolved, self.touchKeyRect,
+                 self.keyFrames, self.keyBedBounds);
     return resolved;
 }
 // Both effects live in the exposed keyboard bed. Neither outlines keycaps.
