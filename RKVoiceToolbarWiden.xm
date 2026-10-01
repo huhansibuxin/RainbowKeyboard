@@ -153,17 +153,31 @@ static BOOL RKVoiceIsVoiceButton(UIView *button) {
 static NSString * const RKVoiceDescText = @"点击说话";
 static char RKVoiceDescAppliedKey;
 
+// 2.3.35：由「一次性标记守卫」改为「按现状补」。
+// == 退化根因 ==
+// 在「定制工具栏 → 添加一个新按钮」的瞬间，微信会重新布局整个 _scrollView 的按钮集合，
+// 并对已存在的语音按钮调用 setShowDesc:NO（或等价的重置），把描述文字清掉。
+// 而旧实现用 associated object（RKVoiceDescAppliedKey）做「已注入过」的守卫——
+// 实例被复用、标记还在，于是直接 return、再也不补 ⇒ 退化成原生「只有麦克风」。
+// 实测：只点编辑（不添加按钮）不退化；添加按钮的那一瞬间退化；关掉键盘重开恢复。
+// 说明实例没坏，只是这一次重排把 showDesc 冲掉、被我们的乐观标记挡住了补救。
+//
+// == 为什么这样改也满足「最小 CPU」==
+// 判据只用 showDesc + descLabel 指针，两个都是直接返回 ivar 的 getter：
+// 稳态布局（showDesc==YES 且 label 存在）时第一行就 return —— 两次消息发送、零分配、零写，
+// 与旧的 associated object 读取基本持平；退化时才走下面的一次性补救分支。
+// 刻意**不查 [button desc] 文本**：那个 getter 若做字符串拼接，会在每轮布局里分配 NSString，
+// 属于纯白烧的分配（本项目一贯禁止）。
 static void RKVoiceApplyDescIfNeeded(WBToolBarButton *button) {
-    if (objc_getAssociatedObject(button, &RKVoiceDescAppliedKey)) return;
-    objc_setAssociatedObject(button, &RKVoiceDescAppliedKey, @YES,
-        OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if ([button showDesc] && [button descLabel]) return;
 
     [button setShowDesc:YES];
     [button setDesc:RKVoiceDescText];
     // setShowDesc: 若没顺手建出 label，这里补一次（方法不存在就跳过）。
     if (![button descLabel] && [button respondsToSelector:@selector(initDescLabelIfNeeded)])
         ((void (*)(id, SEL))objc_msgSend)(button, @selector(initDescLabelIfNeeded));
-    [button setNeedsLayout];
+    // 2.3.35：这里**不再** setNeedsLayout —— 本函数已在 layoutSubviews 路径内，
+    // 再请求一次布局会在布局过程中触发新一轮布局（布局连锁 = 唤键盘偶发卡顿的嫌疑点之一）。
 }
 
 #pragma mark - 图标 / 文字排布（两者靠拢成一组，整组在按钮里居中）
@@ -395,7 +409,14 @@ static void RKVoiceApplyAll(WBToolBarButton *button) {
     if (!RKVoiceWidenEnabled()) return;            // 偏好入口要拿锁，每轮只读这一次
 
     RKVoicePaintButton(button);
-    if (isVoice) RKVoiceArrangeContent(button);
+    if (isVoice) {
+        // 2.3.35：先确保 desc 存在，再排布。
+        // 退化根因（见 RKVoiceApplyDescIfNeeded 上方）：编辑/添加按钮时 layoutSubviews 先行，
+        // 此刻 showDesc 被微信重置为 NO，若直接进 ArrangeContent 会因 showDesc==NO 提前 return
+        // ⇒ 显示原生「只有麦克风」。这里每轮按现状补一次，补完再排布。
+        RKVoiceApplyDescIfNeeded(button);
+        RKVoiceArrangeContent(button);
+    }
 }
 
 #pragma mark - 工具栏容器收尾（整排底色 + 居中）
