@@ -151,7 +151,6 @@ static BOOL RKVoiceIsVoiceButton(UIView *button) {
 #pragma mark - 描述文字
 
 static NSString * const RKVoiceDescText = @"点击说话";
-static char RKVoiceDescAppliedKey;
 
 // 2.3.35：由「一次性标记守卫」改为「按现状补」。
 // == 退化根因 ==
