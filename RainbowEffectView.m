@@ -456,18 +456,13 @@ CGRect RKKeyRectForTouchView(UIView *sourceView, UIView *host, CGPoint point) {
         [[UIColor whiteColor] setFill];
         UIRectFill(CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds));
         CGContextSetBlendMode(context,kCGBlendModeClear);
-        BOOL nativeNine = [self usesNativeNineKeyBed];
+        // 2.3.34：切出「真实的圆角键帽形状」，而不是矩形 hit-test frame。
+        // 矩形挖孔会在底光扩散时于每个键帽四角漏出方形/三角阴影。
+        // 上游 mowang7426/jianpan 提交 57e23d3 同款修复。
         if (!nativeFaces) for (NSValue *value in self.keyFrames) {
-            if (nativeNine) {
-                // Native hit cells can tile the whole bed, including gutters.
-                // Use the project's inset key-face model (2pt vertical,
-                // up to 2.5pt horizontal), keeping the central face opaque.
-                UIBezierPath *face = RKKeyboardKeyFacePath(value.CGRectValue);
-                CGContextAddPath(context,face.CGPath);
-                CGContextFillPath(context);
-            } else {
-                CGContextFillRect(context,value.CGRectValue);
-            }
+            UIBezierPath *face = RKKeyboardKeyFacePath(value.CGRectValue);
+            CGContextAddPath(context,face.CGPath);
+            CGContextFillPath(context);
         }
         self.underlightMaskImage = UIGraphicsGetImageFromCurrentImageContext();
         UIGraphicsEndImageContext();
@@ -787,18 +782,13 @@ CGRect RKKeyRectForTouchView(UIView *sourceView, UIView *host, CGPoint point) {
         [[UIColor whiteColor] setFill];
         UIRectFill(CGRectIntersection(CGRectInset(bed,-3,-4),self.bounds));
         CGContextSetBlendMode(context,kCGBlendModeClear);
-        BOOL nativeNine = [self usesNativeNineKeyBed];
+        // 2.3.34：切出「真实的圆角键帽形状」，而不是矩形 hit-test frame。
+        // 矩形挖孔会在底光扩散时于每个键帽四角漏出方形/三角阴影。
+        // 上游 mowang7426/jianpan 提交 57e23d3 同款修复。
         if (!nativeFaces) for (NSValue *value in self.keyFrames) {
-            if (nativeNine) {
-                // Native hit cells can tile the whole bed, including gutters.
-                // Use the project's inset key-face model (2pt vertical,
-                // up to 2.5pt horizontal), keeping the central face opaque.
-                UIBezierPath *face = RKKeyboardKeyFacePath(value.CGRectValue);
-                CGContextAddPath(context,face.CGPath);
-                CGContextFillPath(context);
-            } else {
-                CGContextFillRect(context,value.CGRectValue);
-            }
+            UIBezierPath *face = RKKeyboardKeyFacePath(value.CGRectValue);
+            CGContextAddPath(context,face.CGPath);
+            CGContextFillPath(context);
         }
         self.underlightMaskImage = UIGraphicsGetImageFromCurrentImageContext();
         UIGraphicsEndImageContext();
