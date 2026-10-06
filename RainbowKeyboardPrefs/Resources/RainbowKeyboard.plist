@@ -110,7 +110,7 @@
 			<key>label</key>
 			<string>轻弹与光效同色</string>
 			<key>default</key>
-			<true/>
+			<false/>
 			<key>defaults</key>
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>

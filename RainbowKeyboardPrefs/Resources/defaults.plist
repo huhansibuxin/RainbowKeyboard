@@ -12,7 +12,7 @@
     Opacity = 0.7991349101066589;
     RippleEnabled = 1;
     LightPop = 1;
-    LightPopMatchColor = 1;
+    LightPopMatchColor = 0;
     LightPopFollowAppearance = 1;
     PressBrightness = 0.6;
     Duration = 0.45;

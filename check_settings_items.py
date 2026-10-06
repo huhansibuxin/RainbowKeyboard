@@ -32,7 +32,8 @@ DEFAULT_PLISTS = [ROOT / "defaults.plist", RESOURCES / "defaults.plist"]
 
 # 本次新增/改动的键：plist 键 -> 期望的默认值
 # 2.3.34：轻弹与「跟随系统深浅色」默认改为开（浅色上色、深色不上色）。
-LIGHT_POP_KEYS = {"LightPop": True, "LightPopMatchColor": True,
+# 2.3.36：「轻弹与光效同色」默认改为关（轻弹走自己的取色）。
+LIGHT_POP_KEYS = {"LightPop": True, "LightPopMatchColor": False,
                   "LightPopFollowAppearance": True}
 PRESS_BRIGHTNESS_KEY = "PressBrightness"
 PRESS_BRIGHTNESS_DEFAULT = 0.6

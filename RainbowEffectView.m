@@ -724,10 +724,12 @@ CGRect RKKeyRectForTouchView(UIView *sourceView, UIView *host, CGPoint point) {
     // 轻弹自己的色相照常推进：关掉「与光效同色」后接着用，行为与旧版一致。
     self.pressHue = fmod(self.pressHue + .38196601125, 1);
     BOOL single = [self number:@"PressColorMode" fallback:0 low:0 high:1] == 1;
-    // 默认同色（键缺失即同色）：直接用本拍键底光效的色相，两种效果对上色；
-    // 亮度仍由「键帽灯光亮度」单独决定，所以键帽会比键底暗一档。
-    BOOL matchGlow = !self.config[@"LightPopMatchColor"] ||
-        [self.config[@"LightPopMatchColor"] boolValue];
+    // 2.3.36：默认不同色（原为「键缺失即同色」——那条兜底会让任何一次漏传该键
+    // 又悄悄回到同色）。本键既有固化表兜底、又走跨进程位协议（words[5] 位 2/3），
+    // 正常情况下 config 里一定有值；这里把「缺失」与「显式 0」统一按不同色处理。
+    // 不同色时：多色模式按键推进 pressHue 走彩虹、单色模式取「键帽颜色」；
+    // 同色时：直接用本拍键底光效的色相，亮度仍由「键帽灯光亮度」单独决定。
+    BOOL matchGlow = [self.config[@"LightPopMatchColor"] boolValue];
     UIColor *color = matchGlow ?
         [UIColor colorWithHue:hue saturation:[self neonSaturation:1] brightness:1 alpha:1] :
         (single ? RKKeyboardColor(self.config, @"PressColor") :
