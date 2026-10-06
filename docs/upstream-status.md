@@ -162,26 +162,55 @@ gh api "repos/mowang7426/jianpan/compare/850a5b2...main" --jq '{ahead:.ahead_by,
 
 ## 六、2026-10-06 续更：上游又推 10 条（`101b092` → `5c1a421`）
 
-主题 = **新增四种可选键盘光效**，改动仍集中在 `RainbowEffectView.m`（+105/−1）与
-设置页 `RKBRootListController.m`（+5/−5）。
+主题 = **新增可选键盘光效**。净效果：**设置页从 4 项扩到 7 项**，但新增的方法里
+**只有 3 个真正接了线**，另 **2 个写完被弃用、留在代码里（零调用）**。
+改动仍集中在 `RainbowEffectView.m`（+106/−1）与设置页 `RKBRootListController.m`（+5/−5）。
 
 | commit | 说明 |
 |---|---|
 | `9d91287` | Add four selectable keyboard lighting effects |
 | `2766ee2` / `a0b481a` / `650ccaf` | Redesign / Preserve legacy / Keep legacy and isolate new styles |
 | `e4255f5` | Reduce new lighting layer buildup |
-| `1c30bac` / `d4beec3` | Fix star flow syntax / Replace final lighting effects with bottom spread |
+| `1c30bac` / `d4beec3` | Fix star flow syntax / **Replace final lighting effects with bottom spread** |
 | `b3acc56` | Fix Objective-C key frame type inference |
 | `98161cc` | **Remove duplicate key hit helper** |
 | `5c1a421` | Remove local effect rewrite scripts |
 
-新增的几个方法（全部以它自己的 `- (CGRect)pressedKeyAtPoint:` 为入口）：
+### 设置页选项（`RKBRootListController.m:300`）
 
-- `showGapFlowAtPoint:`（键缝星流）
-- `showAmbientBedAtPoint:`（极光底部流动）
-- `showMechanicalWaveAtPoint:`（机械波双环）
-- `showEmberTrailAtPoint:`（余烬轨迹）
-- `showKeyBottomSpreadAtPoint:`（键底扩散，最终保留的那一支）
+```
+options: @[@"波纹",  @"扩散", @"轻弹", @"流光底韵", @"RGB 底板氛围", @"机械波", @"键底扩散"]
+values:  @[@0,      @1,     @2,     @3,          @4,             @5,     @6]
+```
+
+分派入口：`showRippleAtPoint:sourceView:` 里三行 early return —
+`style==4 → showAmbientBedAtPoint:` / `style==5 → showMechanicalWaveAtPoint:` /
+`style==6 → showKeyBottomSpreadAtPoint:`；且 `EffectStyle` 上限从 `high:3` 提到 **`high:6`**。
+
+### 3 个新接线的方法
+
+| 方法 | 层名 | 做法要点 |
+|---|---|---|
+| `showAmbientBedAtPoint:`（RGB 底板氛围） | `RKNewAmbientBed` | 不是从按键扩散：一条**宽 3 倍屏宽**的横向渐变（5 段 `.0/.18/.82/.12/.0`）从 `−.55w` 滑到 `+1.55w`，遮罩 `waveUnderCapMask`；色相只推进 .09 |
+| `showMechanicalWaveAtPoint:`（机械波） | `RKNewMechanicalWave` | 从按键**底部中心**发两个同心圆环：外环 lineWidth 15 / alpha .24、内环 3.2 / .9（粗柔 + 细锐双层）；半径 = clamp(`BackgroundRadius`, 85, 190) |
+| `showKeyBottomSpreadAtPoint:`（键底扩散） | `RKKeyBottomSpread` | 从 `(midX, maxY+2)` 发**径向渐变**（`.95/.62/.18/0`），`transform.scale` 从 .035 → 1.0；起点另画一条胶囊发光短线（宽 = 键宽×.72，带 shadow） |
+
+### 2 个零调用的死方法（上游忘了删）
+
+- `showGapFlowAtPoint:`（星流，层名 `RKKeyGapFlow`）：按键周围**按距离取最近 9 个键**，
+  逐点延迟 .055s 脉冲闪烁。
+- `showEmberTrailAtPoint:`（余烬，层名 `RKNewEmberTrail`）：按距离取最近 **7** 个键中心
+  连成折线，用 `strokeEnd` 0→1「画」出轨迹。
+
+两处 `git grep '\[self showGapFlowAtPoint'` / `showEmberTrailAtPoint` 均为 **0 命中** ⇒
+`d4beec3 Replace final lighting effects with bottom spread` 换掉最后一种时没清前两种
+（`5c1a421` 只删了本地重写脚本）。**我们合上游时可以不带这两个。**
+
+### 另新增「日间/夜间光效」两个设置项（非光效，但影响观感）
+
+`LightEffectStyle`（日间光效，默认 2）/ `DarkEffectStyle`（夜间光效，默认 1）
+⇒ 深浅色模式各自指定风格。这正是上游新增 `traitCollectionDidChange:` 的原因
+（与我们 2.3.31 写同名方法的目的一样，但职责不同 —— 那个负责 `effectiveLightPop`）。
 
 **对我们的影响评估：**
 
@@ -192,5 +221,8 @@ gh api "repos/mowang7426/jianpan/compare/850a5b2...main" --jq '{ahead:.ahead_by,
 - ⚠️ `98161cc Remove duplicate key hit helper` 删的是**上游自己**的两个重复 helper，
   与我们 2.3.33 已删的兜底无关。
 - ⚠️ 这些新光效若将来要合，需注意它们与我们 `RKEvictLayersByName` 图层驱逐体系、
-  以及 `EffectStyle` 取值集合（我们校验只认 0/1/3）会冲突 —— 上游很可能把 style 扩到 4/5/6。
+  以及 `EffectStyle` 取值集合（我们校验只认 0/1/3）会冲突 —— 上游已把 style 扩到 4/5/6。
   `check_settings_items.py` 的 `check_effect_style` 会因此报错，合入时必须同步放宽。
+- ℹ️ 上游新增的这几个都自带「每次按键先删同名层」的写法（`for (...) if (name isEqual) removeFromSuperlayer`），
+  与我们「按名分组驱逐 `RKEvictLayersByName`」是两套并行机制；合入时应改走我们的驱逐器，
+  否则会绕过 `MaxEffects` 上限。
