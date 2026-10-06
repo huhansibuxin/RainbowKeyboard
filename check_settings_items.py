@@ -31,8 +31,9 @@ PREFS_HEADER = ROOT / "RKPreferences.h"
 DEFAULT_PLISTS = [ROOT / "defaults.plist", RESOURCES / "defaults.plist"]
 
 # 本次新增/改动的键：plist 键 -> 期望的默认值
-LIGHT_POP_KEYS = {"LightPop": False, "LightPopMatchColor": True,
-                  "LightPopFollowAppearance": False}
+# 2.3.34：轻弹与「跟随系统深浅色」默认改为开（浅色上色、深色不上色）。
+LIGHT_POP_KEYS = {"LightPop": True, "LightPopMatchColor": True,
+                  "LightPopFollowAppearance": True}
 PRESS_BRIGHTNESS_KEY = "PressBrightness"
 PRESS_BRIGHTNESS_DEFAULT = 0.6
 

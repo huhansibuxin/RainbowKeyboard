@@ -69,7 +69,9 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
                                                                 cell:PSSwitchCell
                                                                 edit:nil];
         [rebuilt setProperty:@"LightPopFollowAppearance" forKey:@"key"];
-        [rebuilt setProperty:@NO forKey:@"default"];
+        // 2.3.34：默认值改为开，与 plist / 两份 defaults.plist / RKPreferences.h 固化表一致
+        //（此前是 @NO，注销后四者互相印证为「关」，导致浅色模式也不上色）。
+        [rebuilt setProperty:@YES forKey:@"default"];
         [rebuilt setProperty:@"com.minis.rainbowkeyboard" forKey:@"defaults"];
         [rebuilt setProperty:kRKChangedNotification forKey:@"PostNotification"];
         [rebuilt setProperty:@YES forKey:@"rkRebuilt"];

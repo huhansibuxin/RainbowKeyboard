@@ -96,7 +96,7 @@
 			<key>label</key>
 			<string>轻弹（键帽上色）</string>
 			<key>default</key>
-			<false/>
+			<true/>
 			<key>defaults</key>
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>
@@ -124,7 +124,7 @@
 			<key>label</key>
 			<string>跟随系统深浅色</string>
 			<key>default</key>
-			<false/>
+			<true/>
 			<key>defaults</key>
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>
