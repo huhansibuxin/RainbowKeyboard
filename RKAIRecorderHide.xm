@@ -12,24 +12,46 @@
 //     <UILabel: text='轻触结束'>                    ← 右侧提示（保留）
 //     <WBVoiceInputWaveformView: 145x36>            ← 波形（保留）
 // WBVoiceRecorderIconView 是另一套东西（super=UIView，方法 initWithResourcePrefix: /
-// setRecording: / refreshAppearance，内部是 Lottie），不是面板胶囊，故不再动它。
+// setRecording: / refreshAppearance，内部是 Lottie），不是面板胶囊。
+// ⚠️ 2.3.38 对它的 hook 已在 2.3.39 整段删除，不要再加回来。
 //
-// == 本期做法（2.3.39） ==
-// 在 WBVoiceInputInteractionModernView 布局后，递归扫直接子视图，凡「子视图里有
-// UILabel 且文本含『录音笔』」的容器就整体 hidden + alpha 0 + 禁交互。
-// 不依赖 WBButton 类名（微信改类名也不失效），宽度 <260pt 排除整块容器。
-// 「轻触结束」/波形/搜索按钮均不受影响。
+// == 现行做法（2.3.39 / 2.3.40） ==
+// 1) 在 WBVoiceInputInteractionModernView 的 didMoveToWindow + layoutSubviews 后，
+//    找「子视图里有 UILabel 且文本含『录音笔』」的容器（实测是 91x28 的 WBButton），
+//    整体 hidden + alpha 0 + 禁交互。不依赖 WBButton 类名，宽度 <260pt 防误伤。
+// 2) 2.3.40：命中结果缓存到 panel 的 associated object（强引用，panel 持有子树，
+//    无循环），后续布局 O(1) 直接写属性，不再每次递归 + 字符串匹配。
+//    缓存对象被移出视图树（superview == nil）时自动回退重扫。
+// 3) 调试日志受设置项 AIRecorderLog 控制，且受总开关 Enabled 制约：
+//    Enabled 关 或 AIRecorderLog 关 ⇒ RKAILog 第一行就 return，不 fopen、不写盘。
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import "RKPreferences.h"
 
-#pragma mark - 日志（沙盒 tmp，SSH 直接 cat）
+#pragma mark - 日志开关（受「启用键盘光效」总控）
+
+static BOOL RKAILogEnabledFlag = NO;
+
+static void RKAILogRefresh(void) {
+    NSDictionary *prefs = RKReadEffectivePreferences();
+    id enabled = prefs[@"Enabled"];
+    RKAILogEnabledFlag = (!enabled || [enabled boolValue])
+        && [prefs[@"AIRecorderLog"] boolValue];
+}
+
+static void RKAILogPreferencesChanged(CFNotificationCenterRef center, void *observer,
+                                      CFStringRef name, const void *object, CFDictionaryRef info) {
+    dispatch_async(dispatch_get_main_queue(), ^{ RKAILogRefresh(); });
+}
 
 static NSString *RKAILogPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"rk_ai.log"];
 }
 
 static void RKAILog(NSString *fmt, ...) {
+    // 关闭时连字符串格式化都不做：这是 layoutSubviews 路径上唯一的额外开销。
+    if (!RKAILogEnabledFlag) return;
     va_list ap;
     va_start(ap, fmt);
     NSString *line = [[NSString alloc] initWithFormat:fmt arguments:ap];
@@ -40,56 +62,45 @@ static void RKAILog(NSString *fmt, ...) {
     fclose(fp);
 }
 
-static void RKAIDumpClass(NSString *name) {
-    Class cls = NSClassFromString(name);
-    if (!cls) {
-        RKAILog(@"[dump] %@ NOT FOUND", name);
-        return;
-    }
-    Class sup = class_getSuperclass(cls);
-    RKAILog(@"[dump] class %@  super=%@", name, sup ? NSStringFromClass(sup) : @"-");
-    unsigned int n = 0;
-    Method *list = class_copyMethodList(cls, &n);
-    for (unsigned int i = 0; i < n; i++) {
-        RKAILog(@"    - %s", sel_getName(method_getName(list[i])));
-    }
-    free(list);
-}
+#pragma mark - 胶囊定位（缓存 + 回退重扫）
 
-#pragma mark - 胶囊定位
-
+static const void *RKAICapsuleKey = &RKAICapsuleKey;
 static NSInteger RKAICapsuleHitCount = 0;
 static NSInteger RKAIPanelDumpCount = 0;
 
-// 返回 YES 表示本层及以下找到并隐藏了胶囊。
-static BOOL RKAIHideCapsule(UIView *node, int depth) {
-    if (depth > 4) return NO;
-    BOOL hit = NO;
+// 只在缓存失效时走这里：深度 <=4，实测胶囊是 panel 的直接子视图。
+static UIView *RKAIFindCapsule(UIView *node, int depth) {
+    if (depth > 4) return nil;
     for (UIView *v in node.subviews) {
-        BOOL isCapsule = NO;
         for (UIView *s in v.subviews) {
             if ([s isKindOfClass:[UILabel class]] &&
                 [((UILabel *)s).text containsString:@"录音笔"]) {
-                isCapsule = YES;
-                break;
+                // 宽度上限排除整块容器，避免误伤；胶囊实测 91pt。
+                return v.bounds.size.width < 260 ? v : nil;
             }
         }
-        // 宽度上限排除整块容器，避免误伤；胶囊实测 91pt。
-        if (isCapsule && v.bounds.size.width < 260) {
-            v.hidden = YES;
-            v.alpha = 0.0;
-            v.userInteractionEnabled = NO;
-            hit = YES;
-            if (RKAICapsuleHitCount < 5) {
-                RKAICapsuleHitCount++;
-                RKAILog(@"[capsule] hidden %@ frame=%@",
-                        NSStringFromClass(v.class), NSStringFromCGRect(v.frame));
-            }
-            continue;
-        }
-        if (RKAIHideCapsule(v, depth + 1)) hit = YES;
+        UIView *found = RKAIFindCapsule(v, depth + 1);
+        if (found) return found;
     }
-    return hit;
+    return nil;
+}
+
+static void RKAIHideCapsule(UIView *panel) {
+    UIView *capsule = objc_getAssociatedObject(panel, RKAICapsuleKey);
+    if (!capsule || !capsule.superview) {
+        capsule = RKAIFindCapsule(panel, 0);
+        if (!capsule) return;
+        // 强引用：panel 是语音面板根视图，生命周期覆盖胶囊；胶囊不反向持有 panel。
+        objc_setAssociatedObject(panel, RKAICapsuleKey, capsule, OBJC_ASSOCIATION_RETAIN);
+        if (RKAICapsuleHitCount < 5) {
+            RKAICapsuleHitCount++;
+            RKAILog(@"[capsule] hidden %@ frame=%@",
+                    NSStringFromClass(capsule.class), NSStringFromCGRect(capsule.frame));
+        }
+    }
+    capsule.hidden = YES;
+    capsule.alpha = 0.0;
+    capsule.userInteractionEnabled = NO;
 }
 
 %hook WBVoiceInputInteractionModernView
@@ -97,19 +108,18 @@ static BOOL RKAIHideCapsule(UIView *node, int depth) {
 - (void)layoutSubviews {
     %orig;
     UIView *panel = (UIView *)self;
-    if (panel.window) RKAIHideCapsule(panel, 0);
+    if (panel.window) RKAIHideCapsule(panel);
 }
 
 - (void)didMoveToWindow {
     %orig;
     UIView *panel = (UIView *)self;
     if (!panel.window) return;
-    RKAIHideCapsule(panel, 0);
+    RKAIHideCapsule(panel);
     if (RKAIPanelDumpCount < 2) {
         RKAIPanelDumpCount++;
         RKAILog(@"[panel] modern view #%ld frame=%@",
                 (long)RKAIPanelDumpCount, NSStringFromCGRect(panel.frame));
-        RKAILog(@"[panel] subviews:");
         for (UIView *v in panel.subviews) {
             RKAILog(@"    %@ frame=%@ hidden=%d",
                     NSStringFromClass(v.class), NSStringFromCGRect(v.frame), v.hidden);
@@ -121,11 +131,12 @@ static BOOL RKAIHideCapsule(UIView *node, int depth) {
 
 %ctor {
     @autoreleasepool {
-        RKAILog(@"==== RKAIRecorderHide 2.3.39 loaded, bundle=%@ ====",
-                [[NSBundle mainBundle] bundleIdentifier]);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            RKAIDumpClass(@"WBVoiceInputInteractionModernView");
-        });
+        RKAILogRefresh();
+        // 设置页改动（含总开关）后刷新日志总闸；Darwin 通知跨进程，进程内立即可见。
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+            RKAILogPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
+        RKAILog(@"==== RKAIRecorderHide 2.3.40 loaded, bundle=%@, logPath=%@ ====",
+                [[NSBundle mainBundle] bundleIdentifier], RKAILogPath());
     }
 }

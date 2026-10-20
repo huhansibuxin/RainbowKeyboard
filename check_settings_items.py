@@ -38,6 +38,11 @@ LIGHT_POP_KEYS = {"LightPop": True, "LightPopMatchColor": False,
 PRESS_BRIGHTNESS_KEY = "PressBrightness"
 PRESS_BRIGHTNESS_DEFAULT = 0.6
 
+# 2.3.40：AI 录音笔诊断日志开关。默认关；footer 必须写出日志路径。
+AI_LOG_KEY = "AIRecorderLog"
+AI_LOG_DEFAULT = False
+AI_LOG_PATH_HINT = "rk_ai.log"
+
 # 「跟随系统深浅色」：plist 里是定义项，实际显示的是控制器重建后的 specifier，
 # 两处标题必须一致（下面按这个名字做一致性断言）。
 FOLLOW_KEY = "LightPopFollowAppearance"
@@ -72,6 +77,19 @@ def check_panels(errors):
         if not isinstance(default, float) or abs(default - PRESS_BRIGHTNESS_DEFAULT) > 1e-9:
             errors.append("%s 的 default 应为 %.2f，实为 %r" % (PRESS_BRIGHTNESS_KEY, PRESS_BRIGHTNESS_DEFAULT, default))
 
+    logs = find_items(main, "PSSwitchCell", AI_LOG_KEY)
+    if not logs:
+        errors.append("主面板缺少开关 %s（应为 PSSwitchCell）" % AI_LOG_KEY)
+    elif bool(logs[0].get("default")) != AI_LOG_DEFAULT:
+        errors.append("%s 的 default 应为 %s，实为 %r" % (AI_LOG_KEY, AI_LOG_DEFAULT, logs[0].get("default")))
+
+    log_groups = [i for i in main
+                  if i.get("cell") == "PSGroupCell" and i.get("label") == "调试日志"]
+    if not log_groups:
+        errors.append("主面板缺少「调试日志」分组（footer 要写日志路径）")
+    elif AI_LOG_PATH_HINT not in (log_groups[0].get("footerText") or ""):
+        errors.append("「调试日志」分组的 footerText 未写日志路径（应含 %s）" % AI_LOG_PATH_HINT)
+
 
 def openstep_keys(path):
     """两份 defaults.plist 是 OpenStep 文本格式（不是 XML），按 `键 = 值;` 抽键名。"""
@@ -80,7 +98,7 @@ def openstep_keys(path):
 
 
 def check_defaults(errors):
-    keys = list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY]
+    keys = list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY]
     texts = []
     for path in DEFAULT_PLISTS:
         if not path.is_file():
@@ -105,7 +123,7 @@ def check_defaults(errors):
 
 def check_self_use_table(errors):
     src = PREFS_HEADER.read_text(encoding="utf-8")
-    for key in list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY]:
+    for key in list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY]:
         if not re.search(r'@"%s"\s*:' % re.escape(key), src):
             errors.append("RKPreferences.h 固化表缺少键 %s（键盘进程回落会出错值）" % key)
 

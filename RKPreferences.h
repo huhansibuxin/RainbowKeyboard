@@ -47,6 +47,9 @@ static inline NSDictionary *RKPresetSelfUseTable(void) {
             @"NativeKeyboard": @(0),
             @"WeChatKeyboard": @(1),
             @"RippleEnabled": @(1),
+            // 2.3.40：AI 录音笔诊断日志开关，默认关。受 Enabled 总控，两者任一关闭即不写盘。
+            // 固化表需要它，否则注销后键盘进程读不到偏好文件，日志开关会回落成「开」。
+            @"AIRecorderLog": @(0),
             // 轻弹（键帽上色）自 2.3.24 起是独立开关，可与光效风格同时开。
             // 2.3.34 起默认开（原为 0）：此前注销后本表回落为「关」，浅色模式也不上色，
             // 与用户常用场景（白天上色）相反。键帽快照的额外开销只在按键时发生一次。

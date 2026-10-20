@@ -199,6 +199,30 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
+			<string>调试日志</string>
+			<key>footerText</key>
+			<string>开启后，键盘扩展会把「AI 录音笔」相关诊断信息写入：
+/var/mobile/Containers/Data/PluginKitPlugin/*/tmp/rk_ai.log
+关闭本开关、或关闭「启用键盘光效」时，不写任何日志。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>key</key>
+			<string>AIRecorderLog</string>
+			<key>label</key>
+			<string>记录调试日志</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
 			<string>更多</string>
 		</dict>
 		<dict>

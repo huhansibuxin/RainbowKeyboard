@@ -11,6 +11,7 @@
     Brightness = 1.0;
     Opacity = 0.7991349101066589;
     RippleEnabled = 1;
+    AIRecorderLog = 0;
     LightPop = 1;
     LightPopMatchColor = 0;
     LightPopFollowAppearance = 1;
