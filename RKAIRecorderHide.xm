@@ -119,14 +119,16 @@ static NSInteger RKAIPanelDumpCount = 0;
 
 - (void)didMoveToWindow {
     %orig;
+    // Logos 只给 hook 类做前置声明，self 的静态类型不是 UIView，必须先强转。
+    UIView *icon = (UIView *)self;
     // 出现即隐藏（不 removeFromSuperview，避免 Swift 侧持有关系被破坏）。
-    self.hidden = YES;
-    self.alpha = 0.0;
-    self.userInteractionEnabled = NO;
-    RKAIDumpViewChain(self, @"WBVoiceRecorderIconView didMoveToWindow");
+    icon.hidden = YES;
+    icon.alpha = 0.0;
+    icon.userInteractionEnabled = NO;
+    RKAIDumpViewChain(icon, @"WBVoiceRecorderIconView didMoveToWindow");
     // 「AI 录音笔」胶囊 = 图标视图 + 文案，外层通常是一个 UIControl。若图标外面就套着
     // 一个窄的 UIControl（<220pt，排除整条顶部栏），连它一起隐藏，避免只剩文字。
-    UIView *sv = self.superview;
+    UIView *sv = icon.superview;
     if (sv && [sv isKindOfClass:UIControl.class] && sv.bounds.size.width < 220) {
         sv.hidden = YES;
         sv.alpha = 0.0;
@@ -135,7 +137,7 @@ static NSInteger RKAIPanelDumpCount = 0;
     }
     RKAILog(@"[icon] superview=%@  bounds=%@  self=%@",
             NSStringFromClass(sv.class), sv ? NSStringFromCGRect(sv.bounds) : @"-",
-            NSStringFromCGRect(self.bounds));
+            NSStringFromCGRect(icon.bounds));
 }
 
 - (void)setHidden:(BOOL)hidden {
@@ -153,13 +155,14 @@ static NSInteger RKAIPanelDumpCount = 0;
 
 - (void)didMoveToWindow {
     %orig;
-    if (self.window && RKAIPanelDumpCount < 3) {
+    UIView *panel = (UIView *)self;
+    if (panel.window && RKAIPanelDumpCount < 3) {
         RKAIPanelDumpCount++;
         RKAILog(@"[panel] WBVoiceInputInteractionModernView #%ld frame=%@",
-                (long)RKAIPanelDumpCount, NSStringFromCGRect(self.frame));
-        RKAIDumpViewChain(self, @"panel chain");
+                (long)RKAIPanelDumpCount, NSStringFromCGRect(panel.frame));
+        RKAIDumpViewChain(panel, @"panel chain");
         RKAILog(@"[panel] recursiveDescription BEGIN");
-        RKAILog(@"%@", [self performSelector:@selector(recursiveDescription)]);
+        RKAILog(@"%@", [panel performSelector:@selector(recursiveDescription)]);
         RKAILog(@"[panel] recursiveDescription END");
     }
 }
