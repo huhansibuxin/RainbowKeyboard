@@ -26,7 +26,7 @@ static inline NSArray<NSString *> *RKDisplayKeys(void) {
     return [[[[RKDisplayNumbers() arrayByAddingObjectsFromArray:RKDisplayFlags()]
         arrayByAddingObjectsFromArray:RKDisplayColors()]
         arrayByAddingObjectsFromArray:@[@"PressColorMode", @"PressBrightness", @"PressColor", @"Theme", @"SmartPerformance", @"KeyboardLock", @"LightPop", @"LightPopFollowAppearance"]]
-        arrayByAddingObjectsFromArray:@[@"WidenVoiceButton", @"AIRecorderLog"]];
+        arrayByAddingObjectsFromArray:@[@"WidenVoiceButton", @"AIRecorderLog", @"VoiceNoJumpTrial"]];
 }
 static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[RKDisplayWordCount]) {
     memset(words, 0, RKDisplayWordCount * sizeof(uint64_t));
@@ -142,6 +142,14 @@ static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[R
         words[5] |= UINT64_C(1) << 6;
         if ([aiLog boolValue]) words[5] |= UINT64_C(1) << 7;
     }
+    // 2.3.45：语音免跳转实验开关。同样必须走本通道 —— 判定发生在键盘扩展进程内，
+    // 读不到 plist 就只能回落固化表，实验开关会永远停留在默认（关）。
+    // 位 8/9 = VoiceNoJumpTrial（存在 / 值）。
+    id noJump = prefs[@"VoiceNoJumpTrial"];
+    if ([noJump isKindOfClass:NSNumber.class]) {
+        words[5] |= UINT64_C(1) << 8;
+        if ([noJump boolValue]) words[5] |= UINT64_C(1) << 9;
+    }
 }
 static inline uint64_t RKDisplayChecksum(const uint64_t words[RKDisplayWordCount]) {
     uint64_t hash = UINT64_C(14695981039346656037);
@@ -199,6 +207,7 @@ static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDispl
     if (words[5] & (UINT64_C(1) << 2)) result[@"LightPopMatchColor"] = @((words[5] >> 3) & 1);
     if (words[5] & (UINT64_C(1) << 4)) result[@"LightPopFollowAppearance"] = @((words[5] >> 5) & 1);
     if (words[5] & (UINT64_C(1) << 6)) result[@"AIRecorderLog"] = @((words[5] >> 7) & 1);
+    if (words[5] & (UINT64_C(1) << 8)) result[@"VoiceNoJumpTrial"] = @((words[5] >> 9) & 1);
     return result;
 }
 static inline int RKDisplayToken(NSUInteger index) {

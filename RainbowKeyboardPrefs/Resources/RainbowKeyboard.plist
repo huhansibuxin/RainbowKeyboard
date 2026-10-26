@@ -199,6 +199,29 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
+			<string>语音免跳转（实验）</string>
+			<key>footerText</key>
+			<string>默认关闭。开启后，即使主 App 处于后台无音频状态，键盘也不再跳转，而是尝试在自己进程内直接开始录音。
+开启前请打开「记录调试日志」以便定位（日志见下方路径）。若开启后点语音没反应或键盘卡住，请关掉本开关并告诉我。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>key</key>
+			<string>VoiceNoJumpTrial</string>
+			<key>label</key>
+			<string>点语音不跳主 App</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
 			<string>调试日志</string>
 			<key>footerText</key>
 			<string>开启后，键盘扩展会把诊断信息写入：

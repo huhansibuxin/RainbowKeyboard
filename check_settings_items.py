@@ -44,6 +44,11 @@ AI_LOG_KEY = "AIRecorderLog"
 AI_LOG_DEFAULT = False
 AI_LOG_PATH_HINTS = ("rk_ai.log", "rk_voice.log")
 
+# 2.3.45：语音免跳转实验开关。默认必须为关（关 = 官方行为，点语音照旧跳主 App）。
+# 这个开关要参与键盘进程内的判据，因此同样必须同时存在于两份 defaults 与固化表。
+NO_JUMP_KEY = "VoiceNoJumpTrial"
+NO_JUMP_DEFAULT = False
+
 # 「跟随系统深浅色」：plist 里是定义项，实际显示的是控制器重建后的 specifier，
 # 两处标题必须一致（下面按这个名字做一致性断言）。
 FOLLOW_KEY = "LightPopFollowAppearance"
@@ -92,6 +97,13 @@ def check_panels(errors):
         missing = [h for h in AI_LOG_PATH_HINTS if h not in (log_groups[0].get("footerText") or "")]
         errors.append("「调试日志」分组的 footerText 未写全日志路径（缺 %s）" % ", ".join(missing))
 
+    trials = find_items(main, "PSSwitchCell", NO_JUMP_KEY)
+    if not trials:
+        errors.append("主面板缺少开关 %s（应为 PSSwitchCell）" % NO_JUMP_KEY)
+    elif bool(trials[0].get("default")) != NO_JUMP_DEFAULT:
+        errors.append("%s 的 default 应为 %s，实为 %r"
+                      % (NO_JUMP_KEY, NO_JUMP_DEFAULT, trials[0].get("default")))
+
 
 def openstep_keys(path):
     """两份 defaults.plist 是 OpenStep 文本格式（不是 XML），按 `键 = 值;` 抽键名。"""
@@ -100,7 +112,7 @@ def openstep_keys(path):
 
 
 def check_defaults(errors):
-    keys = list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY]
+    keys = list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY, NO_JUMP_KEY]
     texts = []
     for path in DEFAULT_PLISTS:
         if not path.is_file():
@@ -125,7 +137,7 @@ def check_defaults(errors):
 
 def check_self_use_table(errors):
     src = PREFS_HEADER.read_text(encoding="utf-8")
-    for key in list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY]:
+    for key in list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY, NO_JUMP_KEY]:
         if not re.search(r'@"%s"\s*:' % re.escape(key), src):
             errors.append("RKPreferences.h 固化表缺少键 %s（键盘进程回落会出错值）" % key)
 
