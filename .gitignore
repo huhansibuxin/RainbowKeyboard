@@ -32,3 +32,7 @@ _ips/
 
 # 解包核对用
 deb_unpacked/
+# CI 产物下载目录（每版都会新增 _dl63/_dl64…，别让 git add -A 带进二进制）
+_dl*/
+# DEBIAN 维护脚本必须是 LF：CRLF 会让设备上 /bin/sh 报 bad interpreter
+layout/DEBIAN/* text eol=lf

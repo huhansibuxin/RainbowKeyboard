@@ -222,10 +222,10 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>点语音前唤醒主 App（兼容分屏）</string>
+			<string>语音免跳转（连续右跳）</string>
 			<key>footerText</key>
-			<string>默认关闭，建议保持关闭。关闭时点语音交给系统原生流程：装了分屏插件（如 TrollOpen）会用悬浮小窗打开微信输入法，本插件随后请求输入法主程序立即建立语音待机（pip），建立成功就一次都不跳；2.5 秒内仍未建立时，改为连续右跳兜底，再自动送你回原 App。
-打开它会抢在原生流程之前把主 App 拉到全屏，会破坏分屏小窗（仅用于排查问题）。</string>
+			<string>默认开启。开启后点语音按钮时，若输入法主程序还没进入语音待机，本插件会主动把它拉起来建立待机，再自动把你送回原来的 App；待机建立好之后，之后的语音输入就不再跳转了。
+关闭后完全按输入法原生流程走：每次点语音都会跳到输入法主程序，而且跳过去不会自动回来。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -233,9 +233,9 @@
 			<key>key</key>
 			<string>VoiceWakeApp</string>
 			<key>label</key>
-			<string>点语音前抢先唤醒主 App</string>
+			<string>语音免跳转（连续右跳）</string>
 			<key>default</key>
-			<false/>
+			<true/>
 			<key>defaults</key>
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>

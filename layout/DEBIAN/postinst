@@ -1,0 +1,8 @@
+#!/bin/sh
+# 2.3.66：RKWetypeHost 已从本包整体移除（不再注入微信输入法主 App 去主动建 pip）。
+# dpkg 升级时一般会自动清理「新版本里已不存在」的旧文件，但不同前端/引导器行为不一致，
+# 这里再显式删一遍，避免主 App 继续加载旧版注入（那会带出「录音常开」等副作用）。
+for d in /usr/lib/TweakInject /Library/MobileSubstrate/DynamicLibraries; do
+    rm -f "$d/RKWetypeHost.dylib" "$d/RKWetypeHost.plist" 2>/dev/null
+done
+exit 0

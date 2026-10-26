@@ -6,7 +6,7 @@ ARCHS ?= arm64e
 
 include $(THEOS)/makefiles/common.mk
 
-TWEAK_NAME := RainbowKeyboard RKWetypeHost
+TWEAK_NAME := RainbowKeyboard
 # 光效链路文件与顺序对齐上游 1.2.1（8efc134 之后重写过的 RKKeyboardHooks.xm 已删除）。
 # 两处按需求裁剪，均以同名空实现替代，上游光效文件本身逐字不改：
 #   RKAdaptivePerformanceOff.m  ← 智能流畅模式（自动降档）
@@ -18,13 +18,10 @@ RainbowKeyboard_CFLAGS := -fobjc-arc -Wno-deprecated-declarations -Oz
 RainbowKeyboard_LDFLAGS := -Wl,-dead_strip
 RainbowKeyboard_FRAMEWORKS := UIKit QuartzCore CoreGraphics
 
-# 2.3.60：注入微信输入法**主 App**（com.tencent.wetype），只为「主动建 pip」。
-# 半注销后主 App 挂在后台时它自己不会建 pip，必须由我们在它被激活的那一刻叫它建。
-# 独立成多个 tweak 而不是塞进 RainbowKeyboard：宿主进程完全不同（那边是键盘扩展）。
-RKWetypeHost_FILES := RKWetypePipBuild.xm
-RKWetypeHost_CFLAGS := -fobjc-arc -Wno-deprecated-declarations -Oz
-RKWetypeHost_LDFLAGS := -Wl,-dead_strip
-RKWetypeHost_FRAMEWORKS := UIKit
+# ⛔ 2.3.66：原 RKWetypeHost（注入微信输入法主 App 主动建 pip）已整体删除。
+#   小窗路线实测被系统拒绝（小窗 applicationState=Inactive，AVKit 不给 pip 启动资格），
+#   建 pip 这条路彻底不要了 ⇒ 只保留键盘扩展里的「连续右跳」兜底。
+#   旧版本装进设备的 RKWetypeHost.dylib / .plist 由 layout/DEBIAN/postinst 清掉。
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
