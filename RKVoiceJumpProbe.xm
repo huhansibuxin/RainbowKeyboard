@@ -33,12 +33,11 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <sys/sysctl.h>
-#import <libproc.h>
+#import <dlfcn.h>
 #import <signal.h>
 #import <errno.h>
 #import <unistd.h>
 #import <string.h>
-#import <sys/syslimits.h>
 #import "RKPreferences.h"
 
 #pragma mark - 日志
@@ -114,7 +113,21 @@ static unsigned int RKVLProbeMask(void) {
 //   mach 消息对被挂起的 task 只是排队，内核不会因此 resume 它 —— 真正能让它从
 //   STOPPED 状态回到 RUNNING 的、且键盘进程有权限做的只有 SIGCONT（同 uid 即可）。
 //   所以这里做的是「信号唤醒」，语义上等价于我们想要的「mach 唤醒」，只是不依赖 service。
+typedef int (*RKVLProcFn)(int, void *, uint32_t);
+static RKVLProcFn gRKVLProcName = NULL;
+static RKVLProcFn gRKVLProcPIDPath = NULL;
+
+static void RKVLResolveProcFns(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        gRKVLProcName = (RKVLProcFn)dlsym(RTLD_DEFAULT, "proc_name");
+        gRKVLProcPIDPath = (RKVLProcFn)dlsym(RTLD_DEFAULT, "proc_pidpath");
+    });
+}
+
 static pid_t RKVLFindMainAppPID(NSString **outPath) {
+    RKVLResolveProcFns();
+    if (!gRKVLProcName || !gRKVLProcPIDPath) return -1;
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
     size_t size = 0;
     if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 || size == 0) return -1;
@@ -128,10 +141,10 @@ static pid_t RKVLFindMainAppPID(NSString **outPath) {
         pid_t p = procs[i].kp_proc.p_pid;
         if (p <= 1 || p == getpid()) continue;
         char name[64] = {0};
-        if (proc_name(p, name, sizeof(name)) <= 0) continue;
+        if (gRKVLProcName(p, name, (uint32_t)sizeof(name)) <= 0) continue;
         if (strcmp(name, "wxkb") != 0) continue;
-        char path[PATH_MAX] = {0};
-        if (proc_pidpath(p, path, sizeof(path)) <= 0) continue;
+        char path[1024] = {0};
+        if (gRKVLProcPIDPath(p, path, (uint32_t)sizeof(path)) <= 0) continue;
         NSString *ps = @(path);
         if (![ps containsString:@"/wxkb.app/"]) continue;
         found = p;
