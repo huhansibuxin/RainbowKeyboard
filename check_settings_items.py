@@ -44,10 +44,10 @@ AI_LOG_KEY = "AIRecorderLog"
 AI_LOG_DEFAULT = False
 AI_LOG_PATH_HINTS = ("rk_ai.log", "rk_voice.log")
 
-# 2.3.45：语音免跳转实验开关。2.3.47 起默认开（用户要求新开关一律默认开）。
-# 这个开关要参与键盘进程内的判据，因此同样必须同时存在于两份 defaults 与固化表。
-NO_JUMP_KEY = "VoiceNoJumpTrial"
-NO_JUMP_DEFAULT = True
+# 2.4.0：删除了「语音免跳转（实验）/ VoiceNoJumpTrial」开关。
+#   它让 requireJumpToMainAppForRecording 强行返回 NO，实测既建不出 pip 也录不上音。
+#   下面 REMOVED_KEYS 做反向断言，防止哪天又被加回来。
+REMOVED_KEYS = ("VoiceNoJumpTrial",)
 
 # 2.3.46 引入，2.3.66 重新定义为「连续右跳免跳兜底」总闸，默认**开**。
 #   这是唯一的免跳路径：点语音时主动把主 App 拉起来建待机，再回跳宿主。
@@ -103,7 +103,7 @@ def check_panels(errors):
         missing = [h for h in AI_LOG_PATH_HINTS if h not in (log_groups[0].get("footerText") or "")]
         errors.append("「调试日志」分组的 footerText 未写全日志路径（缺 %s）" % ", ".join(missing))
 
-    for key, default in ((NO_JUMP_KEY, NO_JUMP_DEFAULT), (WAKE_KEY, WAKE_DEFAULT)):
+    for key, default in ((WAKE_KEY, WAKE_DEFAULT),):
         trials = find_items(main, "PSSwitchCell", key)
         if not trials:
             errors.append("主面板缺少开关 %s（应为 PSSwitchCell）" % key)
@@ -119,7 +119,7 @@ def openstep_keys(path):
 
 
 def check_defaults(errors):
-    keys = list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY, NO_JUMP_KEY, WAKE_KEY]
+    keys = list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY, WAKE_KEY]
     texts = []
     for path in DEFAULT_PLISTS:
         if not path.is_file():
@@ -144,7 +144,7 @@ def check_defaults(errors):
 
 def check_self_use_table(errors):
     src = PREFS_HEADER.read_text(encoding="utf-8")
-    for key in list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY, NO_JUMP_KEY, WAKE_KEY]:
+    for key in list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY, WAKE_KEY]:
         if not re.search(r'@"%s"\s*:' % re.escape(key), src):
             errors.append("RKPreferences.h 固化表缺少键 %s（键盘进程回落会出错值）" % key)
 
@@ -205,6 +205,23 @@ def check_follow_appearance(errors):
             errors.append("%s 分支没有联动写入 LightPop" % FOLLOW_KEY)
 
 
+def check_removed_keys(errors):
+    """2.4.0 起被删除的开关，任何一处再出现都算回归。"""
+    main = load_items(RESOURCES / "RainbowKeyboard.plist")
+    for key in REMOVED_KEYS:
+        if find_items(main, "PSSwitchCell", key):
+            errors.append("已删除的开关 %s 又回到了设置面板" % key)
+        if key in (RESOURCES / "RainbowKeyboard.plist").read_text(encoding="utf-8"):
+            errors.append("已删除的开关 %s 仍出现在 RainbowKeyboard.plist 文本里" % key)
+        for path in DEFAULT_PLISTS:
+            if path.is_file() and re.search(r'^\s*%s\s*=' % re.escape(key),
+                                            path.read_text(encoding="utf-8"), re.M):
+                errors.append("已删除的开关 %s 仍留在 %s" % (key, path.name))
+        if re.search(r'@"%s"\s*:' % re.escape(key),
+                     PREFS_HEADER.read_text(encoding="utf-8")):
+            errors.append("已删除的开关 %s 仍留在 RKPreferences.h 固化表" % key)
+
+
 def main():
     errors = []
     check_panels(errors)
@@ -212,13 +229,14 @@ def main():
     check_self_use_table(errors)
     check_effect_style(errors)
     check_follow_appearance(errors)
+    check_removed_keys(errors)
     if errors:
         print("!! 设置项自检未通过：")
         for err in errors:
             print("     " + err)
         return 1
     print("OK  设置项自检通过（轻弹开关 / 同色开关 / 跟随深浅色 / 键帽亮度滑条 / "
-          "默认值源 / 风格取值 / 跟随联动）")
+          "默认值源 / 风格取值 / 跟随联动 / 已删开关无回归）")
     return 0
 
 

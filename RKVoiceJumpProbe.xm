@@ -1,6 +1,18 @@
-// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.3.66）
+// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.0 正式版）
 //
-// == 2.3.66（本版）：小窗路线全部删除，只保留连续右跳兜底 ==
+// == 2.4.0（正式版）：日志真正受门控 + 删掉「语音免跳转实验」开关 ==
+//   · 日志：全项目只有一个写盘口 RKVLLogWrite，**唯一门控 = RKVLLogEnabled**。
+//     之前 RKVLLog（受控）与 RKVLLogForce（无视开关强行写）两套并存，正式版关着日志
+//     每次点语音仍写十几行。现在两者同一个门控；关 ⇒ 连字符串格式化都不做。
+//     · 门控值落盘（Library/Preferences/com.minis.rainbowkeyboard.dbg.plist）——
+//       键盘扩展注销后读不到 /var/mobile/Library/Preferences，靠落盘值才不静默。
+//     · 512KB 上限，每 128 行查一次大小，超了整体重来（长期开着也不会写爆 tmp）。
+//   · 删探针：`currentMask` / `_transitionNativeViewStateToRecorderStandby` 两个纯日志
+//     hook 整体删除；reason 与 JUMP 两个保留（诊断「为什么弹小窗/录制失败」的唯一来源）。
+//     [gate] 日志改成「状态变化才写」，不再每拍刷。
+//   · 删实验开关 VoiceNoJumpTrial（强制 requireJump=NO 那条，实测无用且会让人以为是它在起作用）。
+//
+// == 2.3.66：小窗路线全部删除，只保留连续右跳兜底 ==
 //
 // 老板定案（2026-10-27）：open 的分屏小窗路线调不起 pip，不用了。
 //   ⇒ 删掉所有「小窗 + 主 App 主动建 pip」的代码：
@@ -51,8 +63,8 @@
 //   isMainAppVoiceStandbyActive 不 hook：尾部 `mov x0,x20` 且另有 `mov w20,#1` 分支，
 //   返回类型不唯一（id / BOOL 混用），hook 有改坏调用约定的风险。
 //
-// 日志受「记录调试日志」（AIRecorderLog）与总开关（Enabled）双控，默认关；
-// 但 [entry]/[back]/[pip] 这类关键节点走 RKVLLogForce，诊断期必写（见下）。
+// 日志受「记录调试日志」（AIRecorderLog）与总开关（Enabled）双控，**默认关**。
+// 关着时：所有 RKVLLog / RKVLLogForce 都只做一次 BOOL 判断就返回 —— 不格式化、不 fopen、不写盘。
 
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
@@ -67,18 +79,65 @@
 #pragma mark - 日志
 
 static BOOL RKVLLogEnabled = NO;
-// 语音免跳转实验开关（2.3.45）。开 = requireJumpToMainAppForRecording 强制返回 NO。
-static BOOL RKVLNoJumpTrial = NO;
 // 2.3.66：连续右跳兜底总闸。开 = 点语音时主动把主 App 拉起来建待机（默认开）。
 //   关掉就完全等于原生行为（每次点语音都会跳，且跳过去不回来）。
 static BOOL RKVLVoiceWake = YES;
 
+static NSString *RKVLLogPath(void);
+
+// == 2.4.0：日志门控 ==
+// 正式版默认**不写盘**（「记录调试日志」关着就一行都不写，fopen 都不发生）。
+// 之前的 RKVLLogForce 是「无视开关强行写」，正式版必须去掉 —— 它每次点语音要写十几行。
+//
+// ⚠️ 但门控值本身有个坑（2.3.56 踩过）：键盘扩展在注销后读不到
+//   /var/mobile/Library/Preferences，RKReadEffectivePreferences 会回落固化表，
+//   固化表里没有 AIRecorderLog ⇒ 读到 nil ⇒ 日志静默，用户以为「开关不管用」。
+//   ⇒ 把最终门控结果落盘到扩展自己的沙盒（Library/Preferences），
+//     读不到 prefs 时用落盘值。注销后日志照样能写。
+#define RKVL_DBG_STORE @"com.minis.rainbowkeyboard.dbg.plist"
+
+static NSString *RKVLStoreDir(void) {
+    NSString *lib = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Preferences"];
+    return lib;
+}
+
+static NSString *RKVLDbgStorePath(void) {
+    return [RKVLStoreDir() stringByAppendingPathComponent:RKVL_DBG_STORE];
+}
+
+static BOOL RKVLDbgFlagLoad(void) {
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:RKVLDbgStorePath()];
+    return [d[@"on"] boolValue];
+}
+
+static void RKVLDbgFlagSave(BOOL on) {
+    static int last = -1;
+    if (last == (int)on) return;      // 只在变化时落盘，避免每次 refresh 都写文件
+    last = (int)on;
+    @try {
+        [[NSFileManager defaultManager] createDirectoryAtPath:RKVLStoreDir()
+                                  withIntermediateDirectories:YES attributes:nil error:NULL];
+        [@{@"on": @(on)} writeToFile:RKVLDbgStorePath() atomically:YES];
+    } @catch (__unused NSException *e) {}
+}
+
 static void RKVLLogRefresh(void) {
+    // ⚠️ 日志开关必须读「裸值」（RKReadStoredPreferences，**不含**固化表兜底）：
+    //   固化表里 AIRecorderLog = 0，若用生效值判断，注销后永远是 0 ⇒ 落盘值机制失效。
+    NSDictionary *stored = RKReadStoredPreferences();
+    id lg = stored[@"AIRecorderLog"];
+    if (lg) {
+        id en = stored[@"Enabled"];
+        BOOL master = (!en || [en boolValue]);
+        RKVLLogEnabled = master && [lg boolValue];
+        RKVLDbgFlagSave(RKVLLogEnabled);      // 供「注销后读不到偏好」时使用
+    } else {
+        RKVLLogEnabled = RKVLDbgFlagLoad();
+    }
+    // 兜底总闸：走生效值（含固化表），注销后仍按「开」回落。
     NSDictionary *prefs = RKReadEffectivePreferences();
     id enabled = prefs[@"Enabled"];
     BOOL master = (!enabled || [enabled boolValue]);
-    RKVLLogEnabled = master && [prefs[@"AIRecorderLog"] boolValue];
-    RKVLNoJumpTrial = master && [prefs[@"VoiceNoJumpTrial"] boolValue];
     RKVLVoiceWake = master && [prefs[@"VoiceWakeApp"] boolValue];
 }
 
@@ -91,36 +150,48 @@ static NSString *RKVLLogPath(void) {
     return [NSTemporaryDirectory() stringByAppendingPathComponent:@"rk_voice.log"];
 }
 
-static void RKVLLog(NSString *fmt, ...) {
-    // ⚠️ 2.3.56：这里**不再看开关**。
-    //   用户反馈「日志开关一直是开的，但它不写」—— 根因是开关值要靠跨进程快照/固化表兜底，
-    //   而键盘扩展在注销后读不到 /var/mobile/Library/Preferences，回落固化表就是 0，
-    //   于是 RKVLLogEnabled=0，整条诊断链静默。
-    //   ⚠️ 2.3.66：调用点一律在「状态发生变化」的钩子里，不在热路径每拍写，开销可控。
-    va_list ap;
-    va_start(ap, fmt);
-    NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    va_end(ap);
-    NSString *line = [NSString stringWithFormat:@"%.3f [%d] %@",
-                      [NSDate date].timeIntervalSince1970, getpid(), body];
-    FILE *fp = fopen(RKVLLogPath().UTF8String, "a");
+// 统一的写盘点：**唯一入口，唯一门控**。
+//   · RKVLLogEnabled == NO  ⇒ 立即返回，不做字符串格式化、不做 fopen（正式版常态）
+//   · 512KB 上限：每 128 行查一次大小，超了整体重来（长期开着也不会把 tmp 写爆）
+//   · 只有 1 次 fopen/fprintf/fclose，没有 NSLog（NSLog 会走 asl，代价高得多）
+#define RKVL_LOG_MAX_BYTES (512 * 1024)
+static void RKVLLogWrite(NSString *body, BOOL forced) {
+    if (!RKVLLogEnabled) return;
+    NSString *path = RKVLLogPath();
+    static unsigned int lines = 0;
+    if ((++lines & 0x7F) == 0) {
+        NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+        if ([a[NSFileSize] unsignedLongLongValue] > RKVL_LOG_MAX_BYTES) {
+            [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+        }
+    }
+    NSString *line = [NSString stringWithFormat:@"%.3f [%d] %@%@",
+                      [NSDate date].timeIntervalSince1970, getpid(),
+                      forced ? @"(关键) " : @"", body];
+    FILE *fp = fopen(path.UTF8String, "a");
     if (!fp) return;
     fprintf(fp, "%s\n", line.UTF8String);
     fclose(fp);
 }
 
-// 关键节点必写日志（入口 / 拉起 / 回跳 / pip 掉落）。每次点语音只有几行。
-static void RKVLLogForce(NSString *fmt, ...) {
+static void RKVLLog(NSString *fmt, ...) {
+    if (!RKVLLogEnabled) return;          // 先判门控，省掉格式化开销
     va_list ap;
     va_start(ap, fmt);
     NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
-    NSString *line = [NSString stringWithFormat:@"%.3f [%d] (强制) %@",
-                      [NSDate date].timeIntervalSince1970, getpid(), body];
-    FILE *fp = fopen(RKVLLogPath().UTF8String, "a");
-    if (!fp) return;
-    fprintf(fp, "%s\n", line.UTF8String);
-    fclose(fp);
+    RKVLLogWrite(body, NO);
+}
+
+// 「关键节点」= 入口 / 拉起 / 回跳 / pip 掉落。同一门控，只是行首多一个标记方便 grep。
+// ⚠️ 2.4.0 起它**不再**无视开关强行写：正式版关着日志就是零写盘。
+static void RKVLLogForce(NSString *fmt, ...) {
+    if (!RKVLLogEnabled) return;
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    RKVLLogWrite(body, YES);
 }
 
 #pragma mark - 状态读取（WeType 自己的 WBVoiceStateProbe）
@@ -344,7 +415,17 @@ static BOOL   gRKVLFallbackLaunched = NO; // 我们主动拉起过 ⇒ 必须回
 static BOOL   gRKVLJumped        = NO;    // 原生是否已发生 JUMP
 static BOOL   gRKVLReturned      = NO;    // 本轮已回跳（防重复）
 static NSTimeInterval gRKVLStartAt = 0;  // 本轮起点（CFAbsoluteTime，亚微秒开销）
-static NSTimeInterval gRKVLLastSessionStop = 0;  // 上次 reason=session_stopped 时刻（只作日志）
+// 2.4.0：「录制失败」恢复判据。
+//   2.3.66 实测日志（1793040365/368/370）反复出现：
+//     mic -> 1 后 51ms 掉  ⇒  reason=session_start_failed（连发 3 次）⇒ mask 停在 0x2(mic=0 pip=1)
+//     ⇒ 我们看「已有 pip，不介入」⇒ 只能等微信自己 3s PIPStart 超时 → 跳转 → 用户被带走。
+//   也就是老板说的「注销后开头点三四次都是录制失败」。
+//   判据：10 秒内出现过 session_start_failed 且 pip 报着 1 ⇒ 这个待机是坏的，
+//   当成「未待机」处理，主动拉起一次把主 App 真正带到前台重建待机（随后自动回跳）。
+static int            gRKVLStartFailCount = 0;
+static NSTimeInterval gRKVLStartFailAt = 0;
+// 本轮是「坏待机」重建：pip=1 不能当成立刻回跳的依据（那个 pip 是旧的），必须看到 mic 真起来。
+static BOOL           gRKVLNeedRealRecorder = NO;
 
 // 单一定时器链的「代际」。nudge 要插队时把代际 +1，已排队的那一拍发现代际不符就自己退出，
 // 所以任何时刻**只有一条链**在跑（旧版没这层，nudge 会让链翻倍、tick 越跑越多）。
@@ -354,8 +435,9 @@ static BOOL     gRKVLInTick = NO;        // 防 hook 重入（tick 里读 mic/pi
 static double RKVLNow(void) { return CFAbsoluteTimeGetCurrent(); }
 
 // 回跳后的两点确认：pip 有没有在后台长出来（决定下一轮能不能免跳）。
-// 只有两个定时器，且仅在真的回跳过之后才存在。
+// 2.4.0：**纯诊断**，日志关着时连定时器都不排（正式版不占任何定时器）。
 static void RKVLPostReturnProbe(int step) {
+    if (!RKVLLogEnabled) return;
     static const double delays[] = {1.0, 3.0};
     if (step < 0 || step >= 2) return;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delays[step] * NSEC_PER_SEC)),
@@ -431,7 +513,9 @@ static BOOL RKVLReturnStep(void) {
 
     // ① pip=1 = 主 App 已进录音待机，此刻语音面板还挂着 ⇒ 立刻回（原生就是这个节奏）。
     //   下一轮点语音 pip 仍然立着 ⇒ requireJump=0 ⇒ 一次都不跳。
-    if (pip == 1) {
+    //   ⚠️ 例外 gRKVLNeedRealRecorder（本轮是「坏待机」重建）：此时 pip 是之前就有的，
+    //     不能当依据 —— 必须等 mic 真起来（走 ②），否则会立刻回跳、录音又没起。
+    if (pip == 1 && !gRKVLNeedRealRecorder) {
         RKVLLogForce(@"[back] pip 已立住 t=%.1fs mic=%d -> %@", t, mic,
                      gRKVLFallbackLaunched ? @"回宿主" : @"免跳(未拉起过)");
         if (gRKVLFallbackLaunched) RKVLReturnToHost(@"pip_ready");
@@ -517,6 +601,7 @@ static void RKVLBeginRound(void) {
     gRKVLFallbackLaunched = NO;
     gRKVLJumped = NO;
     gRKVLReturned = NO;
+    gRKVLNeedRealRecorder = NO;
     gRKVLStartAt = RKVLNow();
 }
 
@@ -556,16 +641,9 @@ static void RKVLBeginRound(void) {
     static BOOL last; static dispatch_once_t once;
     dispatch_once(&once, ^{ last = !v; });
     if (v != last) {
-        if (last && !v) {
-            // pip 掉的那一刻是「能不能长期免跳」的唯一分水岭，记全上下文
-            NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-            RKVLLogForce(@"[pip] 1→0 距上次session_stopped=%.1fs mic=%d appAlive=%d",
-                    gRKVLLastSessionStop > 0 ? now - gRKVLLastSessionStop : -1.0,
-                    RKVLProbeFlag(@selector(microphoneActive)),
-                    RKVLProbeFlag(@selector(appAlive)));
-        } else {
-            RKVLLogForce(@"[probe] pip -> %d", v);
-        }
+        RKVLLogForce(@"[pip] -> %d mic=%d appAlive=%d", v,
+                RKVLProbeFlag(@selector(microphoneActive)),
+                RKVLProbeFlag(@selector(appAlive)));
         // ⚠️ 先把 last 更新掉再 nudge：nudge 里的状态机会再读一次 pip，
         //   如果这时候 last 还是旧值就会重入本 hook ⇒ 递归。
         last = v;
@@ -574,37 +652,26 @@ static void RKVLBeginRound(void) {
     return v;
 }
 
-// 2.3.45：原始状态位图。mic/pip 只是它的两个派生视图。
-- (uint32_t)currentMask {
-    uint32_t m = %orig;
-    static uint32_t last; static dispatch_once_t once;
-    dispatch_once(&once, ^{ last = ~m; });
-    if (m != last) {
-        last = m;
-        RKVLLog(@"[mask] 0x%x (appAlive=%d mic=%d pip=%d)", m,
-                RKVLProbeFlag(@selector(appAlive)),
-                RKVLProbeFlag(@selector(microphoneActive)),
-                RKVLProbeFlag(@selector(pictureInPictureActive)));
-    }
-    return m;
-}
-
 %end
 
 %hook WBVoiceInputService
 
 // 总闸：返回值直接决定「键盘内重启录音」还是「跳主 App」。
+// 2.4.0：这里**只观察不改行为**（老的「语音免跳转实验」强制返回 NO 已删）。
+// 正式版日志关着 ⇒ 整个 hook 只多一次 BOOL 判断就返回，零额外 objc_msgSend。
 - (BOOL)requireJumpToMainAppForRecording {
     BOOL jump = %orig;
-    if (RKVLNoJumpTrial) {
-        RKVLLog(@"[trial] requireJump %d -> 0 (appAlive=%d mic=%d pip=%d mask=0x%x)",
-                jump, RKVLProbeFlag(@selector(appAlive)), RKVLProbeFlag(@selector(microphoneActive)),
-                RKVLProbeFlag(@selector(pictureInPictureActive)), RKVLProbeMask());
-        return NO;
+    if (!RKVLLogEnabled) return jump;
+    int alive = RKVLProbeFlag(@selector(appAlive));
+    int mic = RKVLProbeFlag(@selector(microphoneActive));
+    int pip = RKVLProbeFlag(@selector(pictureInPictureActive));
+    // 只在状态发生变化时写一行（原来每次调用都写，一次点语音能刷十几行）
+    static int lastSig = -1;
+    int sig = (jump ? 1 : 0) | (alive << 1) | (mic << 2) | (pip << 3);
+    if (sig != lastSig) {
+        lastSig = sig;
+        RKVLLog(@"[gate] requireJump=%d (appAlive=%d mic=%d pip=%d)", jump, alive, mic, pip);
     }
-    RKVLLog(@"[gate] requireJump=%d (appAlive=%d mic=%d pip=%d)", jump,
-            RKVLProbeFlag(@selector(appAlive)), RKVLProbeFlag(@selector(microphoneActive)),
-            RKVLProbeFlag(@selector(pictureInPictureActive)));
     return jump;
 }
 
@@ -616,8 +683,8 @@ static void RKVLBeginRound(void) {
 - (void)launchWBRecorderWithContext:(id)context finishedBlock:(id)block {
     int micB = RKVLProbeFlag(@selector(microphoneActive));
     int pipB = RKVLProbeFlag(@selector(pictureInPictureActive));
-    RKVLLogForce(@"[entry] launchWBRecorder ctx=%p trial=%d 兜底=%d mask=0x%x mic=%d pip=%d",
-            context, RKVLNoJumpTrial, RKVLVoiceWake, RKVLProbeMask(), micB, pipB);
+    RKVLLogForce(@"[entry] launchWBRecorder ctx=%p 兜底=%d mask=0x%x mic=%d pip=%d",
+            context, RKVLVoiceWake, RKVLProbeMask(), micB, pipB);
 
     // ① 已经待机/录音 ⇒ 本来就免跳，别去打扰 App（这才是「一次都不跳」的常态）。
     //
@@ -633,7 +700,16 @@ static void RKVLBeginRound(void) {
         RKVLLogForce(@"[entry] ⚠️ pip=1 但 appAlive=0 ⇒ 视为残留假值，按未待机处理（mask=0x%x）",
                      RKVLProbeMask());
     }
-    if ((pipB == 1 && !stalePip) || micB == 1) {
+    // ⭐ 2.4.0：10 秒内刚发生过 session_start_failed ⇒ 这个 pip 是「坏待机」，同样不可信。
+    //   （日志 1793040365：mic 起 51ms 就掉，mask 停在 0x2，WeType 既不录也不跳，
+    //    要等它自己 3s 超时才跳转 —— 老板说的「头几次录制失败」就是这个。）
+    NSTimeInterval nowTs = [NSDate date].timeIntervalSince1970;
+    BOOL brokenStandby = (gRKVLStartFailCount > 0 && nowTs - gRKVLStartFailAt <= 10.0 && micB == 0);
+    if (brokenStandby && pipB == 1) {
+        RKVLLogForce(@"[entry] ⚠️ 10s 内 session_start_failed×%d ⇒ 待机不可信，按未待机处理",
+                     gRKVLStartFailCount);
+    }
+    if (((pipB == 1 && !stalePip) || micB == 1) && !brokenStandby) {
         RKVLLog(@"[entry] 已有 pip/mic -> 不介入 mic=%d pip=%d", micB, pipB);
         %orig;
         return;
@@ -657,30 +733,39 @@ static void RKVLBeginRound(void) {
     //   拉起失败也要起状态机：原生随后一定会跳（WeType 自己的 3s PIPStart 超时兜底），
     //   那时状态机走 ⑤ 只做回跳（rescue），照样不会把人困在输入法里。
     RKVLBeginRound();
+    gRKVLNeedRealRecorder = brokenStandby;   // 坏待机：只认 mic 起来，不认旧 pip
     RKVLJumpOnce("entry");
     RKVLReturnTick();
     %orig;
 }
 
 // reason 就是二进制里那套枚举：app_background_without_audio / app_killed /
-// pip_start_timeout_url_fallback / launch_app_from_background …
+// pip_start_timeout_url_fallback / launch_app_from_background / session_start_failed …
+// 2.4.0：只留日志（诊断「为什么又弹小窗」「为什么录制失败」全靠这一行），
+//        门控关着时就是一次函数调用 + 一次 BOOL 判断。
 - (void)updateLaunchingRecorderApp:(BOOL)launching reason:(id)reason {
-    RKVLLogForce(@"[reason] launching=%d reason=%@", launching, reason);
-    if ([reason isKindOfClass:[NSString class]] &&
-        [(NSString *)reason containsString:@"session_stopped"]) {
-        gRKVLLastSessionStop = [NSDate date].timeIntervalSince1970;
+    // 计数必须在门控之前做：它是「录制失败恢复」的功能判据，不是日志。
+    if ([reason isKindOfClass:[NSString class]]) {
+        NSString *r = (NSString *)reason;
+        NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+        if ([r containsString:@"session_start_failed"]) {
+            if (now - gRKVLStartFailAt > 10.0) gRKVLStartFailCount = 0;  // 隔太久重新计数
+            gRKVLStartFailCount++;
+            gRKVLStartFailAt = now;
+        } else if ([r containsString:@"launch_app_from_background"] ||
+                   [r containsString:@"session_stopped"]) {
+            gRKVLStartFailCount = 0;   // 正常跳转/正常结束 ⇒ 状态已恢复
+        }
     }
+    RKVLLogForce(@"[reason] launching=%d reason=%@ (fail=%d)", launching, reason, gRKVLStartFailCount);
     %orig;
 }
 
+// 原生自己的跳转入口 —— 唯一作用是给状态机记一笔「原生已经跳了」，
+// 避免我们再叠一次拉起（= 精准命中的关键）。
 - (void)launchAppFromBackgroundWithAllowBluetooth:(BOOL)allow pipTimeoutFallback:(BOOL)fallback {
     gRKVLJumped = YES;
     RKVLLogForce(@"[JUMP] 原生 launchAppFromBackground allowBT=%d pipFallback=%d", allow, fallback);
-    %orig;
-}
-
-- (void)_transitionNativeViewStateToRecorderStandby {
-    RKVLLogForce(@"[standby] -> RecorderStandby trial=%d mask=0x%x", RKVLNoJumpTrial, RKVLProbeMask());
     %orig;
 }
 
@@ -774,8 +859,9 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.66 loaded path=%@ ====", RKVLLogPath());
-        RKVLLogForce(@"[cfg] 兜底=%d（唯一路径：连续右跳）", (int)RKVLVoiceWake);
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.0 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"[cfg] 兜底=%d log=%d（唯一路径：连续右跳）",
+                     (int)RKVLVoiceWake, (int)RKVLLogEnabled);
         // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
         {
             NSString *mem = RKVLHostLoad();
@@ -789,9 +875,9 @@ static void RKVLNoteHostBundle(id v, const char *via) {
             RKVLLogForce(@"[cfg] launchable LSWS_single=%d", s3);
         }
         NSDictionary *p = RKReadEffectivePreferences();
-        RKVLLogForce(@"[cfg] logEnabled=%d trial=%d wake=%d Enabled=%@ AIRecorderLog=%@ VoiceNoJumpTrial=%@ VoiceWakeApp=%@ rev=%@ bundle=%@",
-                RKVLLogEnabled, RKVLNoJumpTrial, RKVLVoiceWake, p[@"Enabled"], p[@"AIRecorderLog"],
-                p[@"VoiceNoJumpTrial"], p[@"VoiceWakeApp"], p[@"RKSettingsRevision"],
+        RKVLLogForce(@"[cfg] Enabled=%@ AIRecorderLog=%@ VoiceWakeApp=%@ rev=%@ bundle=%@",
+                p[@"Enabled"], p[@"AIRecorderLog"],
+                p[@"VoiceWakeApp"], p[@"RKSettingsRevision"],
                 [[NSBundle mainBundle] bundleIdentifier]);
 
         // ⚠️ Logos 硬规则：文件里一旦出现 %group，原来那些「不在 group 里」的 hook
