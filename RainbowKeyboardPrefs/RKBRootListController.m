@@ -54,24 +54,28 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 // 不经过本类的 setPreferenceValue:specifier:，「开启时顺手打开轻弹」的联动就做不了。
 // 幂等判据用自定义属性 rkRebuilt（plist 载入的项没有它），重复调用不会反复替换。
 // 标题文案与 gen_prefs.py 中同名开关保持一致，由 check_settings_items.py 断言。
-- (void)rkRebuildFollowAppearanceSpecifier {
+//
+// ⭐ 2.4.4：这条「plist 载入的项不走本类 setter」的结论，同样适用于**所有 plist 开关**。
+//   键盘扩展读不到 plist、也读不到 cfprefsd 域（沙盒），它读设置值的唯一通道是
+//   RKDisplayTransport 的 notify 快照，而快照只在 RKSavePreferences 里发布。
+//   ⇒ plist 定义、又被键盘使用的开关，必须换成代码 specifier，否则「改了不生效」：
+//     AIRecorderLog（日志门控，2.4.3 实测关不掉就是这个）、VoiceWakeApp（免跳总闸）。
+- (void)rkRebuildRuntimeSpecifierForKey:(NSString *)key title:(NSString *)title default:(BOOL)def {
     NSMutableArray *items = _specifiers;
     if (!items) return;
     for (NSUInteger i = 0; i < items.count; i++) {
         PSSpecifier *item = items[i];
-        if (![[item propertyForKey:@"key"] isEqualToString:@"LightPopFollowAppearance"]) continue;
+        if (![[item propertyForKey:@"key"] isEqualToString:key]) continue;
         if ([item propertyForKey:@"rkRebuilt"]) return;
-        PSSpecifier *rebuilt = [PSSpecifier preferenceSpecifierNamed:@"跟随系统深浅色"
+        PSSpecifier *rebuilt = [PSSpecifier preferenceSpecifierNamed:title
                                                               target:self
                                                                  set:@selector(setPreferenceValue:specifier:)
                                                                  get:@selector(readPreferenceValue:)
                                                               detail:nil
                                                                 cell:PSSwitchCell
                                                                 edit:nil];
-        [rebuilt setProperty:@"LightPopFollowAppearance" forKey:@"key"];
-        // 2.3.34：默认值改为开，与 plist / 两份 defaults.plist / RKPreferences.h 固化表一致
-        //（此前是 @NO，注销后四者互相印证为「关」，导致浅色模式也不上色）。
-        [rebuilt setProperty:@YES forKey:@"default"];
+        [rebuilt setProperty:key forKey:@"key"];
+        [rebuilt setProperty:@(def) forKey:@"default"];
         [rebuilt setProperty:@"com.minis.rainbowkeyboard" forKey:@"defaults"];
         [rebuilt setProperty:kRKChangedNotification forKey:@"PostNotification"];
         [rebuilt setProperty:@YES forKey:@"rkRebuilt"];
@@ -80,9 +84,29 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
     }
 }
 
+- (void)rkRebuildFollowAppearanceSpecifier {
+    // 2.3.34：默认值改为开，与 plist / 两份 defaults.plist / RKPreferences.h 固化表一致
+    //（此前是 @NO，注销后四者互相印证为「关」，导致浅色模式也不上色）。
+    [self rkRebuildRuntimeSpecifierForKey:@"LightPopFollowAppearance" title:@"跟随系统深浅色" default:YES];
+    // 键盘侧消费、且必须立刻生效的两个开关（见上面的 2.4.4 说明）。
+    [self rkRebuildRuntimeSpecifierForKey:@"AIRecorderLog" title:@"记录调试日志" default:NO];
+    [self rkRebuildRuntimeSpecifierForKey:@"VoiceWakeApp" title:@"语音免跳转（连续右跳）" default:YES];
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"彩虹键盘光效";
+}
+
+// ⭐ 2.4.4 兜底发布：键盘扩展读不到 plist / cfprefsd 域，设置值只能靠 notify 快照送达。
+// 只要有一次改动走了 Preferences 的默认写盘路径（没经过 RKSavePreferences），
+// 快照就不会更新 ⇒ 键盘一直按旧值跑（「日志关了还在写」就是这个）。
+// 离开页面时把「磁盘上的全量」重新发布一次，把这类漏发全部补上。
+// 代价：一次页面退出 = 一次 plist 写盘 + 一次快照发布，人工操作频率下可忽略。
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    NSDictionary *values = RKReadPreferences();
+    if (values.count) RKSaveAndNotify([values mutableCopy]);
 }
 
 - (id)readPreferenceValue:(PSSpecifier *)specifier {

@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.3）
+// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.4）
 //
 // == 2.4.3：再提速一档 + 日志门控改成固定优先级 ==
 //   · 日志门控：2.4.2 实测「03:18:53 关掉、03:18:54 起照样写」。根因是取值规则
@@ -12,6 +12,20 @@
 //     差的 350ms 是 SpringBoard 排队等 WeType 的前台切换动画。它压在主线程时，
 //     键盘自己的重建也被一起挡住 ⇒ 放到串行后台队列，前台切换照收，键盘立刻开始重建。
 //   · 计时日志：`[jump] ... 耗时Xms` / `[back] ... 阻塞Xms`，再优化直接看这两个数。
+//
+// == 2.4.4：根治「关掉日志还在写」（发布侧漏了，不是通道问题）==
+//   2.4.3 实测「03:29 开门、03:32 关门，日志一直写到 03:38」——根因不在读取侧，
+//   也不在 notify 通道（光效/LightPop 都靠它正常）：AIRecorderLog 在设置页是 plist 直接
+//   载入的普通开关，点它走 Preferences 默认 setter，只写 CFPreferences，**没经过
+//   RKSavePreferences**，而快照只在 RKSavePreferences 里发布 ⇒ 键盘读到的快照永远是旧值 1。
+//   修法（只在设置页点开关时发布一次，键盘侧不反复请求）：
+//     · RKBRootListController 把 AIRecorderLog/VoiceWakeApp/LightPopFollowAppearance 换成
+//       代码 specifier，强制走本类 setPreferenceValue: → RKSaveAndNotify → RKSavePreferences
+//       （自动发布快照）。一次点开关 = 一次发布。
+//     · viewWillDisappear: 兜底：退出设置页把全量重发一次，覆盖任何走默认路径漏发的键。
+//     · 键盘侧仍只「点语音时懒刷新读一次本地快照」（1s 节流、零 IPC），不向设置页发重发请求。
+//   另：门控追踪改「每次刷新都记一行 refresh」，一次点语音最多一行，
+//   开关翻转时一眼看出是哪一路（snap/file/cfp）赢的。
 //
 // == 2.4.2：日志门控再加一道「写之前先看一眼」==
 //   2.4.1 实机：日志打开能写（说明快照来源通了），但**关掉之后还在写**。
@@ -163,7 +177,7 @@ static void RKVLGateTrace(NSString *fmt, ...) {
     va_end(ap);
     NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:@"rk_gate.log"];
     NSDictionary *a = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
-    if ([a[NSFileSize] unsignedLongLongValue] > 2048) {
+    if ([a[NSFileSize] unsignedLongLongValue] > 8192) {
         [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
     }
     NSString *line = [NSString stringWithFormat:@"%.3f [%d] %@",
@@ -210,11 +224,18 @@ static void RKVLLogRefresh(void) {
         on = RKVLDbgFlagLoad();
         src = @"fallback(落盘)";
     }
-    if (on != RKVLLogEnabled) {
-        RKVLGateTrace(@"gate %d -> %d  来源=%@ file=%@ snap=%@ cfp=%@",
-                      (int)RKVLLogEnabled, (int)on, src, file[@"AIRecorderLog"] ?: @"-",
-                      snapshot[@"AIRecorderLog"] ?: @"-", stored[@"AIRecorderLog"] ?: @"-");
-    }
+    // ⭐ 2.4.4：**每次刷新都记一行**（一次点语音最多一行，开关翻转时也是同一行）。
+    //   2.4.3 只在「值变了」时记，于是「关掉日志却还在写」这种现场完全没有记录 ——
+    //   分不清是「来源读到 1」还是「根本没刷新」。逐次记录才能定论：
+    //     · 若开关那一刻 git 日志里 snap 一直是 1 ⇒ 设置页没把新值发布到快照（写侧问题）
+    //     · 若根本没出现 refresh 行 ⇒ 懒刷新没被调用（读侧问题）
+    //   rev = 快照里带的设置 revision，和 plist 的 RKSettingsRevision 比大小即可判新旧。
+    RKVLGateTrace(@"refresh %d -> %d  src=%@ file=%@ snap=%@ cfp=%@ snapRev=%@",
+                  (int)RKVLLogEnabled, (int)on, src,
+                  file[@"AIRecorderLog"] ?: @"-",
+                  snapshot[@"AIRecorderLog"] ?: @"-",
+                  stored[@"AIRecorderLog"] ?: @"-",
+                  snapshot[@"RKSettingsRevision"] ?: @"-");
     RKVLLogEnabled = on;
     RKVLDbgFlagSave(RKVLLogEnabled);          // 供「注销后三路都读不到」时使用
     // 兜底总闸：走生效值（含固化表），注销后仍按「开」回落。
@@ -512,6 +533,13 @@ static int    gRKVLReturnTicks   = 0;    // 已推进的拍数（只作日志）
 static int    gRKVLReturnTries   = 0;    // 已经拉起过几次（含首拉，上限 2）
 static BOOL   gRKVLReturnSawMic  = NO;
 static double gRKVLFirstMicT     = 0;    // 首次见到 mic=1 的那一刻（单位秒，相对本轮起点）
+// 2.4.4：pip 也要「稳一下再回」。日志 139402980 实测两条路径的差别极大：
+//   pip 路径「pip 刚变 1 就回跳」⇒ 那次同步 XPC 阻塞 435ms（SpringBoard 还在做 wetype 的
+//   前台/pip 转场，把我们的激活请求排在后面）；
+//   mic 路径「已稳定 0.45s 再回」⇒ 同一支 API 只阻塞 11ms。
+// ⇒ pip 也等 0.15s 再回，拿 0.15s 换掉 400ms 的排队时间。
+static BOOL   gRKVLReturnSawPip  = NO;
+static double gRKVLFirstPipT     = 0;
 static BOOL   gRKVLFallbackLaunched = NO; // 我们主动拉起过 ⇒ 必须回跳
 static BOOL   gRKVLJumped        = NO;    // 原生是否已发生 JUMP
 static BOOL   gRKVLReturned      = NO;    // 本轮已回跳（防重复）
@@ -648,12 +676,28 @@ static BOOL RKVLReturnStep(void) {
     //   ⚠️ 例外 gRKVLNeedRealRecorder（本轮是「坏待机」重建）：此时 pip 是之前就有的，
     //     不能当依据 —— 必须等 mic 真起来（走 ②），否则会立刻回跳、录音又没起。
     if (pip == 1 && !gRKVLNeedRealRecorder) {
-        RKVLLogForce(@"[back] pip 已立住 t=%.1fs mic=%d -> %@", t, mic,
-                     gRKVLFallbackLaunched ? @"回宿主" : @"免跳(未拉起过)");
-        if (gRKVLFallbackLaunched) RKVLReturnToHost(@"pip_ready");
-        else { gRKVLReturnPending = NO; RKVLPostReturnProbe(0); }
-        return NO;
+        if (!gRKVLFallbackLaunched) {
+            RKVLLogForce(@"[back] pip 已立住 t=%.1fs mic=%d -> 免跳(未拉起过)", t, mic);
+            gRKVLReturnPending = NO;
+            RKVLPostReturnProbe(0);
+            return NO;
+        }
+        // 2.4.4：等 pip 连续稳住 0.15s 再回跳（就是上面 gRKVLReturnSawPip 注释里的原因）。
+        if (!gRKVLReturnSawPip) {
+            gRKVLReturnSawPip = YES;
+            gRKVLFirstPipT = t;
+            RKVLLogForce(@"[back] pip 刚立住 t=%.1fs mic=%d -> 等 0.15s 再回跳（避开转场）", t, mic);
+            return YES;
+        }
+        if (t - gRKVLFirstPipT >= 0.15) {
+            RKVLLogForce(@"[back] pip 稳定 t=%.1fs（+0.15s）mic=%d -> 回宿主", t, mic);
+            RKVLReturnToHost(@"pip_ready");
+            return NO;
+        }
+        return YES;
     }
+    // pip 掉了 ⇒ 稳定计时作废（下一轮重新计）
+    if (pip == 0) gRKVLReturnSawPip = NO;
 
     // ② 录音已起、连续稳定 0.45s 再回。刚起就切会把音频采集掐断（=「录制失败」）。
     //   2.4.1：采样从 0.4s 改成 0.1s 后，这里从「等 1.0s」改成「**连续** 0.7s 不掉」——
@@ -742,6 +786,8 @@ static void RKVLBeginRound(void) {
     gRKVLReturnTries = 0;
     gRKVLReturnSawMic = NO;
     gRKVLFirstMicT = 0;
+    gRKVLReturnSawPip = NO;
+    gRKVLFirstPipT = 0;
     gRKVLFallbackLaunched = NO;
     gRKVLJumped = NO;
     gRKVLReturned = NO;
@@ -1006,7 +1052,7 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.3 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.4 loaded path=%@ ====", RKVLLogPath());
         RKVLLogForce(@"[cfg] 兜底=%d log=%d（唯一路径：连续右跳）",
                      (int)RKVLVoiceWake, (int)RKVLLogEnabled);
         // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
