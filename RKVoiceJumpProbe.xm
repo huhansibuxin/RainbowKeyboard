@@ -124,7 +124,10 @@ static void RKVLLog(NSString *fmt, ...) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLog(@"==== RKVoiceJumpProbe 2.3.41 loaded, bundle=%@ path=%@ ====",
-                [[NSBundle mainBundle] bundleIdentifier], RKVLLogPath());
+        RKVLLog(@"==== RKVoiceJumpProbe 2.3.42 loaded path=%@ ====", RKVLLogPath());
+        NSDictionary *p = RKReadEffectivePreferences();
+        RKVLLog(@"[cfg] logEnabled=%d Enabled=%@ AIRecorderLog=%@ Widen=%@ rev=%@ bundle=%@",
+                RKVLLogEnabled, p[@"Enabled"], p[@"AIRecorderLog"], p[@"WidenVoiceButton"],
+                p[@"RKSettingsRevision"], [[NSBundle mainBundle] bundleIdentifier]);
     }
 }

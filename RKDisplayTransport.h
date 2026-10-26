@@ -26,7 +26,7 @@ static inline NSArray<NSString *> *RKDisplayKeys(void) {
     return [[[[RKDisplayNumbers() arrayByAddingObjectsFromArray:RKDisplayFlags()]
         arrayByAddingObjectsFromArray:RKDisplayColors()]
         arrayByAddingObjectsFromArray:@[@"PressColorMode", @"PressBrightness", @"PressColor", @"Theme", @"SmartPerformance", @"KeyboardLock", @"LightPop", @"LightPopFollowAppearance"]]
-        arrayByAddingObject:@"WidenVoiceButton"];
+        arrayByAddingObjectsFromArray:@[@"WidenVoiceButton", @"AIRecorderLog"]];
 }
 static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[RKDisplayWordCount]) {
     memset(words, 0, RKDisplayWordCount * sizeof(uint64_t));
@@ -133,6 +133,15 @@ static inline void RKEncodeDisplaySnapshot(NSDictionary *prefs, uint64_t words[R
         words[5] |= UINT64_C(1) << 4;
         if ([lightPopFollow boolValue]) words[5] |= UINT64_C(1) << 5;
     }
+    // 2.3.42：调试日志开关必须走这条通道，否则键盘扩展永远读不到它。
+    // 键盘沙盒读不到 /var/mobile/Library/Preferences（注销后尤其如此），
+    // 缺失时会回落 RKPresetSelfUseTable()（AIRecorderLog = 0）⇒ 日志开关看着开着却永不出日志。
+    // 位 6/7 = AIRecorderLog（存在 / 值），words[5] 至此只用掉最低 8 位。
+    id aiLog = prefs[@"AIRecorderLog"];
+    if ([aiLog isKindOfClass:NSNumber.class]) {
+        words[5] |= UINT64_C(1) << 6;
+        if ([aiLog boolValue]) words[5] |= UINT64_C(1) << 7;
+    }
 }
 static inline uint64_t RKDisplayChecksum(const uint64_t words[RKDisplayWordCount]) {
     uint64_t hash = UINT64_C(14695981039346656037);
@@ -189,6 +198,7 @@ static inline NSDictionary *RKDecodeDisplaySnapshot(const uint64_t words[RKDispl
     if (words[5] & UINT64_C(1)) result[@"LightPop"] = @((words[5] >> 1) & 1);
     if (words[5] & (UINT64_C(1) << 2)) result[@"LightPopMatchColor"] = @((words[5] >> 3) & 1);
     if (words[5] & (UINT64_C(1) << 4)) result[@"LightPopFollowAppearance"] = @((words[5] >> 5) & 1);
+    if (words[5] & (UINT64_C(1) << 6)) result[@"AIRecorderLog"] = @((words[5] >> 7) & 1);
     return result;
 }
 static inline int RKDisplayToken(NSUInteger index) {
