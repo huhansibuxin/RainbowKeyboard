@@ -38,10 +38,11 @@ LIGHT_POP_KEYS = {"LightPop": True, "LightPopMatchColor": False,
 PRESS_BRIGHTNESS_KEY = "PressBrightness"
 PRESS_BRIGHTNESS_DEFAULT = 0.6
 
-# 2.3.40：AI 录音笔诊断日志开关。默认关；footer 必须写出日志路径。
+# 2.3.40：诊断日志开关。默认关；footer 必须写出全部日志路径。
+# 2.3.41：新增 rk_voice.log（语音按钮跳转探针），因此这里改成"路径清单"。
 AI_LOG_KEY = "AIRecorderLog"
 AI_LOG_DEFAULT = False
-AI_LOG_PATH_HINT = "rk_ai.log"
+AI_LOG_PATH_HINTS = ("rk_ai.log", "rk_voice.log")
 
 # 「跟随系统深浅色」：plist 里是定义项，实际显示的是控制器重建后的 specifier，
 # 两处标题必须一致（下面按这个名字做一致性断言）。
@@ -87,8 +88,9 @@ def check_panels(errors):
                   if i.get("cell") == "PSGroupCell" and i.get("label") == "调试日志"]
     if not log_groups:
         errors.append("主面板缺少「调试日志」分组（footer 要写日志路径）")
-    elif AI_LOG_PATH_HINT not in (log_groups[0].get("footerText") or ""):
-        errors.append("「调试日志」分组的 footerText 未写日志路径（应含 %s）" % AI_LOG_PATH_HINT)
+    elif not all(h in (log_groups[0].get("footerText") or "") for h in AI_LOG_PATH_HINTS):
+        missing = [h for h in AI_LOG_PATH_HINTS if h not in (log_groups[0].get("footerText") or "")]
+        errors.append("「调试日志」分组的 footerText 未写全日志路径（缺 %s）" % ", ".join(missing))
 
 
 def openstep_keys(path):

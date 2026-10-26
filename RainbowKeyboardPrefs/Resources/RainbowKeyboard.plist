@@ -201,8 +201,9 @@
 			<key>label</key>
 			<string>调试日志</string>
 			<key>footerText</key>
-			<string>开启后，键盘扩展会把「AI 录音笔」相关诊断信息写入：
-/var/mobile/Containers/Data/PluginKitPlugin/*/tmp/rk_ai.log
+			<string>开启后，键盘扩展会把诊断信息写入：
+/var/mobile/Containers/Data/PluginKitPlugin/*/tmp/rk_ai.log（AI 录音笔）
+/var/mobile/Containers/Data/PluginKitPlugin/*/tmp/rk_voice.log（语音按钮跳转）
 关闭本开关、或关闭「启用键盘光效」时，不写任何日志。</string>
 		</dict>
 		<dict>
