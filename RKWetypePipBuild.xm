@@ -43,6 +43,13 @@ static BOOL           gFakeForeground = NO;   // 只在建 pip 窗口期内为 Y
 static NSTimeInterval gLastEngage = 0;
 static BOOL           gHookInstalled = NO;
 
+// ⛔ 2.3.65 实验总闸，两个都默认 NO。
+//   gRKWTryActivatePiPMode：2.3.64 实测有害（pip 立刻被拒 + 录音常开），别再默认开。
+//   gRKWTryStandbyGate：`setRecordingStandbyMode:1` 那条门控。它本身就会让主 App
+//     握住录音会话 —— 只要 pip 可见模式能激活，mic 就再也不回 0。
+static BOOL           gRKWTryActivatePiPMode = NO;
+static BOOL           gRKWTryStandbyGate     = NO;
+
 #pragma mark - 日志（写在 App 自己沙盒 Documents，SSH 可取）
 
 static NSString *gLogPath = nil;
@@ -411,6 +418,11 @@ static void RKWInstallObservers(void) {
 
 // 门控开关在 WBVoiceInputManager 上（不在 Policy 上）——wcvoicekeep 最早死在这里
 static void RKWOpenGate(void) {
+    // ⛔ 2.3.65：默认**不**碰 `recordingStandbyMode`。
+    //   这条路来自 wcvoicekeep，它的目的是「待机时把录音会话一直握着」以便免跳 ——
+    //   代价就是麦克风常开。老板要的不是这个。pip 既然在小窗里建不起来，这条门控
+    //   除了把 mic 钉住没有任何收益，所以默认关掉；要复现当年行为再把它打开。
+    if (!gRKWTryStandbyGate) return;
     Class c = objc_getClass("WBVoiceInputManager");
     if (!c) { RKWLog(@"WBVoiceInputManager 不存在（门控无法打开）"); return; }
     SEL shared = sel_registerName("sharedInstance");
@@ -450,12 +462,16 @@ static void RKWEngageOnce(id mgr, int attempt) {
     ((void (*)(id, SEL))objc_msgSend)(mgr, prepare);
     RKWLog(@"#%d prepare 已调用", attempt);
 
-    // ⭐ 2.3.64 实验：先激活「可见 pip 模式」再 start。
-    // 依据（2.3.63 实测）：start 发出后**一个 delegate 回调都没有** —— 连 willStart 都没有，
-    // 3 秒后超时返回失败；而同一时刻 mgr 的 visiblePiPModeActive 全程是 0。
-    // 这不是「被拒绝」（被拒绝会立刻走 failedToStart），而是「被挂着等」。
-    // 内容层不进可见模式，AVKit 就没有东西可抓 ⇒ 只能挂。所以先把可见模式点起来。
-    if (attempt == 0) {
+    // ⛔⛔ 2.3.65：这段实验**默认关闭**，实测后果严重。
+    //   2.3.64 打开后确实把 visiblePiPModeActive 从 0 顶到 1（观察器证实），
+    //   `startWithCompletionHandler:` 也终于真的转调 `startWithPlaybackMode:(1)` 了，
+    //   但紧接着就是 `⇒ notifyDelegateDidFailToStart` + 回调 ok=75327173 realPip=0 ——
+    //   **AVKit 立刻拒绝**。比原来"挂起 3 秒"更糟：原来是等，现在是明确不给。
+    //   更致命的是副作用：从这一拍起键盘侧 `mic -> 1` 再也不回 0（老板原话「录音一直开着」）。
+    //   原因：visible 模式一激活，`setRecordingStandbyMode:1` 那条待机通路就真的生效了，
+    //   主 App 把录音会话一直握着 ⇒ 麦克风常开。这条绝不能留。
+    //   ⚠️ 保留代码但默认关：以后要再验证时只改 gRKWTryActivatePiPMode 一个开关。
+    if (attempt == 0 && gRKWTryActivatePiPMode) {
         SEL act = sel_registerName("activateVisiblePiPModeWithReason:");
         if ([mgr respondsToSelector:act]) {
             @try {
