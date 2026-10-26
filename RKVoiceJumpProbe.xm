@@ -1,6 +1,6 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.59）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.60）
 //
-// == 2.3.59（本版）：兜底判据收紧 —— 小窗已经开了就绝不再开一次 ==
+// == 2.3.60（本版）：主 App 侧主动建 pip + 键盘侧连续右跳保底 ==
 //   老板实测（2026-10-27，装 2.3.58 + 唤醒开关关 + TrollOpen 生效）：
 //   "先打开 open 的小窗，然后往右跳我们又打开了，相当于两个都打开了"。
 //   日志实证（pid 93105）：
@@ -95,6 +95,8 @@
 #import <errno.h>
 #import <unistd.h>
 #import <string.h>
+#import <notify.h>
+#import <time.h>
 #import "RKPreferences.h"
 
 #pragma mark - 日志
@@ -156,6 +158,29 @@ static void RKVLLogForce(NSString *fmt, ...) {
     if (!fp) return;
     fprintf(fp, "%s\n", line.UTF8String);
     fclose(fp);
+}
+
+#pragma mark - 2.3.60 请主 App 侧主动建 pip（解决半注销 pip 建不出来）
+
+// 为什么用 notify 的 state 而不是普通 post：
+//   主 App 挂着（suspended）时收不到 darwin post。但 `notify_set_state` 写的是
+//   notify 守护进程里的**持久状态**，主 App 下次被 TrollOpen 小窗/拉起激活时
+//   `notify_get_state` 一读就有 ⇒ 不依赖「通知能不能送达挂起进程」。
+// 主 App 侧（RKWetypePipBuild.xm）读到后立刻调 WBVoiceInputPIPManager 建 pip，
+// 并把这状态清零（一次性消费）。
+static const char *const kRKVLPipReqName = "com.huhansibuxin.rk.pipreq";
+
+static void RKVLPipRequestPost(void) {
+    static int tok = 0;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        notify_register_check(kRKVLPipReqName, &tok);
+    });
+    uint64_t ts = (uint64_t)time(NULL);
+    uint32_t sst = notify_set_state(tok, ts);
+    uint32_t pst = notify_post(kRKVLPipReqName);
+    RKVLLogForce(@"[pipreq] 请求主 App 建 pip ts=%llu setState=%u post=%u",
+                 (unsigned long long)ts, sst, pst);
 }
 
 // 从 WBVoiceStateProbe 的实例里取状态。用 unsafe_unretained 缓存实例（该类是长生命单例），
@@ -494,43 +519,38 @@ static void RKVLReturnTick(void) {
     int mic = RKVLProbeFlag(@selector(microphoneActive));
     int pip = RKVLProbeFlag(@selector(pictureInPictureActive));
     double t = gRKVLReturnTicks * 0.25;
-    NSTimeInterval now = [NSDate date].timeIntervalSince1970;
 
-    // ⭐ 2.3.59：录音/pip 只要出现过一次，就锁死「已被接管」，兜底永不触发。
-    if (mic == 1 || pip == 1) {
-        if (!gRKVLSeenRecorder) {
-            gRKVLSeenRecorder = YES;
-            RKVLLogForce(@"[back] 已被接管（mic=%d pip=%d）t=%.2fs -> 本轮不再兜底拉起", mic, pip, t);
-        }
+    // 2.3.60：只作日志用，不再当兜底开关（兜底改看 pip 本身）
+    if ((mic == 1 || pip == 1) && !gRKVLSeenRecorder) {
+        gRKVLSeenRecorder = YES;
+        RKVLLogForce(@"[back] 首次见到录音/待机（mic=%d pip=%d）t=%.2fs", mic, pip, t);
     }
 
-    // ⭐ 2.3.58 ① pip 立住 —— 分水岭：**没兜底拉起过就什么都不做**。
-    //   那种情况是 TrollOpen 用悬浮窗把主 App 打开了（或原生待机本来就在），
-    //   用户根本没离开微信，再回跳反而多此一举、还会把分屏收掉。
+    // ⭐ 2.3.60 ① pip 立住 —— 免跳成立。
+    //   有 TrollOpen = 悬浮小窗；没有 = 主 App 侧主动建成功。两种情况用户都没被拉走。
     if (pip == 1) {
         gRKVLReturnPending = NO;
         if (gRKVLFallbackLaunched) {
             RKVLLogForce(@"[back] 兜底拉起后 pip 立住 t=%.2fs mic=%d -> 回宿主", t, mic);
             RKVLReturnToHost(@"pip_ready");
         } else {
-            RKVLLogForce(@"[back] pip 已立住 t=%.2fs mic=%d -> 分屏/原生已接管，不做回跳", t, mic);
+            RKVLLogForce(@"[back] pip 已立住 t=%.2fs mic=%d -> 免跳（不做任何事）", t, mic);
         }
         RKVLPostReturnProbe(0);
         return;
     }
 
-    // ⭐ 2.3.59 ② 兜底判据收紧：必须「一点录音迹象都没有」才拉起。
-    //   老板实测（2026-10-27，pid 93105）：2.3.58 的 1.8s 判据在 mic=1、pip 迟迟不来时
-    //   也会兜底拉起 ⇒ TrollOpen 的小窗已经开着，我们又全屏开了一个 = 两个都打开。
-    //   日志实证：1793034128.962 mic=1 / 129.815 我们兜底拉起 / 131.960 pip 才来 2.1s。
-    //   ⇒ 判据改成 mic==0 && pip==0 && 从未见过录音，等待放宽到 3.0s（原生 mic 约 1.0s 起）。
-    if (!gRKVLFallbackLaunched && gRKVLJumped && !gRKVLSeenRecorder &&
-        mic == 0 && pip == 0 && now - gRKVLJumpAt >= 3.0) {
+    // ⭐ 2.3.60 ② 连续右跳兜底 —— 老板定案：
+    //   「open 能建起 pip 就一次都不跳；建不起来就用我们自己连续右跳的办法保底」。
+    //   2.3.59 的判据（见过 mic 就锁死）在 pip 建不起来时会永远不兜底 ⇒ 下一轮还得跳，
+    //   用户白等。现在改成「pip 仍为 0 且已等 3.0s」就拉起：
+    //   3.0s 够主 App 侧走完 setup→prepare→start 三次尝试（0.6s/1.4s 重试）。
+    if (!gRKVLFallbackLaunched && pip == 0 && t >= 3.0) {
         int ok = 0;
         BOOL r = RKVLForegroundLaunchApp(&ok);
         gRKVLFallbackLaunched = YES;
-        RKVLLogForce(@"[back] 无人接管（JUMP+%.1fs 仍 mic=0 pip=0）-> 兜底拉起 ok=%d(k=%d)",
-                     now - gRKVLJumpAt, r, ok);
+        RKVLLogForce(@"[back] pip 未建立（t=%.1fs mic=%d jump=%d）-> 连续右跳兜底 ok=%d(k=%d)",
+                     t, mic, gRKVLJumped, r, ok);
         // 不 usleep 阻塞主线程：后面每 250ms 一拍自然能看到 pip
     }
 
@@ -678,6 +698,12 @@ static void RKVLStartReturnWatch(void) {
     NSString *hostNow = RKVLFrontmostBundleID(&via);
     if (hostNow.length) gRKVLHostBundle = hostNow;
     RKVLLogForce(@"[back] host=%@ via=%@", gRKVLHostBundle ?: @"(nil)", via);
+
+    // ⭐ 2.3.60：pip 还没建立就立刻请主 App 侧主动建。
+    //   半注销后微信输入法自己不会建 pip（它只在录音结束进待机时建一次、且同进程只建一次），
+    //   我们注入进主 App 的 RKWetypePipBuild 收到这条请求就自己调 WBVoiceInputPIPManager。
+    //   主 App 被 TrollOpen 小窗激活的那一刻读得到（notify state 是持久跨进程的）。
+    if (pipB != 1) RKVLPipRequestPost();
 
     if (pipB == 1 || micB == 1) {
         // 已经有待机/录音 ⇒ 本来就免跳，别去打扰 App（TrollOpen 的分屏小窗也正在用）
@@ -887,7 +913,7 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.59 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.60 loaded path=%@ ====", RKVLLogPath());
         // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
         {
             NSString *mem = RKVLHostLoad();

@@ -29,3 +29,6 @@ rk_prefs.plist
 _dl/
 _dl52/
 _ips/
+
+# 解包核对用
+deb_unpacked/
