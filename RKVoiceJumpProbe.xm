@@ -1,6 +1,6 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.61）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.62）
 //
-// == 2.3.61（本版）：兜底默认关闭（测试期）+ 主 App 建 pip 成功回执 ==
+// == 2.3.62（本版）：主 App 侧判据修正 —— 用 pipController 真实状态，不再信 isActive ==
 //
 // 老板要求：先验证「open 拉起小窗 + 主 App 建 pip」能不能每次都成，兜底先不参与。
 // 2.3.60 日志暴露的真因：主 App **+0.16s 就 isActive=1 建好了**，但键盘侧的
@@ -976,7 +976,7 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.61 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.62 loaded path=%@ ====", RKVLLogPath());
         // 2.3.61：注册「主 App 建 pip 成功」回执。兜底已关，pip 建没建成只能靠这条回执判定
         //   （mask 是主 App 的懒上报副本，实测落后 9 秒，不可用）。
         {
