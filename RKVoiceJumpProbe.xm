@@ -1,4 +1,14 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.54）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.55）
+//
+// == 2.3.55 做的事：回跳时机改成「pip 一立住就回」+ 宿主持久化 ==
+//   用户实测 2.3.54：能跳回去了，但 (a) 半注销后**第一次**点语音不回来，
+//   (b) 回来之后语音面板没了（要重新点「点击说话」），而微信输入法原生回来后面板还在。
+//   (a) 根因：宿主要靠「WeType 报给我们」才有，半注销后第一拍扩展进程是新的、
+//       ctx/内存缓存都空 ⇒ host=nil ⇒ 回跳被跳过。⇒ 宿主**落盘**，下个进程启动先读回来。
+//   (b) 根因：旧判据是「pip=1 且 mic=0」= 等录音**结束**才回，回来时语音会话已收尾，
+//       面板自然收掉。原生是「待机一建立（pip=1）就立刻回」，面板还在 ⇒ 直接能接着录。
+//       ⇒ 判据改成「只要 pip=1 就回」，不再要求先见过 mic。
+//   另外：宿主未知时**不拉起**（拉得起、回不来 = 把人扔在输入法里），老实交给原生跳转。
 //
 // == 已经被日志坐实的部分 ==
 //   2.3.42/2.3.44：半注销后每次点语音 → mic 0 → [entry] → [JUMP] pipFallback=0
@@ -228,6 +238,47 @@ static __unsafe_unretained id gRKVLInputCtx = nil;
 
 static void RKVLNoteHostBundle(id v, const char *via);   // 前置声明（定义在 %hook 区）
 
+// == 2.3.55：宿主 bundle id 落盘 ==
+// 起因：半注销后**第一次**点语音不回来 —— 那一刻扩展进程是新的（或刚被系统回收过），
+// ctx / 内存缓存都还空，宿主取不到 ⇒ 回跳被跳过。
+// 落盘在扩展自己的沙盒 Library/Preferences 下（tmp 会被系统清、重装 deb 也会清），
+// 下次进程起来第一件事就是把它读回来当兜底。
+#define RKVL_HOST_STORE @"com.minis.rainbowkeyboard.host.plist"
+
+static NSString *RKVLHostStorePath(void) {
+    static NSString *p = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *lib = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Preferences"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:lib
+                                  withIntermediateDirectories:YES attributes:nil error:NULL];
+        p = [lib stringByAppendingPathComponent:RKVL_HOST_STORE];
+    });
+    return p;
+}
+
+static BOOL RKVLHostLooksValid(NSString *bid) {
+    if (![bid isKindOfClass:[NSString class]] || bid.length < 5) return NO;
+    if ([bid containsString:@"wetype"]) return NO;                   // 自己（wxkb / wxkb_plugin）
+    if ([bid isEqualToString:@"com.apple.springboard"]) return NO;    // 桌面
+    if ([bid hasPrefix:@"com.apple.Preferences"]) return NO;          // 在设置里试键盘
+    return YES;
+}
+
+static NSString *RKVLHostLoad(void) {
+    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:RKVLHostStorePath()];
+    NSString *h = d[@"host"];
+    return RKVLHostLooksValid(h) ? h : nil;
+}
+
+static void RKVLHostSave(NSString *bid) {
+    if (!RKVLHostLooksValid(bid)) return;
+    @try {
+        [@{@"host": bid, @"ts": @([NSDate date].timeIntervalSince1970)}
+            writeToFile:RKVLHostStorePath() atomically:YES];
+    } @catch (__unused NSException *e) {}
+}
+
 // 从缓存的 WBInputViewContext 主动读宿主。全部走 respondsToSelector + isKindOfClass，
 // 读不到就 nil，绝不猜。
 static NSString *RKVLHostFromCachedCtx(void) {
@@ -249,14 +300,20 @@ static NSString *RKVLFrontmostBundleID(NSString **outVia) {
     // 顺序讲究：**先主动读 ctx（当下最新的宿主）**，再退回 hook 到的缓存值
     // （缓存可能是上一次键盘会话的宿主，比如刚从设置切回来）。
     NSString *fromCtx = RKVLHostFromCachedCtx();
-    if (fromCtx.length) {
+    if (RKVLHostLooksValid(fromCtx)) {
         RKVLNoteHostBundle(fromCtx, "ctx.active");
         if (outVia) *outVia = @"WeType.ctx(主动)";
         return fromCtx;
     }
-    if (gRKVLHostFromWeType.length) {
+    if (RKVLHostLooksValid(gRKVLHostFromWeType)) {
         if (outVia) *outVia = @"WeType.hostBundleID(缓存)";
         return gRKVLHostFromWeType;
+    }
+    // 2.3.55：进程是新起的（半注销后第一次点语音就是这种），内存里啥都没有 ⇒ 读上次落盘的
+    NSString *fromDisk = RKVLHostLoad();
+    if (fromDisk.length) {
+        if (outVia) *outVia = @"落盘(上次宿主)";
+        return fromDisk;
     }
 
     Class wsCls = objc_getClass("LSApplicationWorkspace");
@@ -308,16 +365,17 @@ static BOOL RKVLActivateBundle(NSString *bid, int *outOK) {
     return ok;
 }
 
-// 回宿主的轮询状态机。
-// 条件：pip=1 且 mic=0 —— 说明主 App 已经进「录音待机」（pip 立住了），
-// 这时候切回微信，pip 是后台播放语义，掐不掉。
-// 15s 还没等到 pip 就兜底硬回：宁可回到微信（至少用户能继续用微信），
-// 也不要把他扔在输入法里；日志会记 timeout，下一次据此调策略。
+// 回宿主的轮询状态机（2.3.55 按「原生行为」重写）。
+//
+// ⭐ 为什么这一版把判据从「pip=1 且 mic=0」改成「只要 pip=1」：
+//   用户实测的原生形态是 —— 跳过去 → **立刻**回来（还没开始说话）→ 语音面板还挂着，
+//   接着点「点击说话」就能直接录，不用再跳。
+//   而我们上一版是等 session_stopped（录音结束）才回来，回来时语音会话已经收尾，
+//   面板自然没了 ⇒ 用户要重新点语音，于是又跳一次。
+//   pip=1 就是「主 App 已进录音待机」的凭证，待机建立的那一刻回来，语音面板还在。
 static BOOL gRKVLReturnPending = NO;
 static int  gRKVLReturnTicks = 0;
-// ⚠️ 必须「先见过 mic=1」才允许靠 pip 回跳。
-//   否则 App 一被拉起就进待机 pip=1、录音还没开始，我们 0.3s 就把它拽回来，
-//   用户等于一个字都没说上。先录上（mic=1）再谈回跳。
+static int  gRKVLReturnTries = 0;
 static BOOL gRKVLReturnSawMic = NO;
 
 static void RKVLReturnTick(void);
@@ -325,15 +383,27 @@ static void RKVLReturnTick(void);
 static void RKVLReturnToHost(NSString *why) {
     NSString *bid = gRKVLHostBundle;
     if (!bid.length) {
-        RKVLLog(@"[back] (%@) 没有宿主 bundle，放弃回跳", why);
+        RKVLLogForce(@"[back] (%@) 没有宿主 bundle，放弃回跳", why);
         return;
     }
     int ok = 0;
     BOOL r = RKVLActivateBundle(bid, &ok);
-    RKVLLog(@"[back] (%@) -> %@ ok=%d(%d) 之后 mask=0x%x mic=%d pip=%d",
-            why, bid, r, ok, RKVLProbeMask(),
-            RKVLProbeFlag(@selector(microphoneActive)),
-            RKVLProbeFlag(@selector(pictureInPictureActive)));
+    RKVLLogForce(@"[back] (%@) -> %@ ok=%d(%d) mask=0x%x mic=%d pip=%d",
+                 why, bid, r ? @"YES" : @"NO", ok, RKVLProbeMask(),
+                 RKVLProbeFlag(@selector(microphoneActive)),
+                 RKVLProbeFlag(@selector(pictureInPictureActive)));
+    if (!r && gRKVLReturnTries < 2) {
+        // 半注销刚醒的第一拍偶尔会被系统拒一次（前台切换还没就绪），重试一次
+        gRKVLReturnTries++;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            int ok2 = 0;
+            BOOL r2 = RKVLActivateBundle(bid, &ok2);
+            RKVLLogForce(@"[back] retry#%d -> ok=%d(%d)", gRKVLReturnTries, r2 ? 1 : 0, ok2);
+        });
+    } else if (r) {
+        RKVLHostSave(bid);   // 回跳成功 ⇒ 这个宿主是可信的，存下来给下次进程启动用
+    }
 }
 
 static void RKVLReturnTick(void) {
@@ -341,24 +411,34 @@ static void RKVLReturnTick(void) {
     gRKVLReturnTicks++;
     int mic = RKVLProbeFlag(@selector(microphoneActive));
     int pip = RKVLProbeFlag(@selector(pictureInPictureActive));
+    double t = gRKVLReturnTicks * 0.25;
     if (mic == 1 && !gRKVLReturnSawMic) {
         gRKVLReturnSawMic = YES;
-        RKVLLog(@"[back] 见到 mic=1（录音已建立）t=%.1fs", gRKVLReturnTicks * 0.3);
+        RKVLLog(@"[back] 见到 mic=1（录音已建立）t=%.2fs", t);
     }
-    if (gRKVLReturnSawMic && pip == 1 && mic == 0) {
+    // ① 主 App 一进录音待机（pip=1）就立刻回 —— 与原生一致，语音面板还在
+    if (pip == 1) {
         gRKVLReturnPending = NO;
-        RKVLLog(@"[back] pip 已立住 t=%.1fs -> 回宿主", gRKVLReturnTicks * 0.3);
+        RKVLLogForce(@"[back] pip 已立住 t=%.2fs mic=%d -> 回宿主", t, mic);
         RKVLReturnToHost(@"pip_ready");
         return;
     }
-    if (gRKVLReturnTicks >= 50) {   // 15s
+    // ② 15s 还没 pip、且不在录音 ⇒ 兜底回（宁可回微信，也不把人扔在输入法里）
+    if (gRKVLReturnTicks >= 60 && mic == 0) {
         gRKVLReturnPending = NO;
-        RKVLLog(@"[back] timeout t=15s pip=%d mic=%d sawMic=%d -> 兜底回宿主",
-                pip, mic, gRKVLReturnSawMic);
+        RKVLLogForce(@"[back] timeout t=%.1fs pip=0 mic=0 sawMic=%d -> 兜底回宿主",
+                     t, gRKVLReturnSawMic);
         RKVLReturnToHost(@"timeout");
         return;
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+    // ③ 40s 硬兜底（录音卡住也要回去）
+    if (gRKVLReturnTicks >= 160) {
+        gRKVLReturnPending = NO;
+        RKVLLogForce(@"[back] hard-timeout t=%.1fs pip=%d mic=%d -> 强制回宿主", t, pip, mic);
+        RKVLReturnToHost(@"hard_timeout");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{ RKVLReturnTick(); });
 }
 
@@ -366,8 +446,9 @@ static void RKVLStartReturnWatch(void) {
     if (gRKVLReturnPending) return;
     gRKVLReturnPending = YES;
     gRKVLReturnTicks = 0;
+    gRKVLReturnTries = 0;
     gRKVLReturnSawMic = NO;
-    RKVLLog(@"[back] watch start host=%@", gRKVLHostBundle ?: @"-");
+    RKVLLogForce(@"[back] watch start host=%@", gRKVLHostBundle ?: @"-");
     RKVLReturnTick();
 }
 
@@ -395,7 +476,7 @@ static void RKVLStartReturnWatch(void) {
     BOOL v = %orig;
     static BOOL last; static dispatch_once_t once;
     dispatch_once(&once, ^{ last = !v; });
-    if (v != last) { last = v; RKVLLog(@"[probe] microphoneActive -> %d", v); }
+    if (v != last) { last = v; RKVLLogForce(@"[probe] mic -> %d", v); }
     return v;
 }
 
@@ -407,12 +488,12 @@ static void RKVLStartReturnWatch(void) {
         if (last && !v) {
             // ⭐ pip 掉的那一刻是「能不能长期免跳」的唯一分水岭，记全上下文
             NSTimeInterval now = [NSDate date].timeIntervalSince1970;
-            RKVLLog(@"[pip] 1→0 距上次session_stopped=%.1fs mic=%d appAlive=%d",
+            RKVLLogForce(@"[pip] 1→0 距上次session_stopped=%.1fs mic=%d appAlive=%d",
                     gRKVLLastSessionStop > 0 ? now - gRKVLLastSessionStop : -1.0,
                     RKVLProbeFlag(@selector(microphoneActive)),
                     RKVLProbeFlag(@selector(appAlive)));
         } else {
-            RKVLLog(@"[probe] pictureInPictureActive -> %d", v);
+            RKVLLogForce(@"[probe] pip -> %d", v);
         }
         last = v;
     }
@@ -458,7 +539,7 @@ static void RKVLStartReturnWatch(void) {
 // 真正的入口（2.3.42 里 hook 的 launchWcVoiceWithContext: 全程零命中）。
 // 2.3.46：开关打开时，先让挂起的主 App 回到 RUNNING，再让它去处理随后的 PIPStart。
 - (void)launchWBRecorderWithContext:(id)context finishedBlock:(id)block {
-    RKVLLog(@"[entry] launchWBRecorder ctx=%p trial=%d wake=%d mask=0x%x",
+    RKVLLogForce(@"[entry] launchWBRecorder ctx=%p trial=%d wake=%d mask=0x%x",
             context, RKVLNoJumpTrial, RKVLVoiceWake, RKVLProbeMask());
     if (RKVLVoiceWake) {
         uint32_t before = RKVLProbeMask();
@@ -466,19 +547,22 @@ static void RKVLStartReturnWatch(void) {
         int pipB = RKVLProbeFlag(@selector(pictureInPictureActive));
         int sigRc = RKVLSignalAllCont();
         int lok = 0;
+        // ⭐ 必须赶在拉起之前问：此刻前台 App 就是我们要回来的宿主。
+        //   拉起之后前台就变成 wxkb 了，再问只会拿到自己。
+        NSString *via = nil;
+        gRKVLHostBundle = RKVLFrontmostBundleID(&via);
+        RKVLLogForce(@"[back] host=%@ via=%@", gRKVLHostBundle ?: @"(nil)", via);
         // 只有 pip/mic 都没有时才需要拉起：pip=1 时本来就能免跳，别去打扰 App。
         BOOL launched = NO;
-        if (pipB != 1 && micB != 1) {
-            // ⭐ 必须赶在拉起之前问：此刻前台 App 就是我们要回来的宿主。
-            //   拉起之后前台就变成 wxkb 了，再问只会拿到自己。
-            NSString *via = nil;
-            gRKVLHostBundle = RKVLFrontmostBundleID(&via);
-            RKVLLogForce(@"[back] host=%@ via=%@", gRKVLHostBundle ?: @"(nil)", via);
+        // ⭐ 必须有宿主才拉起：拉得起、回不来 = 把用户扔在输入法里。宿主取不到就老实走原生跳转。
+        if (gRKVLHostBundle.length && pipB != 1 && micB != 1) {
             launched = RKVLForegroundLaunchApp(&lok);
+        } else if (!gRKVLHostBundle.length) {
+            RKVLLogForce(@"[launch] 宿主未知 -> 不拉起（交给微信输入法原生跳转）");
         } else {
             RKVLLog(@"[launch] skip（已有 pip/mic 无需拉起）mic=%d pip=%d", micB, pipB);
         }
-        RKVLLog(@"[launch] result ok=%d(k=%d) sigRc=%d mask_before=0x%x mic=%d pip=%d appAlive=%d",
+        RKVLLogForce(@"[launch] result ok=%d(k=%d) sigRc=%d mask_before=0x%x mic=%d pip=%d appAlive=%d",
                 launched, lok, sigRc, before, micB, pipB,
                 RKVLProbeFlag(@selector(appAlive)));
         if (launched) {
@@ -507,7 +591,7 @@ static void RKVLStartReturnWatch(void) {
 // reason 就是二进制里那套枚举：app_background_without_audio / app_killed /
 // pip_start_timeout_url_fallback / launch_app_from_background …
 - (void)updateLaunchingRecorderApp:(BOOL)launching reason:(id)reason {
-    RKVLLog(@"[reason] launching=%d reason=%@", launching, reason);
+    RKVLLogForce(@"[reason] launching=%d reason=%@", launching, reason);
     if ([reason isKindOfClass:[NSString class]] &&
         [(NSString *)reason containsString:@"session_stopped"]) {
         gRKVLLastSessionStop = [NSDate date].timeIntervalSince1970;
@@ -522,7 +606,7 @@ static void RKVLStartReturnWatch(void) {
 
 // 2.3.45：强制免跳后最想看到的一行 —— 有没有进入「录音待机」（把 mic 位留住）。
 - (void)_transitionNativeViewStateToRecorderStandby {
-    RKVLLog(@"[standby] -> RecorderStandby trial=%d mask=0x%x", RKVLNoJumpTrial, RKVLProbeMask());
+    RKVLLogForce(@"[standby] -> RecorderStandby trial=%d mask=0x%x", RKVLNoJumpTrial, RKVLProbeMask());
     %orig;
 }
 
@@ -572,6 +656,7 @@ static void RKVLNoteHostBundle(id v, const char *via) {
     if (s.length > 128) return;
     if (gRKVLHostFromWeType && [gRKVLHostFromWeType isEqualToString:s]) return;
     gRKVLHostFromWeType = [s copy];
+    RKVLHostSave(s);   // 2.3.55：学到的宿主立刻落盘（进程被回收后仍能回跳）
     RKVLLogForce(@"[host] WeType 报宿主 = %@ (via %s)", s, via);
 }
 
@@ -637,7 +722,12 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.54 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.55 loaded path=%@ ====", RKVLLogPath());
+        // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
+        {
+            NSString *mem = RKVLHostLoad();
+            RKVLLogForce(@"[cfg] hostMemory=%@", mem ?: @"(none)");
+        }
         // 一次性探测：后台拉起要用的三个符号在不在（决定 ①② 有没有机会）。
         {
             void *sb = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
