@@ -1,6 +1,20 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.58）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.59）
 //
-// == 2.3.58（本版）：不再抢先拉起 —— 把「一次都不跳」的形态让给分屏插件 ==
+// == 2.3.59（本版）：兜底判据收紧 —— 小窗已经开了就绝不再开一次 ==
+//   老板实测（2026-10-27，装 2.3.58 + 唤醒开关关 + TrollOpen 生效）：
+//   "先打开 open 的小窗，然后往右跳我们又打开了，相当于两个都打开了"。
+//   日志实证（pid 93105）：
+//     1793034128.962 mic=1（录音已起 = TrollOpen 小窗已接管）
+//     1793034129.815 我们兜底拉起（因为只看 pip=0，等了 1.8s）
+//     1793034131.960 pip 才来（2.1s，比正常路径的 0.5s 慢得多）
+//   ⇒ 1.8s 只等 pip 是错判据：**mic=1 就说明有人把录音拉起来了**，此时再拉起 = 第二个窗口。
+//   新判据：必须 `mic==0 && pip==0 && 本轮从未见过录音` + JUMP 后 3.0s 才兜底。
+//   一旦见过 mic/pip 就锁死「已被接管」（gRKVLSeenRecorder），本轮永不兜底。
+//   顺带把观察窗从 6s 放宽到 10s（要看清「mic 起来了但 pip 迟到」这种慢路径）。
+//   ➕ 新增 RKLaunchProbe：抓 WeType 自己的 URL 收敛路径（wetype://），
+//     为「兜底也走 TrollOpen 小窗」取证（TrollOpen 的判定认 URL，不认 lsd XPC）。
+//
+// == 2.3.58：不再抢先拉起 —— 把「一次都不跳」的形态让给分屏插件 ==
 //   老板实测（2026-10-27）：关掉「点语音前唤醒主 App」后，TrollOpen 就能用**悬浮窗**
 //   打开微信输入法主 App，pip 建立后自己收进后台（不杀）= 一次都不跳。
 //   根因：我们的 openApplicationWithBundleID: 从 appex 直接发 lsd XPC，
@@ -425,6 +439,10 @@ static double gRKVLFirstMicT = 0;   // 首次见到 mic=1 的那一拍（单位�
 static BOOL gRKVLJumped = NO;            // 本轮是否已发生原生 JUMP（在 launchAppFromBackground hook 里置位）
 static NSTimeInterval gRKVLJumpAt = 0;   // JUMP 时刻
 static BOOL gRKVLFallbackLaunched = NO;  // 我们主动拉起过 ⇒ 必须回跳（否则用户被扔在输入法里）
+// ⭐ 2.3.59：只要本轮见过 mic=1 或 pip=1，就说明**有人已经把录音拉起来了**
+//   （有 TrollOpen = 悬浮小窗；没装 = 微信输入法自己全屏跳）。之后绝不许再兜底拉起，
+//   否则就是「小窗已经开了，我们往右又开一次」= 老板实测的双窗口。
+static BOOL gRKVLSeenRecorder = NO;
 
 // 2.3.56：回来之后继续盯 5 秒 —— 要看清「回来那一刻 pip 有没有自己长出来、mic 有没有被掐死」。
 //   日志实证（2.3.55）：等到 pip 才回，pip 是**录音结束进待机**时才出现的（+7.25s），
@@ -478,6 +496,14 @@ static void RKVLReturnTick(void) {
     double t = gRKVLReturnTicks * 0.25;
     NSTimeInterval now = [NSDate date].timeIntervalSince1970;
 
+    // ⭐ 2.3.59：录音/pip 只要出现过一次，就锁死「已被接管」，兜底永不触发。
+    if (mic == 1 || pip == 1) {
+        if (!gRKVLSeenRecorder) {
+            gRKVLSeenRecorder = YES;
+            RKVLLogForce(@"[back] 已被接管（mic=%d pip=%d）t=%.2fs -> 本轮不再兜底拉起", mic, pip, t);
+        }
+    }
+
     // ⭐ 2.3.58 ① pip 立住 —— 分水岭：**没兜底拉起过就什么都不做**。
     //   那种情况是 TrollOpen 用悬浮窗把主 App 打开了（或原生待机本来就在），
     //   用户根本没离开微信，再回跳反而多此一举、还会把分屏收掉。
@@ -493,13 +519,17 @@ static void RKVLReturnTick(void) {
         return;
     }
 
-    // ⭐ 2.3.58 ② 兜底判据：JUMP 已发生，但 1.8s 后 pip 还是 0 ⇒ 没有分屏插件接这一跳
-    //   （有 TrollOpen 时实测 JUMP 后 731ms 就 pip=1，1.8s 留了一倍余量）。
-    if (!gRKVLFallbackLaunched && gRKVLJumped && now - gRKVLJumpAt >= 1.8) {
+    // ⭐ 2.3.59 ② 兜底判据收紧：必须「一点录音迹象都没有」才拉起。
+    //   老板实测（2026-10-27，pid 93105）：2.3.58 的 1.8s 判据在 mic=1、pip 迟迟不来时
+    //   也会兜底拉起 ⇒ TrollOpen 的小窗已经开着，我们又全屏开了一个 = 两个都打开。
+    //   日志实证：1793034128.962 mic=1 / 129.815 我们兜底拉起 / 131.960 pip 才来 2.1s。
+    //   ⇒ 判据改成 mic==0 && pip==0 && 从未见过录音，等待放宽到 3.0s（原生 mic 约 1.0s 起）。
+    if (!gRKVLFallbackLaunched && gRKVLJumped && !gRKVLSeenRecorder &&
+        mic == 0 && pip == 0 && now - gRKVLJumpAt >= 3.0) {
         int ok = 0;
         BOOL r = RKVLForegroundLaunchApp(&ok);
         gRKVLFallbackLaunched = YES;
-        RKVLLogForce(@"[back] 分屏未接管（JUMP+%.1fs 仍 pip=0）-> 兜底拉起 ok=%d(k=%d)",
+        RKVLLogForce(@"[back] 无人接管（JUMP+%.1fs 仍 mic=0 pip=0）-> 兜底拉起 ok=%d(k=%d)",
                      now - gRKVLJumpAt, r, ok);
         // 不 usleep 阻塞主线程：后面每 250ms 一拍自然能看到 pip
     }
@@ -528,9 +558,10 @@ static void RKVLReturnTick(void) {
         return;
     }
     // ⑤ 分屏路径迟迟没动静（既没 pip 也没 JUMP）⇒ 收工，交给原生，不再管
-    if (!gRKVLFallbackLaunched && gRKVLReturnTicks >= 24) {
+    //   2.3.59：观察窗从 6s 放宽到 10s，够看清「mic 起来了但 pip 迟到」这种慢路径。
+    if (!gRKVLFallbackLaunched && gRKVLReturnTicks >= 40) {
         gRKVLReturnPending = NO;
-        RKVLLogForce(@"[back] 6s 内无 pip/JUMP t=%.1fs -> 停止观察（不跳）", t);
+        RKVLLogForce(@"[back] 10s 内无 pip/JUMP t=%.1fs -> 停止观察（不跳）", t);
         return;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)),
@@ -655,6 +686,7 @@ static void RKVLStartReturnWatch(void) {
         gRKVLJumped = NO;
         gRKVLJumpAt = 0;
         gRKVLFallbackLaunched = NO;
+        gRKVLSeenRecorder = NO;   // 新一轮开始：还没任何录音迹象
         // ⛔ 2.3.58：默认**不拉起**。抢跑会绕过 TrollOpen 的分屏路由，把小窗挤成全屏跳转。
         //   只有开关「点语音前抢先唤醒主 App」被手动打开时才强抢先（调试后门，正常别开）。
         if (RKVLVoiceWake) {
@@ -818,13 +850,44 @@ static void RKVLNoteHostBundle(id v, const char *via) {
 %end
 %end
 
+// == 2.3.59：抓「微信输入法自己是怎么拉起自己的」==
+//
+// 为什么抓：我们的兜底拉起用 `openApplicationWithBundleID:`（appex → lsd 的 XPC），
+//   TrollOpen 把它判成全屏；而 WeType 自己的 pip 超时兜底走的是 **URL scheme**
+//   （主 App Info.plist 里登记了 `wetype://`）。TrollOpenJB 的判定日志格式串是
+//   `url=… origin=… source=… target=… shouldSplit=… forceNow=…` ⇒ 它认的是 URL。
+//   ⇒ 只要抄到 WeType 那条 URL，兜底路径也能落进分屏小窗，而不是全屏再跳回来。
+%group RKLaunchProbe
+
+%hook WBVoiceInputService
+- (void)_fallbackToURLSchemeForPIPStartCommandTimeoutWithSessionId:(id)sid {
+    RKVLLogForce(@"[urlfb] pip 超时 -> 走 URL 兜底 sessionId=%@", sid);
+    %orig;
+}
+%end
+
+%hook LSApplicationWorkspace
+- (BOOL)openURL:(id)url withOptions:(id)options error:(id *)err {
+    RKVLLogForce(@"[urlfb] openURL %@ options=%@", url, options);
+    BOOL r = %orig;
+    RKVLLogForce(@"[urlfb] openURL -> %d", r);
+    return r;
+}
+- (BOOL)openApplicationWithBundleID:(id)bid {
+    RKVLLogForce(@"[urlfb] openApplicationWithBundleID %@", bid);
+    return %orig;
+}
+%end
+
+%end
+
 %ctor {
     @autoreleasepool {
         RKVLLogRefresh();
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.58 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.59 loaded path=%@ ====", RKVLLogPath());
         // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
         {
             NSString *mem = RKVLHostLoad();
@@ -879,6 +942,14 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         if (h3 && h4) {
             %init(RKHostProbe2);
             RKVLLogForce(@"[cfg] hostprobe2 installed");
+        }
+
+        // 2.3.59：抓 WeType 自己的 URL 拉起路径（为「兜底也走小窗」取证）
+        BOOL l1 = objc_getClass("LSApplicationWorkspace") != NULL;
+        RKVLLogForce(@"[cfg] launchprobe LSWS=%d svcFallback=%d", l1, hasFallback);
+        if (l1 && hasFallback) {
+            %init(RKLaunchProbe);
+            RKVLLogForce(@"[cfg] launchprobe installed");
         }
     }
 }
