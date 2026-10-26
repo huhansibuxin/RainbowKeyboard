@@ -417,6 +417,8 @@ static BOOL RKVLReturnStep(void) {
     return YES;
 }
 
+static void RKVLScheduleTick(void);
+
 static void RKVLReturnTick(void) {
     if (!gRKVLReturnPending) return;
     if (gRKVLInTick) return;            // nudge 从 hook 里进来时会重入，让外层那一拍处理
