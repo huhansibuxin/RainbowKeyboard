@@ -247,6 +247,11 @@ static void RKWLogEncodings(Class c, const char *name) {
     if (!c) return;
     const char *sels[] = {
         "startWithCompletionHandler:",
+        "startWithPlaybackMode:completionHandler:",
+        "activateVisiblePiPModeWithReason:",
+        "prepareVisiblePiPContent",
+        "preparePictureInPictureForVoiceCapture",
+        "preparePictureInPictureForStandby",
         "pictureInPictureController:failedToStartPictureInPictureWithError:",
         "handleInternalVisibilityStateChanged:reason:",
         "updatePublishedPiPActiveStateWithSource:",
@@ -334,13 +339,74 @@ static void RKWInstallLifecycleHooks(void) {
 
 // 建完之后的灰度轨迹：pip 若"起来了又被收起"，会在这里露出 stashed=1 / mgrVisible=0。
 static void RKWStartTrace(id mgr) {
-    for (NSNumber *secs in @[@(0.4), @(0.9), @(1.5), @(2.2), @(3.0), @(4.5), @(6.5)]) {
+    for (NSNumber *secs in @[@(0.4), @(0.9), @(1.5), @(2.2), @(3.0), @(4.5), @(6.5), @(9.0), @(12.0)]) {
         double d = [secs doubleValue];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             RKWLogDeep([NSString stringWithFormat:@"[trace +%.1fs]", d]);
         });
     }
+}
+
+#pragma mark - 内部链路观察器（2.3.64）
+
+// 只观察、不改行为。参数一律按 uintptr_t 接（Objective-C 对象指针和 NSInteger 在
+// arm64 上是同一个 x 寄存器宽度，所以**无论真实签名是 id 还是整数都安全**），
+// 并且只在返回类型是 void 时才挂 —— 否则替换掉一个返回 BOOL 的 IMP，调用方会读到垃圾返回值。
+static int gRKWOBS = 0;
+
+static void RKWObserve(Class cls, const char *name, int nargs) {
+    if (!cls) return;
+    SEL sel = sel_registerName(name);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) { RKWLog(@"观察点缺失 %s", name); return; }
+    const char *enc = method_getTypeEncoding(m);
+    if (enc[0] != 'v') { RKWLog(@"观察点跳过 %s（返回非 void：%s）", name, enc); return; }
+    IMP o = method_getImplementation(m);
+    IMP nw = NULL;
+    if (nargs == 0) {
+        nw = imp_implementationWithBlock(^(id me) {
+            RKWLog(@"⇒ %s", name);
+            ((void (*)(id, SEL))o)(me, sel);
+        });
+    } else if (nargs == 1) {
+        nw = imp_implementationWithBlock(^(id me, uintptr_t a) {
+            RKWLog(@"⇒ %s(a=%lld / %p)", name, (long long)a, (void *)a);
+            ((void (*)(id, SEL, uintptr_t))o)(me, sel, a);
+        });
+    } else if (nargs == 2) {
+        nw = imp_implementationWithBlock(^(id me, uintptr_t a, uintptr_t b) {
+            RKWLog(@"⇒ %s(a=%lld, b=%lld)", name, (long long)a, (long long)b);
+            ((void (*)(id, SEL, uintptr_t, uintptr_t))o)(me, sel, a, b);
+        });
+    } else {
+        RKWLog(@"观察点跳过 %s（参数过多）", name);
+        return;
+    }
+    method_setImplementation(m, nw);
+    gRKWOBS++;
+}
+
+static void RKWInstallObservers(void) {
+    Class c = objc_getClass("WBVoiceInputPIPManager");
+    if (!c) return;
+    // 谁在何时把 pip 拉起来/停掉/改可见模式 —— 2.3.63 里我们 4 次 start 一个回调都没等到，
+    // 只能从这里看它内部到底走到哪一步。
+    RKWObserve(c, "startWithPlaybackMode:completionHandler:", 2);
+    RKWObserve(c, "activateVisiblePiPModeWithReason:", 1);
+    RKWObserve(c, "enterStoppingStateFromSource:", 1);
+    RKWObserve(c, "updatePublishedPiPActiveStateWithSource:", 1);
+    RKWObserve(c, "handleInternalVisibilityStateChanged:reason:", 2);
+    RKWObserve(c, "prepareVisiblePiPContent", 0);
+    RKWObserve(c, "startVisibleAnimationIfNeeded", 0);
+    RKWObserve(c, "stopVisibleAnimation", 0);
+    RKWObserve(c, "performForceStartAndConsumePendingHandlerWithToken:", 1);
+    RKWObserve(c, "scheduleStartConfirmRetryWithToken:deadline:", 2);
+    RKWObserve(c, "consumePendingStartConfirmFromSource:", 1);
+    RKWObserve(c, "logForegroundPiPStartStateWithReason:", 1);
+    RKWObserve(c, "beginAutomaticStashProtectionIfNeeded", 0);
+    RKWObserve(c, "notifyDelegateDidFailToStart", 0);
+    RKWLog(@"内部链路观察器已装 %d 个", gRKWOBS);
 }
 
 // 门控开关在 WBVoiceInputManager 上（不在 Policy 上）——wcvoicekeep 最早死在这里
@@ -383,6 +449,25 @@ static void RKWEngageOnce(id mgr, int attempt) {
     }
     ((void (*)(id, SEL))objc_msgSend)(mgr, prepare);
     RKWLog(@"#%d prepare 已调用", attempt);
+
+    // ⭐ 2.3.64 实验：先激活「可见 pip 模式」再 start。
+    // 依据（2.3.63 实测）：start 发出后**一个 delegate 回调都没有** —— 连 willStart 都没有，
+    // 3 秒后超时返回失败；而同一时刻 mgr 的 visiblePiPModeActive 全程是 0。
+    // 这不是「被拒绝」（被拒绝会立刻走 failedToStart），而是「被挂着等」。
+    // 内容层不进可见模式，AVKit 就没有东西可抓 ⇒ 只能挂。所以先把可见模式点起来。
+    if (attempt == 0) {
+        SEL act = sel_registerName("activateVisiblePiPModeWithReason:");
+        if ([mgr respondsToSelector:act]) {
+            @try {
+                ((void (*)(id, SEL, uintptr_t))objc_msgSend)(mgr, act, (uintptr_t)0);
+                RKWLog(@"#%d activateVisiblePiPModeWithReason(0) 已调用", attempt);
+            } @catch (NSException *e) {
+                RKWLog(@"#%d activate 抛异常 %@", attempt, e);
+            }
+        } else {
+            RKWLog(@"#%d 没有 activateVisiblePiPModeWithReason:", attempt);
+        }
+    }
 
     if (![mgr respondsToSelector:startSel]) {
         RKWLog(@"#%d 没有 startWithCompletionHandler:", attempt);
@@ -440,9 +525,11 @@ static void RKWTrigger(NSString *why, double delay) {
             RKWStartTrace(mgr);
             RKWEngageOnce(mgr, 0);
 
-            // 重试：0.7 / 1.5 / 2.6s 各补一次（冷启动首拍偶发失败，wcvoicekeep 实测）。
-            // 每拍都先看**真实** pip 状态：成了就回执并停止补刀。
-            for (NSNumber *secs in @[@(0.7), @(1.5), @(2.6)]) {
+            // ⛔ 2.3.64：重试从 4 次砍到 1 次。
+            //   2.3.63 实测：4 次 start 全部在 pipController 里排队，3 秒后一起超时失败，
+            //   一个 delegate 回调都没触发 —— 说明重试**不会**增加成功率，只会把状态机搅乱。
+            //   留着这 1 次是为了覆盖「首拍 window 还没就绪」的冷启动现场。
+            for (NSNumber *secs in @[@(0.7)]) {
                 double d = [secs doubleValue];
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
@@ -488,6 +575,7 @@ __attribute__((constructor)) static void RKWetypeHostInit(void) {
         RKWLogMethods(objc_getClass("WBVoiceInputManager"), "WBVoiceInputManager");
         RKWLogEncodings(objc_getClass("WBVoiceInputPIPManager"), "WBVoiceInputPIPManager");
         RKWInstallLifecycleHooks();
+        RKWInstallObservers();
         RKWLogDeep(@"载入时");
 
         [[NSNotificationCenter defaultCenter]
