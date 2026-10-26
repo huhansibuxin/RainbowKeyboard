@@ -42,6 +42,9 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 @interface RKBRootListController : PSListController <UIColorPickerViewControllerDelegate>
 @property(nonatomic, copy) NSString *editingColorKey;
 - (void)rkRebuildFollowAppearanceSpecifier;
+- (void)rkHandleCFPrefsChanged;
+- (void)rkInstallCFPrefsObserver;
+- (void)rkRemoveCFPrefsObserver;
 @end
 
 @interface RKBCandidateListController : RKBRootListController
