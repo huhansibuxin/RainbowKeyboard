@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.50）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.51）
 //
 // == 已经被日志坐实的部分 ==
 //   2.3.42/2.3.44：半注销后每次点语音 → mic 0 → [entry] → [JUMP] pipFallback=0
@@ -27,13 +27,12 @@
 //   isMainAppVoiceStandbyActive 不 hook：尾部 `mov x0,x20` 且另有 `mov w20,#1` 分支，
 //   返回类型不唯一（id / BOOL 混用），hook 有改坏调用约定的风险。
 //
-// == 2.3.50 做的事：改走 FrontBoard「启动但不激活」把主 App 拉起来 ==
-//   2.3.49 拿到决定性证据：`sysctl(KERN_PROC_ALL)` 在键盘扩展沙盒里 rc=-1 errno=1(EPERM)
-//   —— 整个进程表都读不到，proc_name/proc_pidpath 同样 EPERM；`kill(-1,SIGCONT)` 能发出去
-//   但 500ms 内 mask 纹丝不动 ⇒ iOS 挂起是 Mach task_suspend，SIGCONT 对它是空操作。
-//   「枚举 + 信号」两条腿全断，于是改试：让 FrontBoard 把 App「启动但不激活」
-//   （SBSLaunchApplicationWithIdentifier(suspended) / LSApplicationWorkspace+ActivateSuspended），
-//   App 从挂起变 RUNNING 但不切前台，随后它会收到 PIPStart。
+// == 2.3.51 做的事：无头 → 有头拉起 + pip 掉落的精确取证 ==
+//   2.3.50 实测无头全灭：SBSLaunchApplicationWithIdentifier(suspended) rc=9（无 entitlement），
+//   LSApplicationWorkspace 在 iOS16 已没有 openApplicationWithBundleID:withOptions:。
+//   改回 WeType 自己在用的单参 openApplicationWithBundleID:（有头，一定存在/有权限）。
+//   同时新增 `[pip] 1→0 距上次session_stopped=?.?s` —— pip 能活多久决定「最多跳几次」。
+//   日志已证明 pip=1 期间 requireJump 恒 0、零 JUMP（1793027166/1793027182 两轮连打两次都不跳）。
 //
 // 日志受「记录调试日志」（AIRecorderLog）与总开关（Enabled）双控，默认关。
 
@@ -130,84 +129,51 @@ static unsigned int RKVLProbeMask(void) {
 //   p_comm 上限 MAXCOMLEN+1 = 17 字节，主 App 是 "wxkb"、扩展自己是 "wxkb_plugin"，
 //   不会撞名；仍然排除 getpid() 双保险。
 
-// ⛔ 2.3.50 结论（别再走「枚举进程 + 信号唤醒」这条路）：
-//   2.3.49 实测 `sysctl(KERN_PROC_ALL)` 在键盘扩展沙盒里直接 `rc=-1 errno=1`(EPERM)
-//   —— 不是 p_comm 的写法问题，是整个进程表都读不到；proc_name/proc_pidpath 同样是 EPERM。
-//   `kill(-1, SIGCONT)` 能发出去（rc=0），但之后 500ms 内 mask 纹丝不动 ⇒ iOS 的「挂起」
-//   是 Mach task_suspend（suspend count 累加），SIGCONT 在内核层对它就是空操作。
-//   ⇒ 从 appex 里「枚举进程」和「信号唤醒主 App」两条腿全断。
+// ⛔ 2.3.50 结果（无头拉起全灭，别再试）：
+//   [cfg] launchable SBS=1 SBSOpts=1 LSWS=0
+//   ① SBSLaunchApplicationWithIdentifier(suspended=1)              rc=9
+//   ② SBSLaunchApplicationWithIdentifierAndLaunchOptions(...,YES)  rc=9
+//   ③ LSApplicationWorkspace 没有 openApplicationWithBundleID:withOptions:（iOS16 已移除）
+//   rc=9 = SpringBoardServices 的「无权限」错误码（缺 com.apple.springboard.launchapplications
+//   entitlement，重签微信输入法的 appex 会破坏签名，不可行）。
+//   ⇒ 从键盘 appex 里「无头拉起主 App」这条路彻底封死。
 //
-// 2.3.50 改走 FrontBoard 的「启动但不激活」：让 App 从挂起变 RUNNING、但不切前台。
-//   ① SpringBoardServices: SBSLaunchApplicationWithIdentifier(bid, suspended=YES)
-//   ② SpringBoardServices: SBSLaunchApplicationWithIdentifierAndLaunchOptions(bid, opts, YES)
-//   ③ LSApplicationWorkspace: openApplicationWithBundleID:withOptions: @{@"ActivateSuspended": @YES}
-//   三条都试，谁 rc=0/ok=1 用谁；全失败就退回原来「直接跳」的行为，不会更糟。
-//   （静态查过 wxkb_plugin 只用过 LSApplicationWorkspace 的单参 openApplicationWithBundleID:
-//     —— 那是前台打开，也就是现成的「跳转」；WeType 自己从没试过后台启动。）
+// == 2.3.51 改「有头拉起」==
+//   用户判断：无头拉起没用，要有头拉起才行。有头 = LSApplicationWorkspace 的单参
+//   `openApplicationWithBundleID:` —— 这个 WeType 自己在用，所以一定存在、一定有权限。
+//   代价是它会切前台（= 一次跳转），但跳完之后 App 会进入录音待机（pip=1），
+//   而 pip=1 期间日志已证明 100% 免跳（1793027166 / 1793027182 两轮 requireJump=0，零 JUMP）。
+//   所以目标是「用有头拉起把 pip 点亮一次，然后靠 pip 长期免跳」。
+//
+// ⭐ 同时记录 pip 1→0 的精确上下文（这是「最多跳几次」的唯一决定因素）：
+//   pip 掉的那一刻距上次 session_stopped 多少秒、appAlive 还在不在。
+//   如果 pip 能活很久 ⇒ 「跳一次就长期免跳」成立；如果几秒就掉 ⇒ 得在 pip 掉前主动补。
 
-static BOOL RKVLBackgroundLaunchApp(NSString **outMethod, int *outRC) {
-    if (outMethod) *outMethod = @"none";
-    if (outRC) *outRC = -1;
-    CFStringRef bid = CFSTR("com.tencent.wetype");
+// 上一次会话结束（reason=session_stopped）的时间戳，用来量 pip 掉之前活了多久
+static NSTimeInterval gRKVLLastSessionStop = 0;
 
-    void *sb = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
-                      RTLD_LAZY);
-    if (sb) {
-        typedef int (*FnSuspended)(CFStringRef, Boolean);
-        FnSuspended f1 = (FnSuspended)dlsym(sb, "SBSLaunchApplicationWithIdentifier");
-        if (f1) {
-            int rc = f1(bid, true);
-            RKVLLog(@"[launch] ① SBSLaunchApplicationWithIdentifier(suspended=1) rc=%d", rc);
-            if (rc == 0) {
-                if (outMethod) *outMethod = @"SBSLaunch(suspended)";
-                if (outRC) *outRC = rc;
-                return YES;
-            }
-        } else {
-            RKVLLog(@"[launch] ① symbol SBSLaunchApplicationWithIdentifier missing");
-        }
-
-        typedef int (*FnOpts)(CFStringRef, CFDictionaryRef, Boolean);
-        FnOpts f2 = (FnOpts)dlsym(sb, "SBSLaunchApplicationWithIdentifierAndLaunchOptions");
-        if (f2) {
-            NSDictionary *opts = @{@"SBSActivateSuspended": @YES};
-            int rc = f2(bid, (__bridge CFDictionaryRef)opts, true);
-            RKVLLog(@"[launch] ② SBSLaunchApplicationWithIdentifierAndLaunchOptions rc=%d", rc);
-            if (rc == 0) {
-                if (outMethod) *outMethod = @"SBSLaunch(opts,suspended)";
-                if (outRC) *outRC = rc;
-                return YES;
-            }
-        } else {
-            RKVLLog(@"[launch] ② symbol SBSLaunchApplicationWithIdentifierAndLaunchOptions missing");
-        }
-    } else {
-        RKVLLog(@"[launch] dlopen SpringBoardServices failed");
-    }
-
+// 有头拉起主 App：LSApplicationWorkspace 单参 openApplicationWithBundleID:
+// 返回 YES = 请求被受理（App 会被带到前台，等价于一次跳转）
+static BOOL RKVLForegroundLaunchApp(int *outOK) {
+    if (outOK) *outOK = 0;
     Class wsCls = objc_getClass("LSApplicationWorkspace");
-    if (wsCls) {
-        id ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, sel_registerName("defaultWorkspace"));
-        SEL s = sel_registerName("openApplicationWithBundleID:withOptions:");
-        if (ws && [ws respondsToSelector:s]) {
-            NSDictionary *opts = @{@"ActivateSuspended": @YES};
-            BOOL ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, s, @"com.tencent.wetype", opts);
-            RKVLLog(@"[launch] ③ LSApplicationWorkspace openApplicationWithBundleID:withOptions: ok=%d", ok);
-            if (ok) {
-                if (outMethod) *outMethod = @"LSWorkspace(ActivateSuspended)";
-                if (outRC) *outRC = 0;
-                return YES;
-            }
-        } else {
-            RKVLLog(@"[launch] ③ LSApplicationWorkspace 没有 openApplicationWithBundleID:withOptions:");
-        }
-    } else {
+    if (!wsCls) {
         RKVLLog(@"[launch] LSApplicationWorkspace class missing");
+        return NO;
     }
-    return NO;
+    id ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, sel_registerName("defaultWorkspace"));
+    SEL s = sel_registerName("openApplicationWithBundleID:");
+    if (!ws || ![ws respondsToSelector:s]) {
+        RKVLLog(@"[launch] defaultWorkspace=%p / openApplicationWithBundleID: 不可用", ws);
+        return NO;
+    }
+    BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, s, @"com.tencent.wetype");
+    RKVLLog(@"[launch] openApplicationWithBundleID: (有头) ok=%d", ok);
+    if (outOK) *outOK = ok ? 1 : 0;
+    return ok;
 }
 
-// 保留 kill(-1, SIGCONT)：虽然对 Mach 挂起无效，但对 job-control 停住的进程有效，成本为零。
+// 保留 kill(-1, SIGCONT)：对 Mach 挂起无效，但对 job-control 停住的进程有效，成本为零。
 static int RKVLSignalAllCont(void) {
     int rc = kill(-1, SIGCONT);
     RKVLLog(@"[wake] kill(-1,SIGCONT) rc=%d errno=%d", rc, errno);
@@ -246,7 +212,19 @@ static int RKVLSignalAllCont(void) {
     BOOL v = %orig;
     static BOOL last; static dispatch_once_t once;
     dispatch_once(&once, ^{ last = !v; });
-    if (v != last) { last = v; RKVLLog(@"[probe] pictureInPictureActive -> %d", v); }
+    if (v != last) {
+        if (last && !v) {
+            // ⭐ pip 掉的那一刻是「能不能长期免跳」的唯一分水岭，记全上下文
+            NSTimeInterval now = [NSDate date].timeIntervalSince1970;
+            RKVLLog(@"[pip] 1→0 距上次session_stopped=%.1fs mic=%d appAlive=%d",
+                    gRKVLLastSessionStop > 0 ? now - gRKVLLastSessionStop : -1.0,
+                    RKVLProbeFlag(@selector(microphoneActive)),
+                    RKVLProbeFlag(@selector(appAlive)));
+        } else {
+            RKVLLog(@"[probe] pictureInPictureActive -> %d", v);
+        }
+        last = v;
+    }
     return v;
 }
 
@@ -293,28 +271,28 @@ static int RKVLSignalAllCont(void) {
             context, RKVLNoJumpTrial, RKVLVoiceWake, RKVLProbeMask());
     if (RKVLVoiceWake) {
         uint32_t before = RKVLProbeMask();
+        int micB = RKVLProbeFlag(@selector(microphoneActive));
+        int pipB = RKVLProbeFlag(@selector(pictureInPictureActive));
         int sigRc = RKVLSignalAllCont();
-        NSString *method = nil;
-        int lrc = -1;
-        BOOL launched = RKVLBackgroundLaunchApp(&method, &lrc);
-        RKVLLog(@"[launch] result ok=%d method=%@ rc=%d sigRc=%d mask_before=0x%x mic=%d pip=%d appAlive=%d",
-                launched, method, lrc, sigRc, before,
-                RKVLProbeFlag(@selector(microphoneActive)),
-                RKVLProbeFlag(@selector(pictureInPictureActive)),
+        int lok = 0;
+        // 只有 pip/mic 都没有时才需要拉起：pip=1 时本来就能免跳，别去打扰 App。
+        BOOL launched = NO;
+        if (pipB != 1 && micB != 1) {
+            launched = RKVLForegroundLaunchApp(&lok);
+        } else {
+            RKVLLog(@"[launch] skip（已有 pip/mic 无需拉起）mic=%d pip=%d", micB, pipB);
+        }
+        RKVLLog(@"[launch] result ok=%d(k=%d) sigRc=%d mask_before=0x%x mic=%d pip=%d appAlive=%d",
+                launched, lok, sigRc, before, micB, pipB,
                 RKVLProbeFlag(@selector(appAlive)));
-        // 分两段等（各 600ms）：冷启动主 App 到能响应 PIPStart 通常要 1 秒上下。
-        // 两段各打一次 mask，用来分辨「是不是阻塞主线程把 mask 上报也堵住了」：
-        // 若阻塞期间纹丝不动、%orig 之后立刻变，说明上报走主队列，要换成非阻塞设计。
-        usleep(600 * 1000);
-        RKVLLog(@"[wake] +0.6s mask=0x%x mic=%d pip=%d",
-                RKVLProbeMask(),
-                RKVLProbeFlag(@selector(microphoneActive)),
-                RKVLProbeFlag(@selector(pictureInPictureActive)));
-        usleep(600 * 1000);
-        RKVLLog(@"[wake] +1.2s mask=0x%x mic=%d pip=%d",
-                RKVLProbeMask(),
-                RKVLProbeFlag(@selector(microphoneActive)),
-                RKVLProbeFlag(@selector(pictureInPictureActive)));
+        if (launched) {
+            // 有头拉起后给 App 600ms 把界面/录音待机拉起来再交给 %orig
+            usleep(600 * 1000);
+            RKVLLog(@"[wake] +0.6s mask=0x%x mic=%d pip=%d",
+                    RKVLProbeMask(),
+                    RKVLProbeFlag(@selector(microphoneActive)),
+                    RKVLProbeFlag(@selector(pictureInPictureActive)));
+        }
         for (double d = 2.0; d <= 8.1; d += 2.0) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
@@ -332,6 +310,10 @@ static int RKVLSignalAllCont(void) {
 // pip_start_timeout_url_fallback / launch_app_from_background …
 - (void)updateLaunchingRecorderApp:(BOOL)launching reason:(id)reason {
     RKVLLog(@"[reason] launching=%d reason=%@", launching, reason);
+    if ([reason isKindOfClass:[NSString class]] &&
+        [(NSString *)reason containsString:@"session_stopped"]) {
+        gRKVLLastSessionStop = [NSDate date].timeIntervalSince1970;
+    }
     %orig;
 }
 
@@ -372,7 +354,7 @@ static int RKVLSignalAllCont(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLog(@"==== RKVoiceJumpProbe 2.3.50 loaded path=%@ ====", RKVLLogPath());
+        RKVLLog(@"==== RKVoiceJumpProbe 2.3.51 loaded path=%@ ====", RKVLLogPath());
         // 一次性探测：后台拉起要用的三个符号在不在（决定 ①② 有没有机会）。
         {
             void *sb = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
@@ -380,8 +362,8 @@ static int RKVLSignalAllCont(void) {
             BOOL s2 = sb && dlsym(sb, "SBSLaunchApplicationWithIdentifierAndLaunchOptions");
             Class wc = objc_getClass("LSApplicationWorkspace");
             id w = wc ? ((id (*)(id, SEL))objc_msgSend)((id)wc, sel_registerName("defaultWorkspace")) : nil;
-            BOOL s3 = w && [w respondsToSelector:sel_registerName("openApplicationWithBundleID:withOptions:")];
-            RKVLLog(@"[cfg] launchable SBS=%d SBSOpts=%d LSWS=%d", s1, s2, s3);
+            BOOL s3 = w && [w respondsToSelector:sel_registerName("openApplicationWithBundleID:")];
+            RKVLLog(@"[cfg] launchable SBS=%d SBSOpts=%d LSWS_single=%d", s1, s2, s3);
         }
         NSDictionary *p = RKReadEffectivePreferences();
         RKVLLog(@"[cfg] logEnabled=%d trial=%d wake=%d Enabled=%@ AIRecorderLog=%@ VoiceNoJumpTrial=%@ VoiceWakeApp=%@ rev=%@ bundle=%@",
