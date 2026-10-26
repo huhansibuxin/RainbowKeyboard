@@ -212,7 +212,7 @@
 			<key>label</key>
 			<string>点语音不跳主 App</string>
 			<key>default</key>
-			<false/>
+			<true/>
 			<key>defaults</key>
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>
@@ -235,7 +235,7 @@
 			<key>label</key>
 			<string>点语音前唤醒主 App</string>
 			<key>default</key>
-			<false/>
+			<true/>
 			<key>defaults</key>
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>

@@ -12,8 +12,8 @@
     Opacity = 0.7991349101066589;
     RippleEnabled = 1;
     AIRecorderLog = 0;
-    VoiceNoJumpTrial = 0;
-    VoiceWakeApp = 0;
+    VoiceNoJumpTrial = 1;
+    VoiceWakeApp = 1;
     LightPop = 1;
     LightPopMatchColor = 0;
     LightPopFollowAppearance = 1;

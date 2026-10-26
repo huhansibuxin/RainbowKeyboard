@@ -44,14 +44,14 @@ AI_LOG_KEY = "AIRecorderLog"
 AI_LOG_DEFAULT = False
 AI_LOG_PATH_HINTS = ("rk_ai.log", "rk_voice.log")
 
-# 2.3.45：语音免跳转实验开关。默认必须为关（关 = 官方行为，点语音照旧跳主 App）。
+# 2.3.45：语音免跳转实验开关。2.3.47 起默认开（用户要求新开关一律默认开）。
 # 这个开关要参与键盘进程内的判据，因此同样必须同时存在于两份 defaults 与固化表。
 NO_JUMP_KEY = "VoiceNoJumpTrial"
-NO_JUMP_DEFAULT = False
+NO_JUMP_DEFAULT = True
 
-# 2.3.46：点语音前唤醒主 App（信号唤醒实验）。默认必须为关。
+# 2.3.46：点语音前唤醒主 App（信号唤醒实验）。2.3.47 起默认开。
 WAKE_KEY = "VoiceWakeApp"
-WAKE_DEFAULT = False
+WAKE_DEFAULT = True
 
 # 「跟随系统深浅色」：plist 里是定义项，实际显示的是控制器重建后的 specifier，
 # 两处标题必须一致（下面按这个名字做一致性断言）。
