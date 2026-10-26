@@ -170,6 +170,40 @@ static BOOL RKWRealPipActive(id mgr) {
     return NO;   // 取不到真实状态就一律当作「没有」⇒ 允许重建，绝不静默跳过
 }
 
+#pragma mark - 通用取值助手（全部先 respondsToSelector 再调，防崩）
+
+static BOOL RKWMsgBool(id obj, const char *name) {
+    if (!obj) return NO;
+    SEL s = sel_registerName(name);
+    if (![obj respondsToSelector:s]) return NO;
+    return ((BOOL (*)(id, SEL))objc_msgSend)(obj, s);
+}
+
+// ⭐ 2.3.63：pip 生命周期里的灰度状态。
+// 2.3.62 实测：主 App `realPip=1` 持续 100 秒，键盘侧 `pictureInPictureActive` 却一直是 0
+// ⇒ 说明 pipController 说"active"并不等于"键盘侧该认为可用"。AVKit 的 `isPictureInPictureActive`
+// 在 pip 被系统收起（stashed）时**仍为 YES**，而微信自己的上报会看 `isStashedOrUnderLock` /
+// `visiblePiPModeActive` 再决定要不要报 1。所以必须把这三个位一起打出来，才能分清
+// 「没建成」和「建成了但被收起」——这两者的修法完全不同。
+static void RKWLogDeep(NSString *tag) {
+    id mgr = RKWPipManager();
+    id ctl = RKWPipController(mgr);
+    BOOL sysSupp = NO;
+    Class avc = objc_getClass("AVPictureInPictureController");
+    if (avc) {
+        SEL s = sel_registerName("isPictureInPictureSupported");
+        if ([avc respondsToSelector:s]) sysSupp = ((BOOL (*)(Class, SEL))objc_msgSend)(avc, s);
+    }
+    RKWLog(@"%@ ctlActive=%d ctlPossible=%d mgrVisible=%d stashed=%d appState=%ld sysSupp=%d",
+           tag,
+           RKWMsgBool(ctl, "isPictureInPictureActive"),
+           RKWMsgBool(ctl, "isPictureInPicturePossible"),
+           RKWMsgBool(mgr, "visiblePiPModeActive"),
+           RKWMsgBool(mgr, "isStashedOrUnderLock"),
+           (long)[[UIApplication sharedApplication] applicationState],
+           (int)sysSupp);
+}
+
 // 建 pip 前的现场快照：一次看清 start 到底卡在哪（scene 不 active / setup 没做 / 窗口没就绪）。
 static void RKWLogState(NSString *tag) {
     id mgr = RKWPipManager();
@@ -203,6 +237,110 @@ static void RKWLogMethods(Class c, const char *name) {
     }
     free(ms);
     RKWLog(@"%s 方法(%u): %@", name, n, s);
+}
+
+// 2.3.63：把几个关键选择子的**类型编码**打出来。
+// 起因：`startWithCompletionHandler:` 的回调 ok 一直打出 -1327811635 这种垃圾值，
+// 说明我们按 ^(BOOL) 去读参数读错了（真实很可能是 ^(NSError*) 或 ^(NSInteger code)）。
+// 编码是运行时事实，比自己猜签名可靠：`v24@0:8@?16` 里的 @? = block，后面跟 block 的签名。
+static void RKWLogEncodings(Class c, const char *name) {
+    if (!c) return;
+    const char *sels[] = {
+        "startWithCompletionHandler:",
+        "pictureInPictureController:failedToStartPictureInPictureWithError:",
+        "handleInternalVisibilityStateChanged:reason:",
+        "updatePublishedPiPActiveStateWithSource:",
+        "enterStoppingStateFromSource:",
+        "isStashedOrUnderLock",
+        "visiblePiPModeActive",
+        NULL
+    };
+    NSMutableString *s = [NSMutableString string];
+    for (int i = 0; sels[i]; i++) {
+        Method m = class_getInstanceMethod(c, sel_registerName(sels[i]));
+        [s appendFormat:@"%s=%s ", sels[i], m ? method_getTypeEncoding(m) : "(无)"];
+    }
+    RKWLog(@"%s 编码: %@", name, s);
+}
+
+#pragma mark - pip 生命周期埋点（2.3.63）
+
+// 只 hook 参数签名确定是 id 的几个 delegate（其余选择子签名未知，盲传会崩，
+// 先靠 RKWLogEncodings 把编码打出来再决定下一版要不要接）。
+static void RKWInstallLifecycleHooks(void) {
+    Class cls = objc_getClass("WBVoiceInputPIPManager");
+    if (!cls) return;
+
+    {
+        SEL sel = sel_registerName("pictureInPictureControllerWillStartPictureInPicture:");
+        Method m = class_getInstanceMethod(cls, sel);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            method_setImplementation(m, imp_implementationWithBlock(^(id me, id ctl) {
+                RKWLog(@"◆ willStart");
+                ((void (*)(id, SEL, id))o)(me, sel, ctl);
+            }));
+        }
+    }
+    {
+        SEL sel = sel_registerName("pictureInPictureControllerDidStartPictureInPicture:");
+        Method m = class_getInstanceMethod(cls, sel);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            method_setImplementation(m, imp_implementationWithBlock(^(id me, id ctl) {
+                RKWLog(@"◆★ didStart（真的起来了）");
+                ((void (*)(id, SEL, id))o)(me, sel, ctl);
+                RKWLogDeep(@"didStart 后");
+            }));
+        }
+    }
+    {
+        SEL sel = sel_registerName("pictureInPictureController:failedToStartPictureInPictureWithError:");
+        Method m = class_getInstanceMethod(cls, sel);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            method_setImplementation(m, imp_implementationWithBlock(^(id me, id ctl, id err) {
+                RKWLog(@"◆✗ failedToStart err=%@", err);
+                ((void (*)(id, SEL, id, id))o)(me, sel, ctl, err);
+            }));
+        }
+    }
+    {
+        SEL sel = sel_registerName("pictureInPictureControllerWillStopPictureInPicture:");
+        Method m = class_getInstanceMethod(cls, sel);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            method_setImplementation(m, imp_implementationWithBlock(^(id me, id ctl) {
+                RKWLog(@"◆ willStop");
+                ((void (*)(id, SEL, id))o)(me, sel, ctl);
+                RKWLogDeep(@"willStop 后");
+            }));
+        }
+    }
+    {
+        SEL sel = sel_registerName("pictureInPictureControllerDidStopPictureInPicture:");
+        Method m = class_getInstanceMethod(cls, sel);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            method_setImplementation(m, imp_implementationWithBlock(^(id me, id ctl) {
+                RKWLog(@"◆✗ didStop");
+                ((void (*)(id, SEL, id))o)(me, sel, ctl);
+                RKWLogDeep(@"didStop 后");
+            }));
+        }
+    }
+    RKWLog(@"pip 生命周期埋点已安装");
+}
+
+// 建完之后的灰度轨迹：pip 若"起来了又被收起"，会在这里露出 stashed=1 / mgrVisible=0。
+static void RKWStartTrace(id mgr) {
+    for (NSNumber *secs in @[@(0.4), @(0.9), @(1.5), @(2.2), @(3.0), @(4.5), @(6.5)]) {
+        double d = [secs doubleValue];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            RKWLogDeep([NSString stringWithFormat:@"[trace +%.1fs]", d]);
+        });
+    }
 }
 
 // 门控开关在 WBVoiceInputManager 上（不在 Policy 上）——wcvoicekeep 最早死在这里
@@ -299,6 +437,7 @@ static void RKWTrigger(NSString *why, double delay) {
                    why, (int)RKWPipIsActive(mgr));
             gFakeForeground = YES;
             RKWInstallSceneHook();
+            RKWStartTrace(mgr);
             RKWEngageOnce(mgr, 0);
 
             // 重试：0.7 / 1.5 / 2.6s 各补一次（冷启动首拍偶发失败，wcvoicekeep 实测）。
@@ -347,6 +486,9 @@ __attribute__((constructor)) static void RKWetypeHostInit(void) {
         // 主 App 二进制加密、静态分析看不到方法表 ⇒ 运行时 dump 一次（找 stop/reset/teardown）
         RKWLogMethods(objc_getClass("WBVoiceInputPIPManager"), "WBVoiceInputPIPManager");
         RKWLogMethods(objc_getClass("WBVoiceInputManager"), "WBVoiceInputManager");
+        RKWLogEncodings(objc_getClass("WBVoiceInputPIPManager"), "WBVoiceInputPIPManager");
+        RKWInstallLifecycleHooks();
+        RKWLogDeep(@"载入时");
 
         [[NSNotificationCenter defaultCenter]
             addObserverForName:UIApplicationDidBecomeActiveNotification
