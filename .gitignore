@@ -24,3 +24,8 @@ rk_voice.log
 rk_ai.log
 rk_hit.log
 rk_prefs.plist
+
+# 下载的 CI 产物 / 崩溃日志（仅本地核对用，严禁入库）
+_dl/
+_dl52/
+_ips/
