@@ -49,9 +49,11 @@ AI_LOG_PATH_HINTS = ("rk_ai.log", "rk_voice.log")
 NO_JUMP_KEY = "VoiceNoJumpTrial"
 NO_JUMP_DEFAULT = True
 
-# 2.3.46：点语音前唤醒主 App（信号唤醒实验）。2.3.47 起默认开。
+# 2.3.46：点语音前唤醒主 App。2.3.58 起默认**关** ——
+#   开着时我们会抢在原生 launch 前把主 App 拉起来，绕过 SpringBoard 上的分屏插件
+#   （TrollOpen）的路由，导致它的悬浮小窗出不来，退化成「跳过去再跳回来」。
 WAKE_KEY = "VoiceWakeApp"
-WAKE_DEFAULT = True
+WAKE_DEFAULT = False
 
 # 「跟随系统深浅色」：plist 里是定义项，实际显示的是控制器重建后的 specifier，
 # 两处标题必须一致（下面按这个名字做一致性断言）。

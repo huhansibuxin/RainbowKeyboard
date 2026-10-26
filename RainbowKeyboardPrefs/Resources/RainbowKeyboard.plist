@@ -222,10 +222,10 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>唤醒主 App（实验）</string>
+			<string>点语音前唤醒主 App（兼容分屏）</string>
 			<key>footerText</key>
-			<string>默认关闭。半注销后主 App 会被系统挂起，键盘发出的 PIPStart 无人处理，3 秒超时后只能跳转。开启后会在发 PIPStart 前先让主 App 恢复执行，尝试省掉这次跳转。
-需要配合「记录调试日志」观察结果。</string>
+			<string>默认关闭，建议保持关闭。关闭时点语音会交给系统原生流程，装了分屏插件（如 TrollOpen）就能用悬浮小窗打开微信输入法、pip 建好后自动收后台，一次都不跳；没装分屏插件时本插件会在跳转 1.8 秒后仍未建立 pip 的情况下自动兜底拉起再送你回原 App。
+打开它会抢在原生流程之前把主 App 拉到全屏，会破坏分屏小窗（仅用于排查问题）。</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -233,9 +233,9 @@
 			<key>key</key>
 			<string>VoiceWakeApp</string>
 			<key>label</key>
-			<string>点语音前唤醒主 App</string>
+			<string>点语音前抢先唤醒主 App</string>
 			<key>default</key>
-			<true/>
+			<false/>
 			<key>defaults</key>
 			<string>com.minis.rainbowkeyboard</string>
 			<key>PostNotification</key>
