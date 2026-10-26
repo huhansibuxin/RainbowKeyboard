@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.51）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.52）
 //
 // == 已经被日志坐实的部分 ==
 //   2.3.42/2.3.44：半注销后每次点语音 → mic 0 → [entry] → [JUMP] pipFallback=0
@@ -180,6 +180,148 @@ static int RKVLSignalAllCont(void) {
     return rc;
 }
 
+#pragma mark - 2.3.52 跳过去之后自动回宿主 App
+
+// ⭐ 用户观测（2026-10-26）：
+//   原生跳转 = 「跳过去 → 自动回来」，但那个回来动作正好在 pip 建立之前，
+//   把 pip 掐死了 ⇒ 免跳永远站不住。
+//   我们 2.3.51 的有头拉起 = 「跳过去 → 不回来」⇒ pip 反而活了、能免跳，
+//   代价是用户得手动切回微信。
+//   ⇒ 正解 = 「跳过去 → 等 pip 起来 → 再自动回来」。
+//     顺序换了，回来这一下就掐不掉已经建好的 pip（pip 本来就是给后台用的）。
+//
+// 宿主是谁？WeType 自己完全不记（wxkb_plugin 里零 host bundle 符号），
+// 只能在**跳转之前**问系统：此刻前台那个 App 就是宿主。
+// 两个候选，谁有值用谁：
+//   ① SpringBoardServices: SBFrontmostApplicationDisplayIdentifier()（dlopen，非特权可读）
+//   ② LSApplicationWorkspace -frontmostApplication 的 bundleIdentifier
+
+static NSString *gRKVLHostBundle = nil;   // 跳转前的前台 App（= 要回来的目标）
+
+static NSString *RKVLFrontmostBundleID(NSString **outVia) {
+    if (outVia) *outVia = @"none";
+
+    void *sb = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+                      RTLD_LAZY);
+    if (sb) {
+        typedef CFStringRef (*FnFrontmost)(void);
+        FnFrontmost f = (FnFrontmost)dlsym(sb, "SBFrontmostApplicationDisplayIdentifier");
+        if (f) {
+            CFStringRef s = f();
+            if (s) {
+                // ⚠️ 函数名不带 Copy/Create ⇒ 返回的是**不拥有**的引用，绝不能 CFRelease
+                //   （release 会过度释放并崩）。copy 一份自己持有，安全。
+                NSString *r = [(__bridge NSString *)s copy];
+                if (r.length) { if (outVia) *outVia = @"SBFrontmost"; return r; }
+            }
+            if (outVia) *outVia = @"SBFrontmost(nil)";
+        } else {
+            if (outVia) *outVia = @"SBFrontmost(missing)";
+        }
+    } else {
+        if (outVia) *outVia = @"sb(dlopen fail)";
+    }
+
+    Class wsCls = objc_getClass("LSApplicationWorkspace");
+    if (wsCls) {
+        id ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, sel_registerName("defaultWorkspace"));
+        SEL s = sel_registerName("frontmostApplication");
+        if (ws && [ws respondsToSelector:s]) {
+            id app = ((id (*)(id, SEL))objc_msgSend)(ws, s);
+            SEL bs = sel_registerName("bundleIdentifier");
+            if (app && [app respondsToSelector:bs]) {
+                id bid = ((id (*)(id, SEL))objc_msgSend)(app, bs);
+                if ([bid isKindOfClass:[NSString class]] && [(NSString *)bid length]) {
+                    if (outVia) *outVia = @"LSWorkspace.frontmost";
+                    return bid;
+                }
+            }
+            if (outVia) *outVia = @"LSWorkspace.frontmost(nil)";
+        } else {
+            if (outVia) *outVia = @"LSWorkspace(no sel)";
+        }
+    }
+    return nil;
+}
+
+// 用 LSApplicationWorkspace 单参接口把指定 App 提到前台（有头）。
+// 这是 WeType 自己在用的那条，权限一定够。
+static BOOL RKVLActivateBundle(NSString *bid, int *outOK) {
+    if (outOK) *outOK = 0;
+    if (!bid.length) return NO;
+    Class wsCls = objc_getClass("LSApplicationWorkspace");
+    if (!wsCls) return NO;
+    id ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, sel_registerName("defaultWorkspace"));
+    SEL s = sel_registerName("openApplicationWithBundleID:");
+    if (!ws || ![ws respondsToSelector:s]) return NO;
+    BOOL ok = ((BOOL (*)(id, SEL, id))objc_msgSend)(ws, s, bid);
+    if (outOK) *outOK = ok ? 1 : 0;
+    return ok;
+}
+
+// 回宿主的轮询状态机。
+// 条件：pip=1 且 mic=0 —— 说明主 App 已经进「录音待机」（pip 立住了），
+// 这时候切回微信，pip 是后台播放语义，掐不掉。
+// 15s 还没等到 pip 就兜底硬回：宁可回到微信（至少用户能继续用微信），
+// 也不要把他扔在输入法里；日志会记 timeout，下一次据此调策略。
+static BOOL gRKVLReturnPending = NO;
+static int  gRKVLReturnTicks = 0;
+// ⚠️ 必须「先见过 mic=1」才允许靠 pip 回跳。
+//   否则 App 一被拉起就进待机 pip=1、录音还没开始，我们 0.3s 就把它拽回来，
+//   用户等于一个字都没说上。先录上（mic=1）再谈回跳。
+static BOOL gRKVLReturnSawMic = NO;
+
+static void RKVLReturnTick(void);
+
+static void RKVLReturnToHost(NSString *why) {
+    NSString *bid = gRKVLHostBundle;
+    if (!bid.length) {
+        RKVLLog(@"[back] (%@) 没有宿主 bundle，放弃回跳", why);
+        return;
+    }
+    int ok = 0;
+    BOOL r = RKVLActivateBundle(bid, &ok);
+    RKVLLog(@"[back] (%@) -> %@ ok=%d(%d) 之后 mask=0x%x mic=%d pip=%d",
+            why, bid, r, ok, RKVLProbeMask(),
+            RKVLProbeFlag(@selector(microphoneActive)),
+            RKVLProbeFlag(@selector(pictureInPictureActive)));
+}
+
+static void RKVLReturnTick(void) {
+    if (!gRKVLReturnPending) return;
+    gRKVLReturnTicks++;
+    int mic = RKVLProbeFlag(@selector(microphoneActive));
+    int pip = RKVLProbeFlag(@selector(pictureInPictureActive));
+    if (mic == 1 && !gRKVLReturnSawMic) {
+        gRKVLReturnSawMic = YES;
+        RKVLLog(@"[back] 见到 mic=1（录音已建立）t=%.1fs", gRKVLReturnTicks * 0.3);
+    }
+    if (gRKVLReturnSawMic && pip == 1 && mic == 0) {
+        gRKVLReturnPending = NO;
+        RKVLLog(@"[back] pip 已立住 t=%.1fs -> 回宿主", gRKVLReturnTicks * 0.3);
+        RKVLReturnToHost(@"pip_ready");
+        return;
+    }
+    if (gRKVLReturnTicks >= 50) {   // 15s
+        gRKVLReturnPending = NO;
+        RKVLLog(@"[back] timeout t=15s pip=%d mic=%d sawMic=%d -> 兜底回宿主",
+                pip, mic, gRKVLReturnSawMic);
+        RKVLReturnToHost(@"timeout");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{ RKVLReturnTick(); });
+}
+
+static void RKVLStartReturnWatch(void) {
+    if (gRKVLReturnPending) return;
+    gRKVLReturnPending = YES;
+    gRKVLReturnTicks = 0;
+    gRKVLReturnSawMic = NO;
+    RKVLLog(@"[back] watch start host=%@", gRKVLHostBundle ?: @"-");
+    RKVLReturnTick();
+}
+
 #pragma mark - 探针
 
 %hook WBVoiceStateProbe
@@ -278,6 +420,11 @@ static int RKVLSignalAllCont(void) {
         // 只有 pip/mic 都没有时才需要拉起：pip=1 时本来就能免跳，别去打扰 App。
         BOOL launched = NO;
         if (pipB != 1 && micB != 1) {
+            // ⭐ 必须赶在拉起之前问：此刻前台 App 就是我们要回来的宿主。
+            //   拉起之后前台就变成 wxkb 了，再问只会拿到自己。
+            NSString *via = nil;
+            gRKVLHostBundle = RKVLFrontmostBundleID(&via);
+            RKVLLog(@"[back] host=%@ via=%@", gRKVLHostBundle ?: @"(nil)", via);
             launched = RKVLForegroundLaunchApp(&lok);
         } else {
             RKVLLog(@"[launch] skip（已有 pip/mic 无需拉起）mic=%d pip=%d", micB, pipB);
@@ -292,6 +439,8 @@ static int RKVLSignalAllCont(void) {
                     RKVLProbeMask(),
                     RKVLProbeFlag(@selector(microphoneActive)),
                     RKVLProbeFlag(@selector(pictureInPictureActive)));
+            // 拉起成功就开始盯着 pip，一旦立住立刻把宿主拉回前台
+            RKVLStartReturnWatch();
         }
         for (double d = 2.0; d <= 8.1; d += 2.0) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
@@ -354,7 +503,7 @@ static int RKVLSignalAllCont(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLog(@"==== RKVoiceJumpProbe 2.3.51 loaded path=%@ ====", RKVLLogPath());
+        RKVLLog(@"==== RKVoiceJumpProbe 2.3.52 loaded path=%@ ====", RKVLLogPath());
         // 一次性探测：后台拉起要用的三个符号在不在（决定 ①② 有没有机会）。
         {
             void *sb = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
@@ -364,6 +513,10 @@ static int RKVLSignalAllCont(void) {
             id w = wc ? ((id (*)(id, SEL))objc_msgSend)((id)wc, sel_registerName("defaultWorkspace")) : nil;
             BOOL s3 = w && [w respondsToSelector:sel_registerName("openApplicationWithBundleID:")];
             RKVLLog(@"[cfg] launchable SBS=%d SBSOpts=%d LSWS_single=%d", s1, s2, s3);
+            // 2.3.52：回跳要用「谁是前台 App」，两个候选的可用性一次问清
+            BOOL s4 = sb && dlsym(sb, "SBFrontmostApplicationDisplayIdentifier");
+            BOOL s5 = w && [w respondsToSelector:sel_registerName("frontmostApplication")];
+            RKVLLog(@"[cfg] frontmost SBFrontmost=%d LSfront=%d", s4, s5);
         }
         NSDictionary *p = RKReadEffectivePreferences();
         RKVLLog(@"[cfg] logEnabled=%d trial=%d wake=%d Enabled=%@ AIRecorderLog=%@ VoiceNoJumpTrial=%@ VoiceWakeApp=%@ rev=%@ bundle=%@",
