@@ -1,0 +1,14 @@
+==== RKAIRecorderHide 2.3.40 loaded, bundle=com.tencent.wetype.keyboard, logPath=/private/var/mobile/Containers/Data/PluginKitPlugin/A742BD06-2320-4F4C-BE31-5CA32BB72C12/tmp/rk_ai.log ====
+[capsule] hidden WBButton frame={{0, 0}, {0, 0}}
+[panel] modern view #1 frame={{0, 0}, {430, 286}}
+    UIView frame={{0, 0}, {0, 0}} hidden=1
+    WBVoiceInputInteractionModernBottomActionButton frame={{0, 0}, {0, 0}} hidden=1
+    WBButton frame={{0, 0}, {0, 0}} hidden=1
+[capsule] hidden WBButton frame={{0, 0}, {0, 0}}
+[panel] modern view #2 frame={{0, 0}, {430, 286}}
+    UIView frame={{0, 0}, {0, 0}} hidden=1
+    WBVoiceInputInteractionModernBottomActionButton frame={{0, 0}, {0, 0}} hidden=1
+    WBButton frame={{0, 0}, {0, 0}} hidden=1
+[capsule] hidden WBButton frame={{0, 0}, {0, 0}}
+[capsule] hidden WBButton frame={{0, 0}, {0, 0}}
+[capsule] hidden WBButton frame={{0, 0}, {0, 0}}

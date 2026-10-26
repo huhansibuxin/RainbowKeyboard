@@ -1,0 +1,231 @@
+1793010756.977 [69059] ==== RKVoiceJumpProbe 2.3.42 loaded path=/private/var/mobile/Containers/Data/PluginKitPlugin/A742BD06-2320-4F4C-BE31-5CA32BB72C12/tmp/rk_voice.log ====
+1793010756.977 [69059] [cfg] logEnabled=1 Enabled=1 AIRecorderLog=1 Widen=1 rev=1793010743864571 bundle=com.tencent.wetype.keyboard
+1793010757.070 [69059] [ipc] eventChannel=0x282c480c0
+1793010757.070 [69059] [ipc] eventChannel=0x282c480c0
+1793010757.070 [69059] [ipc] eventChannel=0x282c480c0
+1793010757.070 [69059] [ipc] eventChannel=0x282c480c0
+1793010757.070 [69059] [ipc] eventChannel=0x282c480c0
+1793010757.070 [69059] [ipc] eventChannel=0x282c480c0
+1793010762.140 [69059] [probe] appAlive=1 thread=main
+1793010762.141 [69059] [probe] appAlive=1 thread=main
+1793010762.195 [69059] [probe] appAlive=1 thread=main
+1793010762.196 [69059] [probe] appAlive=1 thread=main
+1793010762.222 [69059] [probe] appAlive=1 thread=main
+1793010762.223 [69059] [probe] appAlive=1 thread=main
+1793010762.227 [69059] [probe] appAlive=1 thread=main
+1793010762.227 [69059] [JUMP] launchAppFromBackground allowBT=0 pipFallback=0
+1793010762.229 [69059] [probe] appAlive=1 thread=main
+1793010762.229 [69059] [probe] appAlive=1 thread=main
+1793010762.229 [69059] [probe] appAlive=1 thread=main
+1793010762.229 [69059] [probe] appAlive=1 thread=main
+1793010762.230 [69059] [probe] appAlive=1 thread=main
+1793010762.230 [69059] [probe] appAlive=1 thread=main
+1793010762.248 [69059] [probe] appAlive=1 thread=main
+1793010762.248 [69059] [probe] appAlive=1 thread=main
+1793010762.249 [69059] [probe] appAlive=1 thread=main
+1793010762.249 [69059] [probe] appAlive=1 thread=main
+1793010762.258 [69059] [probe] appAlive=1 thread=main
+1793010762.258 [69059] [probe] appAlive=1 thread=main
+1793010763.008 [69059] [ipc] eventChannel=0x282c480c0
+1793010763.009 [69059] [probe] appAlive=1 thread=main
+1793010763.009 [69059] [probe] appAlive=1 thread=main
+1793010763.012 [69059] [probe] appAlive=1 thread=main
+1793010763.012 [69059] [probe] appAlive=1 thread=main
+1793010763.012 [69059] [probe] appAlive=1 thread=main
+1793010763.012 [69059] [probe] appAlive=1 thread=main
+1793010763.224 [69059] [probe] appAlive=1 thread=main
+1793010764.854 [69059] [probe] appAlive=1 thread=main
+1793010764.867 [69059] [probe] appAlive=1 thread=main
+1793010764.869 [69059] [ipc] commandChannel=0x282c1b060
+1793010765.077 [69059] [probe] appAlive=1 thread=main
+1793010766.538 [69059] [probe] appAlive=1 thread=main
+1793010766.538 [69059] [probe] appAlive=1 thread=main
+1793010766.540 [69059] [probe] appAlive=1 thread=main
+1793010766.540 [69059] [probe] appAlive=1 thread=main
+1793010766.542 [69059] [probe] appAlive=1 thread=main
+1793010766.542 [69059] [probe] appAlive=1 thread=main
+1793010766.542 [69059] [probe] appAlive=1 thread=main
+1793010766.542 [69059] [JUMP] launchAppFromBackground allowBT=0 pipFallback=0
+1793010766.544 [69059] [probe] appAlive=1 thread=main
+1793010766.544 [69059] [probe] appAlive=1 thread=main
+1793010766.544 [69059] [probe] appAlive=1 thread=main
+1793010766.545 [69059] [probe] appAlive=1 thread=main
+1793010766.545 [69059] [probe] appAlive=1 thread=main
+1793010766.545 [69059] [probe] appAlive=1 thread=main
+1793010766.561 [69059] [probe] appAlive=1 thread=main
+1793010766.561 [69059] [probe] appAlive=1 thread=main
+1793010766.562 [69059] [probe] appAlive=1 thread=main
+1793010766.562 [69059] [probe] appAlive=1 thread=main
+1793010766.573 [69059] [probe] appAlive=1 thread=main
+1793010766.573 [69059] [probe] appAlive=1 thread=main
+1793010767.197 [69059] [ipc] eventChannel=0x282c480c0
+1793010767.197 [69059] [probe] appAlive=1 thread=main
+1793010767.200 [69059] [probe] appAlive=1 thread=main
+1793010767.200 [69059] [probe] appAlive=1 thread=main
+1793010767.543 [69059] [probe] appAlive=1 thread=main
+1793010767.645 [69059] [probe] appAlive=1 thread=main
+1793010768.289 [69059] [probe] appAlive=1 thread=main
+1793010768.299 [69059] [probe] appAlive=1 thread=main
+1793010768.300 [69059] [ipc] commandChannel=0x282c1b060
+1793010768.695 [69059] [probe] appAlive=1 thread=main
+1793010768.839 [69059] [ipc] commandChannel=0x282c1b060
+1793010769.906 [69059] [probe] appAlive=1 thread=main
+1793010769.907 [69059] [probe] appAlive=1 thread=main
+1793010769.908 [69059] [probe] appAlive=1 thread=main
+1793010769.909 [69059] [probe] appAlive=1 thread=main
+1793010769.909 [69059] [probe] appAlive=1 thread=main
+1793010769.910 [69059] [probe] appAlive=1 thread=main
+1793010769.910 [69059] [probe] appAlive=1 thread=main
+1793010769.911 [69059] [JUMP] launchAppFromBackground allowBT=0 pipFallback=0
+1793010769.914 [69059] [probe] appAlive=1 thread=main
+1793010769.914 [69059] [probe] appAlive=1 thread=main
+1793010769.914 [69059] [probe] appAlive=1 thread=main
+1793010769.915 [69059] [probe] appAlive=1 thread=main
+1793010769.915 [69059] [probe] appAlive=1 thread=main
+1793010769.915 [69059] [probe] appAlive=1 thread=main
+1793010769.929 [69059] [probe] appAlive=1 thread=main
+1793010769.930 [69059] [probe] appAlive=1 thread=main
+1793010769.930 [69059] [probe] appAlive=1 thread=main
+1793010769.930 [69059] [probe] appAlive=1 thread=main
+1793010769.942 [69059] [probe] appAlive=1 thread=main
+1793010769.942 [69059] [probe] appAlive=1 thread=main
+1793010770.567 [69059] [ipc] eventChannel=0x282c480c0
+1793010770.567 [69059] [probe] appAlive=1 thread=main
+1793010770.569 [69059] [probe] appAlive=1 thread=main
+1793010770.570 [69059] [probe] appAlive=1 thread=main
+1793010770.910 [69059] [probe] appAlive=1 thread=main
+1793010770.992 [69059] [probe] appAlive=1 thread=main
+1793010771.757 [69059] [probe] appAlive=1 thread=main
+1793010771.765 [69059] [probe] appAlive=1 thread=main
+1793010771.765 [69059] [ipc] commandChannel=0x282c1b060
+1793010772.126 [69059] [probe] appAlive=1 thread=main
+1793010772.512 [69059] [ipc] commandChannel=0x282c1b060
+1793010773.927 [69059] [probe] appAlive=1 thread=main
+1793010773.927 [69059] [probe] appAlive=1 thread=main
+1793010773.929 [69059] [probe] appAlive=1 thread=main
+1793010773.929 [69059] [probe] appAlive=1 thread=main
+1793010773.931 [69059] [probe] appAlive=1 thread=main
+1793010773.931 [69059] [probe] appAlive=1 thread=main
+1793010773.932 [69059] [probe] appAlive=1 thread=main
+1793010773.933 [69059] [JUMP] launchAppFromBackground allowBT=0 pipFallback=0
+1793010773.935 [69059] [probe] appAlive=1 thread=main
+1793010773.936 [69059] [probe] appAlive=1 thread=main
+1793010773.936 [69059] [probe] appAlive=1 thread=main
+1793010773.936 [69059] [probe] appAlive=1 thread=main
+1793010773.937 [69059] [probe] appAlive=1 thread=main
+1793010773.937 [69059] [probe] appAlive=1 thread=main
+1793010773.951 [69059] [probe] appAlive=1 thread=main
+1793010773.951 [69059] [probe] appAlive=1 thread=main
+1793010773.951 [69059] [probe] appAlive=1 thread=main
+1793010773.951 [69059] [probe] appAlive=1 thread=main
+1793010773.963 [69059] [probe] appAlive=1 thread=main
+1793010773.963 [69059] [probe] appAlive=1 thread=main
+1793010774.583 [69059] [ipc] eventChannel=0x282c480c0
+1793010774.586 [69059] [probe] appAlive=1 thread=main
+1793010774.586 [69059] [probe] appAlive=1 thread=main
+1793010774.587 [69059] [probe] appAlive=1 thread=main
+1793010774.587 [69059] [probe] appAlive=1 thread=main
+1793010774.587 [69059] [probe] appAlive=1 thread=main
+1793010774.588 [69059] [probe] appAlive=1 thread=main
+1793010774.934 [69059] [probe] appAlive=1 thread=main
+1793010775.228 [69059] [probe] appAlive=1 thread=main
+1793010776.078 [69059] [probe] appAlive=1 thread=main
+1793010776.085 [69059] [probe] appAlive=1 thread=main
+1793010776.085 [69059] [ipc] commandChannel=0x282c1b060
+1793010776.387 [69059] [probe] appAlive=1 thread=main
+1793010776.780 [69059] [ipc] commandChannel=0x282c1b060
+1793010777.847 [69059] [probe] appAlive=1 thread=main
+1793010777.848 [69059] [probe] appAlive=1 thread=main
+1793010777.850 [69059] [probe] appAlive=1 thread=main
+1793010777.850 [69059] [probe] appAlive=1 thread=main
+1793010777.851 [69059] [probe] appAlive=1 thread=main
+1793010777.852 [69059] [probe] appAlive=1 thread=main
+1793010777.852 [69059] [probe] appAlive=1 thread=main
+1793010777.853 [69059] [JUMP] launchAppFromBackground allowBT=0 pipFallback=0
+1793010777.855 [69059] [probe] appAlive=1 thread=main
+1793010777.855 [69059] [probe] appAlive=1 thread=main
+1793010777.856 [69059] [probe] appAlive=1 thread=main
+1793010777.856 [69059] [probe] appAlive=1 thread=main
+1793010777.856 [69059] [probe] appAlive=1 thread=main
+1793010777.856 [69059] [probe] appAlive=1 thread=main
+1793010777.871 [69059] [probe] appAlive=1 thread=main
+1793010777.871 [69059] [probe] appAlive=1 thread=main
+1793010777.871 [69059] [probe] appAlive=1 thread=main
+1793010777.871 [69059] [probe] appAlive=1 thread=main
+1793010777.882 [69059] [probe] appAlive=1 thread=main
+1793010777.882 [69059] [probe] appAlive=1 thread=main
+1793010778.504 [69059] [ipc] eventChannel=0x282c480c0
+1793010778.504 [69059] [probe] appAlive=1 thread=main
+1793010778.507 [69059] [probe] appAlive=1 thread=main
+1793010778.507 [69059] [probe] appAlive=1 thread=main
+1793010778.853 [69059] [probe] appAlive=1 thread=main
+1793010779.205 [69059] [probe] appAlive=1 thread=main
+1793010780.248 [69059] [probe] appAlive=1 thread=main
+1793010780.258 [69059] [probe] appAlive=1 thread=main
+1793010780.259 [69059] [ipc] commandChannel=0x282c1b060
+1793010780.682 [69059] [probe] appAlive=1 thread=main
+1793010781.194 [69059] [ipc] commandChannel=0x282c1b060
+1793010782.985 [69059] [probe] appAlive=1 thread=main
+1793010782.986 [69059] [probe] appAlive=1 thread=main
+1793010782.987 [69059] [probe] appAlive=1 thread=main
+1793010782.988 [69059] [probe] appAlive=1 thread=main
+1793010782.989 [69059] [probe] appAlive=1 thread=main
+1793010782.989 [69059] [probe] appAlive=1 thread=main
+1793010782.990 [69059] [probe] appAlive=1 thread=main
+1793010782.990 [69059] [JUMP] launchAppFromBackground allowBT=0 pipFallback=0
+1793010782.993 [69059] [probe] appAlive=1 thread=main
+1793010782.994 [69059] [probe] appAlive=1 thread=main
+1793010782.994 [69059] [probe] appAlive=1 thread=main
+1793010782.994 [69059] [probe] appAlive=1 thread=main
+1793010782.995 [69059] [probe] appAlive=1 thread=main
+1793010782.995 [69059] [probe] appAlive=1 thread=main
+1793010783.009 [69059] [probe] appAlive=1 thread=main
+1793010783.009 [69059] [probe] appAlive=1 thread=main
+1793010783.009 [69059] [probe] appAlive=1 thread=main
+1793010783.009 [69059] [probe] appAlive=1 thread=main
+1793010783.020 [69059] [probe] appAlive=1 thread=main
+1793010783.020 [69059] [probe] appAlive=1 thread=main
+1793010783.639 [69059] [ipc] eventChannel=0x282c480c0
+1793010783.639 [69059] [probe] appAlive=1 thread=main
+1793010783.640 [69059] [probe] appAlive=1 thread=main
+1793010783.643 [69059] [probe] appAlive=1 thread=main
+1793010783.643 [69059] [probe] appAlive=1 thread=main
+1793010783.644 [69059] [probe] appAlive=1 thread=main
+1793010783.644 [69059] [probe] appAlive=1 thread=main
+1793010783.990 [69059] [probe] appAlive=1 thread=main
+1793010784.463 [69059] [probe] appAlive=1 thread=main
+1793010785.503 [69059] [probe] appAlive=1 thread=main
+1793010785.513 [69059] [probe] appAlive=1 thread=main
+1793010785.515 [69059] [ipc] commandChannel=0x282c1b060
+1793010785.846 [69059] [probe] appAlive=1 thread=main
+1793010786.061 [69059] [ipc] commandChannel=0x282c1b060
+1793010816.479 [69059] [probe] appAlive=1 thread=main
+1793010816.480 [69059] [probe] appAlive=1 thread=main
+1793010816.482 [69059] [probe] appAlive=1 thread=main
+1793010816.483 [69059] [probe] appAlive=1 thread=main
+1793010816.484 [69059] [probe] appAlive=1 thread=main
+1793010816.485 [69059] [probe] appAlive=1 thread=main
+1793010816.485 [69059] [probe] appAlive=1 thread=main
+1793010816.486 [69059] [JUMP] launchAppFromBackground allowBT=0 pipFallback=0
+1793010816.489 [69059] [probe] appAlive=1 thread=main
+1793010816.489 [69059] [probe] appAlive=1 thread=main
+1793010816.489 [69059] [probe] appAlive=1 thread=main
+1793010816.489 [69059] [probe] appAlive=1 thread=main
+1793010816.489 [69059] [probe] appAlive=1 thread=main
+1793010816.490 [69059] [probe] appAlive=1 thread=main
+1793010816.509 [69059] [probe] appAlive=1 thread=main
+1793010816.509 [69059] [probe] appAlive=1 thread=main
+1793010816.509 [69059] [probe] appAlive=1 thread=main
+1793010816.509 [69059] [probe] appAlive=1 thread=main
+1793010816.519 [69059] [probe] appAlive=1 thread=main
+1793010816.519 [69059] [probe] appAlive=1 thread=main
+1793010817.145 [69059] [ipc] eventChannel=0x282c480c0
+1793010817.146 [69059] [probe] appAlive=1 thread=main
+1793010817.148 [69059] [probe] appAlive=1 thread=main
+1793010817.149 [69059] [probe] appAlive=1 thread=main
+1793010817.485 [69059] [probe] appAlive=1 thread=main
+1793010818.004 [69059] [probe] appAlive=1 thread=main
+1793010818.695 [69059] [probe] appAlive=1 thread=main
+1793010818.704 [69059] [probe] appAlive=1 thread=main
+1793010818.705 [69059] [ipc] commandChannel=0x282c1b060
+1793010819.007 [69059] [probe] appAlive=1 thread=main
