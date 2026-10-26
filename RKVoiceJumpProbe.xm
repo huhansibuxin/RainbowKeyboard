@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.46）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.49）
 //
 // == 已经被日志坐实的部分 ==
 //   2.3.42/2.3.44：半注销后每次点语音 → mic 0 → [entry] → [JUMP] pipFallback=0
@@ -26,6 +26,14 @@
 //   launchWBRecorderWithContext:finishedBlock: 结尾 add sp/ret，无 w0 写入 → void
 //   isMainAppVoiceStandbyActive 不 hook：尾部 `mov x0,x20` 且另有 `mov w20,#1` 分支，
 //   返回类型不唯一（id / BOOL 混用），hook 有改坏调用约定的风险。
+//
+// == 2.3.49 做的事：修好「找 pid」+ 加 p_stat 诊断 ==
+//   2.3.46~2.3.48 三版日志全是 `[wake] pid=-1 kill(SIGCONT)=-999`，
+//   说明 proc_name()/proc_pidpath() 在 PluginKit 扩展沙盒里对别的进程返回 0，
+//   每个 pid 都被过滤掉了，SIGCONT 一次都没发出去过 —— 那个开关一直是空转。
+//   现在改成直接读 sysctl 返回的 kinfo_proc.kp_proc.p_comm（内核已填好，无跨进程权限需求）。
+//   同时打 p_stat：4=SSTOP 才能被 SIGCONT 救；3=SSLEEP 说明是 Mach task_suspend，
+//   SIGCONT 内核层就是空操作，得换方案（App 侧保活 / SpringBoard 注入）。
 //
 // 日志受「记录调试日志」（AIRecorderLog）与总开关（Enabled）双控，默认关。
 
@@ -113,60 +121,106 @@ static unsigned int RKVLProbeMask(void) {
 //   mach 消息对被挂起的 task 只是排队，内核不会因此 resume 它 —— 真正能让它从
 //   STOPPED 状态回到 RUNNING 的、且键盘进程有权限做的只有 SIGCONT（同 uid 即可）。
 //   所以这里做的是「信号唤醒」，语义上等价于我们想要的「mach 唤醒」，只是不依赖 service。
-typedef int (*RKVLProcFn)(int, void *, uint32_t);
-static RKVLProcFn gRKVLProcName = NULL;
-static RKVLProcFn gRKVLProcPIDPath = NULL;
+// ⚠️ 2.3.49 修：2.3.46~2.3.48 的 pid 查找**一次都没成功过**（日志恒为 pid=-1）。
+//   原因：原来靠 dlsym 的 proc_name() / proc_pidpath() 去认进程 —— 这两个函数要读
+//   目标进程的 task/proc 结构，在 PluginKit 扩展沙盒里对**别的进程**一律返回 0，
+//   所以每个 pid 都被 continue 掉了，SIGCONT 从来没发出去。
+//   正解：sysctl 返回的 kinfo_proc 里内核已经把 p_comm（进程名）填好了，
+//   读它不需要任何跨进程权限 —— 直接比 p_comm 就行，不再调 proc_name/proc_pidpath。
+//   p_comm 上限 MAXCOMLEN+1 = 17 字节，主 App 是 "wxkb"、扩展自己是 "wxkb_plugin"，
+//   不会撞名；仍然排除 getpid() 双保险。
 
-static void RKVLResolveProcFns(void) {
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        gRKVLProcName = (RKVLProcFn)dlsym(RTLD_DEFAULT, "proc_name");
-        gRKVLProcPIDPath = (RKVLProcFn)dlsym(RTLD_DEFAULT, "proc_pidpath");
-    });
-}
+// 返回值：>0 = 找到的主 App pid；-1 = sysctl 失败；-2 = malloc 失败；-3 = 二次 sysctl 失败；0 = 表里没找到
+static pid_t RKVLFindMainAppPID(int *outSysRc, int *outSysErr, int *outCount,
+                                char *outHint, size_t hintLen, pid_t *outSelfPid) {
+    if (outSysRc) *outSysRc = 0;
+    if (outSysErr) *outSysErr = 0;
+    if (outCount) *outCount = 0;
+    if (outHint && hintLen > 0) outHint[0] = '\0';
+    if (outSelfPid) *outSelfPid = getpid();
 
-static pid_t RKVLFindMainAppPID(NSString **outPath) {
-    RKVLResolveProcFns();
-    if (!gRKVLProcName || !gRKVLProcPIDPath) return -1;
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
     size_t size = 0;
-    if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 || size == 0) return -1;
-    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(size);
-    if (!procs) return -1;
-    if (sysctl(mib, 4, procs, &size, NULL, 0) != 0) { free(procs); return -1; }
+    int rc = sysctl(mib, 4, NULL, &size, NULL, 0);
+    int err = errno;
+    if (outSysRc) *outSysRc = rc;
+    if (outSysErr) *outSysErr = err;
+    if (rc != 0 || size == 0) return -1;
 
-    pid_t found = -1;
+    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(size);
+    if (!procs) return -2;
+    if (sysctl(mib, 4, procs, &size, NULL, 0) != 0) { free(procs); return -3; }
+
     int count = (int)(size / sizeof(struct kinfo_proc));
+    if (outCount) *outCount = count;
+
+    pid_t me = getpid();
+    pid_t found = 0;
+    char firstWxkb[32] = {0};
     for (int i = 0; i < count; i++) {
         pid_t p = procs[i].kp_proc.p_pid;
-        if (p <= 1 || p == getpid()) continue;
-        char name[64] = {0};
-        if (gRKVLProcName(p, name, (uint32_t)sizeof(name)) <= 0) continue;
-        if (strcmp(name, "wxkb") != 0) continue;
-        char path[1024] = {0};
-        if (gRKVLProcPIDPath(p, path, (uint32_t)sizeof(path)) <= 0) continue;
-        NSString *ps = @(path);
-        if (![ps containsString:@"/wxkb.app/"]) continue;
-        found = p;
-        if (outPath) *outPath = ps;
-        break;
+        if (p <= 1 || p == me) continue;
+        char comm[sizeof(procs[i].kp_proc.p_comm) + 1];
+        memset(comm, 0, sizeof(comm));
+        strlcpy(comm, procs[i].kp_proc.p_comm, sizeof(comm));
+        if (strncmp(comm, "wxkb", 4) != 0) continue;
+        if (firstWxkb[0] == '\0') strlcpy(firstWxkb, comm, sizeof(firstWxkb));
+        if (strcmp(comm, "wxkb") == 0) { found = p; break; }
     }
     free(procs);
+    if (outHint && hintLen > 0) strlcpy(outHint, firstWxkb, hintLen);
     return found;
 }
 
-// 找到主 App 并发 SIGCONT，返回 (pid, rc, errno)。找不到返回 pid=-1。
-static pid_t RKVLWakeMainApp(int *outRC, int *outErrno) {
-    NSString *path = nil;
-    pid_t p = RKVLFindMainAppPID(&path);
-    int rc = -999, err = 0;
+// 读单个进程的 p_stat：1=SIDL 2=SRUN 3=SSLEEP 4=SSTOP 5=SZOMB。
+// ⭐ 这是判定 SIGCONT 有没有意义的关键诊断：
+//   · 主 App 是 SSTOP(4)（job-control 停住）→ SIGCONT 能救；
+//   · 是 SSLEEP(3)（iOS 正常挂起 = Mach task_suspend，suspend count 累加）
+//     → SIGCONT 在内核里对它是空操作，必须换手段。
+static int RKVLProcStat(pid_t pid) {
+    if (pid <= 0) return -1;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    struct kinfo_proc kp;
+    size_t sz = sizeof(kp);
+    memset(&kp, 0, sizeof(kp));
+    if (sysctl(mib, 4, &kp, &sz, NULL, 0) != 0) return -2;
+    return (int)kp.kp_proc.p_stat;
+}
+
+// 唤醒主 App。mode: 0=没发、1=精准 pid、2=kill(-1) 兜底。
+// kill(-1, SIGCONT) 的语义：把信号发给**所有同 uid 且我们有权限的进程**；
+// POSIX 规定 SIGCONT 对本来就没停的进程无副作用（直接忽略），所以兜底不会打扰跑着的 App。
+static pid_t RKVLWakeMainApp(int *outRC, int *outErr, int *outMode, int *outFind,
+                             int *outCount, pid_t *outSelfPid, int *outStatB, int *outStatA) {
+    int sysRc = 0, sysErr = 0, count = 0;
+    char hint[32] = {0};
+    pid_t me = 0;
+    pid_t p = RKVLFindMainAppPID(&sysRc, &sysErr, &count, hint, sizeof(hint), &me);
+
+    int rc = -999, err = 0, mode = 0;
+    int stB = -1, stA = -1;
     if (p > 0) {
+        stB = RKVLProcStat(p);
         rc = kill(p, SIGCONT);
         err = errno;
-        if (rc != 0) RKVLLog(@"[wake] main app path=%@", path);
+        mode = 1;
+        stA = RKVLProcStat(p);
+    } else {
+        rc = kill(-1, SIGCONT);
+        err = errno;
+        mode = 2;
     }
     if (outRC) *outRC = rc;
-    if (outErrno) *outErrno = err;
+    if (outErr) *outErr = err;
+    if (outMode) *outMode = mode;
+    if (outFind) *outFind = (int)p;
+    if (outCount) *outCount = count;
+    if (outSelfPid) *outSelfPid = me;
+    if (outStatB) *outStatB = stB;
+    if (outStatA) *outStatA = stA;
+
+    RKVLLog(@"[wake] sysctl rc=%d errno=%d count=%d hint=%s self=%d -> find=%d p_stat=%d→%d",
+            sysRc, sysErr, count, hint[0] ? hint : "-", (int)me, (int)p, stB, stA);
     return p;
 }
 
@@ -248,25 +302,37 @@ static pid_t RKVLWakeMainApp(int *outRC, int *outErrno) {
     RKVLLog(@"[entry] launchWBRecorder ctx=%p trial=%d wake=%d mask=0x%x",
             context, RKVLNoJumpTrial, RKVLVoiceWake, RKVLProbeMask());
     if (RKVLVoiceWake) {
-        int rc = 0, err = 0;
+        int rc = 0, err = 0, mode = 0, find = 0, count = 0, stB = -1, stA = -1;
+        pid_t selfPid = 0;
         uint32_t before = RKVLProbeMask();
-        pid_t pid = RKVLWakeMainApp(&rc, &err);
-        RKVLLog(@"[wake] pid=%d kill(SIGCONT)=%d errno=%d mask_before=0x%x mic=%d pip=%d",
-                pid, rc, err, before,
+        pid_t pid = RKVLWakeMainApp(&rc, &err, &mode, &find, &count, &selfPid, &stB, &stA);
+        RKVLLog(@"[wake] pid=%d mode=%d kill=%d errno=%d stat=%d→%d mask_before=0x%x mic=%d pip=%d appAlive=%d",
+                pid, mode, rc, err, stB, stA, before,
                 RKVLProbeFlag(@selector(microphoneActive)),
-                RKVLProbeFlag(@selector(pictureInPictureActive)));
-        usleep(200 * 1000);
-        RKVLLog(@"[wake] +200ms mask=0x%x mic=%d pip=%d",
+                RKVLProbeFlag(@selector(pictureInPictureActive)),
+                RKVLProbeFlag(@selector(appAlive)));
+        // 分两段睡，能在日志里看出「阻塞期间 mask 有没有被后台更新」——
+        // 如果两段都没变化、释放主线程后立刻变化，说明 mask 上报是走主队列的，
+        // 那这里再拉长等待也没用，得换非阻塞方案。
+        usleep(250 * 1000);
+        RKVLLog(@"[wake] +0.25s mask=0x%x mic=%d pip=%d",
                 RKVLProbeMask(),
                 RKVLProbeFlag(@selector(microphoneActive)),
                 RKVLProbeFlag(@selector(pictureInPictureActive)));
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.4 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            RKVLLog(@"[wake] +3.4s mask=0x%x mic=%d pip=%d",
-                    RKVLProbeMask(),
-                    RKVLProbeFlag(@selector(microphoneActive)),
-                    RKVLProbeFlag(@selector(pictureInPictureActive)));
-        });
+        usleep(250 * 1000);
+        RKVLLog(@"[wake] +0.5s mask=0x%x mic=%d pip=%d",
+                RKVLProbeMask(),
+                RKVLProbeFlag(@selector(microphoneActive)),
+                RKVLProbeFlag(@selector(pictureInPictureActive)));
+        for (double d = 1.2; d <= 8.1; d += 2.2) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                RKVLLog(@"[wake] +%.1fs mask=0x%x mic=%d pip=%d",
+                        d, RKVLProbeMask(),
+                        RKVLProbeFlag(@selector(microphoneActive)),
+                        RKVLProbeFlag(@selector(pictureInPictureActive)));
+            });
+        }
     }
     %orig;
 }
@@ -315,7 +381,7 @@ static pid_t RKVLWakeMainApp(int *outRC, int *outErrno) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLog(@"==== RKVoiceJumpProbe 2.3.46 loaded path=%@ ====", RKVLLogPath());
+        RKVLLog(@"==== RKVoiceJumpProbe 2.3.49 loaded path=%@ ====", RKVLLogPath());
         NSDictionary *p = RKReadEffectivePreferences();
         RKVLLog(@"[cfg] logEnabled=%d trial=%d wake=%d Enabled=%@ AIRecorderLog=%@ VoiceNoJumpTrial=%@ VoiceWakeApp=%@ rev=%@ bundle=%@",
                 RKVLLogEnabled, RKVLNoJumpTrial, RKVLVoiceWake, p[@"Enabled"], p[@"AIRecorderLog"],

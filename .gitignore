@@ -18,3 +18,9 @@ verify_deb.py
 .gitcommitmsg
 
 _logs/
+
+# 设备上拉回来的运行日志 / 偏好快照（仅本地取证）
+rk_voice.log
+rk_ai.log
+rk_hit.log
+rk_prefs.plist
