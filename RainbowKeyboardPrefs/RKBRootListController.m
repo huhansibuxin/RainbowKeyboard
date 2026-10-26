@@ -85,10 +85,37 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 }
 
 - (void)rkRebuildFollowAppearanceSpecifier {
-    // 2.3.34：默认值改为开，与 plist / 两份 defaults.plist / RKPreferences.h 固化表一致
-    //（此前是 @NO，注销后四者互相印证为「关」，导致浅色模式也不上色）。
-    [self rkRebuildRuntimeSpecifierForKey:@"LightPopFollowAppearance" title:@"跟随系统深浅色" default:YES];
-    // 键盘侧消费、且必须立刻生效的两个开关（见上面的 2.4.4 说明）。
+    NSMutableArray *items = _specifiers;
+    if (!items) return;
+
+    // 「跟随系统深浅色」：plist 载入的项走 Preferences 默认写盘路径、不经过本类 setter，
+    // 「开启时联动打开轻弹」做不了。check_settings_items.py 静态断言要求本类用**字面**
+    // preferenceSpecifierNamed:@"跟随系统深浅色" 重建，并显式绑定 key=LightPopFollowAppearance。
+    // 这段必须是字面（不能用 rkRebuildRuntimeSpecifierForKey: 通用函数，否则断言挂）。
+    for (NSUInteger i = 0; i < items.count; i++) {
+        PSSpecifier *item = items[i];
+        if (![[item propertyForKey:@"key"] isEqualToString:@"LightPopFollowAppearance"]) continue;
+        if ([item propertyForKey:@"rkRebuilt"]) break;
+        PSSpecifier *rebuilt = [PSSpecifier preferenceSpecifierNamed:@"跟随系统深浅色"
+                                                              target:self
+                                                                 set:@selector(setPreferenceValue:specifier:)
+                                                                 get:@selector(readPreferenceValue:)
+                                                              detail:nil
+                                                                cell:PSSwitchCell
+                                                                edit:nil];
+        [rebuilt setProperty:@"LightPopFollowAppearance" forKey:@"key"];
+        [rebuilt setProperty:@YES forKey:@"default"];
+        [rebuilt setProperty:@"com.minis.rainbowkeyboard" forKey:@"defaults"];
+        [rebuilt setProperty:kRKChangedNotification forKey:@"PostNotification"];
+        [rebuilt setProperty:@YES forKey:@"rkRebuilt"];
+        items[i] = rebuilt;
+        break;
+    }
+
+    // 2.4.4：以下两个键盘侧消费、且必须立刻生效的开关，同样换成代码 specifier，
+    // 确保写入经过本类 setter → RKSaveAndNotify → RKSavePreferences（发布 notify 快照）。
+    // 键盘 appex 读不到 plist/cfprefsd，读设置值唯一通道是这套快照；否则会一直按旧值跑
+    // （AIRecorderLog 关不掉实测源于此 —— 它原本走 Preferences 默认 setter，不经过 RKSavePreferences）。
     [self rkRebuildRuntimeSpecifierForKey:@"AIRecorderLog" title:@"记录调试日志" default:NO];
     [self rkRebuildRuntimeSpecifierForKey:@"VoiceWakeApp" title:@"语音免跳转（连续右跳）" default:YES];
 }
