@@ -49,6 +49,10 @@ AI_LOG_PATH_HINTS = ("rk_ai.log", "rk_voice.log")
 NO_JUMP_KEY = "VoiceNoJumpTrial"
 NO_JUMP_DEFAULT = False
 
+# 2.3.46：点语音前唤醒主 App（信号唤醒实验）。默认必须为关。
+WAKE_KEY = "VoiceWakeApp"
+WAKE_DEFAULT = False
+
 # 「跟随系统深浅色」：plist 里是定义项，实际显示的是控制器重建后的 specifier，
 # 两处标题必须一致（下面按这个名字做一致性断言）。
 FOLLOW_KEY = "LightPopFollowAppearance"
@@ -97,12 +101,13 @@ def check_panels(errors):
         missing = [h for h in AI_LOG_PATH_HINTS if h not in (log_groups[0].get("footerText") or "")]
         errors.append("「调试日志」分组的 footerText 未写全日志路径（缺 %s）" % ", ".join(missing))
 
-    trials = find_items(main, "PSSwitchCell", NO_JUMP_KEY)
-    if not trials:
-        errors.append("主面板缺少开关 %s（应为 PSSwitchCell）" % NO_JUMP_KEY)
-    elif bool(trials[0].get("default")) != NO_JUMP_DEFAULT:
-        errors.append("%s 的 default 应为 %s，实为 %r"
-                      % (NO_JUMP_KEY, NO_JUMP_DEFAULT, trials[0].get("default")))
+    for key, default in ((NO_JUMP_KEY, NO_JUMP_DEFAULT), (WAKE_KEY, WAKE_DEFAULT)):
+        trials = find_items(main, "PSSwitchCell", key)
+        if not trials:
+            errors.append("主面板缺少开关 %s（应为 PSSwitchCell）" % key)
+        elif bool(trials[0].get("default")) != default:
+            errors.append("%s 的 default 应为 %s，实为 %r"
+                          % (key, default, trials[0].get("default")))
 
 
 def openstep_keys(path):
@@ -112,7 +117,7 @@ def openstep_keys(path):
 
 
 def check_defaults(errors):
-    keys = list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY, NO_JUMP_KEY]
+    keys = list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY, NO_JUMP_KEY, WAKE_KEY]
     texts = []
     for path in DEFAULT_PLISTS:
         if not path.is_file():
@@ -137,7 +142,7 @@ def check_defaults(errors):
 
 def check_self_use_table(errors):
     src = PREFS_HEADER.read_text(encoding="utf-8")
-    for key in list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY, NO_JUMP_KEY]:
+    for key in list(LIGHT_POP_KEYS) + [PRESS_BRIGHTNESS_KEY, AI_LOG_KEY, NO_JUMP_KEY, WAKE_KEY]:
         if not re.search(r'@"%s"\s*:' % re.escape(key), src):
             errors.append("RKPreferences.h 固化表缺少键 %s（键盘进程回落会出错值）" % key)
 

@@ -1,18 +1,20 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.45）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.46）
 //
-// == 已经被日志坐实的部分（2.3.42 / 2.3.44） ==
-//   半注销后每次点语音：mic -> 0 → [entry] launchWBRecorder → [reason] new_native_launch
-//   → [JUMP] allowBT=0 pipFallback=0 → launching=1 reason=launch_app_from_background
-//   → +0.8s mic -> 1（主 App 被拉到前台）→ recorder_active_check → session_stopped
-//   ⇒ requireJumpToMainAppForRecording 等价于 !microphoneActive（39/45 行零例外），
-//     pictureInPictureActive 全程 0（连 PiP 兜底都不试）。
-//   ⇒ 录音一停主 App 就退出会话，键盘侧 mic 立刻归 0，下一次必跳。
+// == 已经被日志坐实的部分 ==
+//   2.3.42/2.3.44：半注销后每次点语音 → mic 0 → [entry] → [JUMP] pipFallback=0
+//     → +0.8s mic 1（主 App 到前台才录上）→ session_stopped。
+//   2.3.45：真凶是 3.04 秒的 PIPStart 超时 → _fallbackToURLSchemeForPIPStartCommandTimeout
+//     → 跳 URL。pip=1 时 requireJump 本来就是 0，所以「强行 requireJump=NO」这条路是空的。
+//     standy 的载体是 PiP；SpringBoard 一重启，PiP 凭证失效，App 挂起收不到 PIPStart。
 //
-// == 2.3.45 做的事：A 方案（强行免跳的最小实验） ==
-//   设置页「语音免跳转（实验）」打开时，让 requireJumpToMainAppForRecording 恒返回 NO，
-//   看 mic=0 时键盘能否在自身进程内直接起录音。
-//   配套观测：currentMask（状态位图，变化才记）、进入录音待机（RecorderStandby）。
-//   开关关闭 = 完全原行为，只是照常记 gate 日志。
+// == 2.3.46 做的事：mach/信号唤醒 ==
+//   静态确认 wxkb_plugin 里没有 CFMessagePort / xpc_connection_create_mach_service /
+//   bootstrap_look_up；设备 launchctl 里 wetype 相关 mach service 只有键盘扩展自己的三个，
+//   主 App 没注册任何 mach service ⇒ 「给主 App 发 mach 消息」没有端口可用，
+//   而且 mach 消息对被挂起的 task 只会排队、不会让它 resume。
+//   所以改用 SIGCONT（同 uid 即可，键盘进程有权限）：发 PIPStart 之前先把主 App
+//   从 STOPPED 拉回 RUNNING，让它有机会处理随后的 PIPStart。
+//   开关「点语音前唤醒主 App（实验）」默认关，关闭时与原行为完全一致。
 //
 // == 返回类型核对（capstone 看 ret 出口） ==
 //   requireJumpToMainAppForRecording : eor w0,w0,#1                → BOOL
@@ -30,6 +32,13 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#import <sys/sysctl.h>
+#import <libproc.h>
+#import <signal.h>
+#import <errno.h>
+#import <unistd.h>
+#import <string.h>
+#import <sys/syslimits.h>
 #import "RKPreferences.h"
 
 #pragma mark - 日志
@@ -37,6 +46,8 @@
 static BOOL RKVLLogEnabled = NO;
 // 2.3.45：语音免跳转实验开关。开 = requireJumpToMainAppForRecording 强制返回 NO。
 static BOOL RKVLNoJumpTrial = NO;
+// 2.3.46：mach/信号唤醒实验。开 = 发 PIPStart 前先把挂起的主 App 恢复执行。
+static BOOL RKVLVoiceWake = NO;
 
 static void RKVLLogRefresh(void) {
     NSDictionary *prefs = RKReadEffectivePreferences();
@@ -44,6 +55,7 @@ static void RKVLLogRefresh(void) {
     BOOL master = (!enabled || [enabled boolValue]);
     RKVLLogEnabled = master && [prefs[@"AIRecorderLog"] boolValue];
     RKVLNoJumpTrial = master && [prefs[@"VoiceNoJumpTrial"] boolValue];
+    RKVLVoiceWake = master && [prefs[@"VoiceWakeApp"] boolValue];
 }
 
 static void RKVLPreferencesChanged(CFNotificationCenterRef center, void *observer,
@@ -89,6 +101,60 @@ static unsigned int RKVLProbeMask(void) {
     if (!probe) return 0;
     if (![probe respondsToSelector:@selector(currentMask)]) return 0;
     return ((uint32_t (*)(id, SEL))objc_msgSend)(probe, @selector(currentMask));
+}
+
+#pragma mark - 2.3.46 唤醒挂起的主 App
+
+// ⚠️ 前提（静态挖过、也查过设备 launchctl）：
+//   wxkb_plugin 里没有任何 CFMessagePort / xpc_connection_create_mach_service /
+//   bootstrap_look_up 的使用；设备上 user/501 域里 wetype 相关 mach service 只有键盘自己的
+//   （com.tencent.wetype.keyboard / .viewservice / .apple-extension-service），
+//   主 App（UIKitApplication:com.tencent.wetype）一个都没注册。
+//   ⇒ 「键盘发 mach 消息把主 App 叫醒」这条路在 WeType 里没有现成端口可用。
+//   mach 消息对被挂起的 task 只是排队，内核不会因此 resume 它 —— 真正能让它从
+//   STOPPED 状态回到 RUNNING 的、且键盘进程有权限做的只有 SIGCONT（同 uid 即可）。
+//   所以这里做的是「信号唤醒」，语义上等价于我们想要的「mach 唤醒」，只是不依赖 service。
+static pid_t RKVLFindMainAppPID(NSString **outPath) {
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
+    size_t size = 0;
+    if (sysctl(mib, 4, NULL, &size, NULL, 0) != 0 || size == 0) return -1;
+    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(size);
+    if (!procs) return -1;
+    if (sysctl(mib, 4, procs, &size, NULL, 0) != 0) { free(procs); return -1; }
+
+    pid_t found = -1;
+    int count = (int)(size / sizeof(struct kinfo_proc));
+    for (int i = 0; i < count; i++) {
+        pid_t p = procs[i].kp_proc.p_pid;
+        if (p <= 1 || p == getpid()) continue;
+        char name[64] = {0};
+        if (proc_name(p, name, sizeof(name)) <= 0) continue;
+        if (strcmp(name, "wxkb") != 0) continue;
+        char path[PATH_MAX] = {0};
+        if (proc_pidpath(p, path, sizeof(path)) <= 0) continue;
+        NSString *ps = @(path);
+        if (![ps containsString:@"/wxkb.app/"]) continue;
+        found = p;
+        if (outPath) *outPath = ps;
+        break;
+    }
+    free(procs);
+    return found;
+}
+
+// 找到主 App 并发 SIGCONT，返回 (pid, rc, errno)。找不到返回 pid=-1。
+static pid_t RKVLWakeMainApp(int *outRC, int *outErrno) {
+    NSString *path = nil;
+    pid_t p = RKVLFindMainAppPID(&path);
+    int rc = -999, err = 0;
+    if (p > 0) {
+        rc = kill(p, SIGCONT);
+        err = errno;
+        if (rc != 0) RKVLLog(@"[wake] main app path=%@", path);
+    }
+    if (outRC) *outRC = rc;
+    if (outErrno) *outErrno = err;
+    return p;
 }
 
 #pragma mark - 探针
@@ -164,9 +230,31 @@ static unsigned int RKVLProbeMask(void) {
 }
 
 // 真正的入口（2.3.42 里 hook 的 launchWcVoiceWithContext: 全程零命中）。
+// 2.3.46：开关打开时，先让挂起的主 App 回到 RUNNING，再让它去处理随后的 PIPStart。
 - (void)launchWBRecorderWithContext:(id)context finishedBlock:(id)block {
-    RKVLLog(@"[entry] launchWBRecorder ctx=%p trial=%d mask=0x%x", context, RKVLNoJumpTrial,
-            RKVLProbeMask());
+    RKVLLog(@"[entry] launchWBRecorder ctx=%p trial=%d wake=%d mask=0x%x",
+            context, RKVLNoJumpTrial, RKVLVoiceWake, RKVLProbeMask());
+    if (RKVLVoiceWake) {
+        int rc = 0, err = 0;
+        uint32_t before = RKVLProbeMask();
+        pid_t pid = RKVLWakeMainApp(&rc, &err);
+        RKVLLog(@"[wake] pid=%d kill(SIGCONT)=%d errno=%d mask_before=0x%x mic=%d pip=%d",
+                pid, rc, err, before,
+                RKVLProbeFlag(@selector(microphoneActive)),
+                RKVLProbeFlag(@selector(pictureInPictureActive)));
+        usleep(200 * 1000);
+        RKVLLog(@"[wake] +200ms mask=0x%x mic=%d pip=%d",
+                RKVLProbeMask(),
+                RKVLProbeFlag(@selector(microphoneActive)),
+                RKVLProbeFlag(@selector(pictureInPictureActive)));
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.4 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            RKVLLog(@"[wake] +3.4s mask=0x%x mic=%d pip=%d",
+                    RKVLProbeMask(),
+                    RKVLProbeFlag(@selector(microphoneActive)),
+                    RKVLProbeFlag(@selector(pictureInPictureActive)));
+        });
+    }
     %orig;
 }
 
@@ -214,11 +302,16 @@ static unsigned int RKVLProbeMask(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLog(@"==== RKVoiceJumpProbe 2.3.45 loaded path=%@ ====", RKVLLogPath());
+        RKVLLog(@"==== RKVoiceJumpProbe 2.3.46 loaded path=%@ ====", RKVLLogPath());
         NSDictionary *p = RKReadEffectivePreferences();
-        RKVLLog(@"[cfg] logEnabled=%d trial=%d Enabled=%@ AIRecorderLog=%@ VoiceNoJumpTrial=%@ rev=%@ bundle=%@",
-                RKVLLogEnabled, RKVLNoJumpTrial, p[@"Enabled"], p[@"AIRecorderLog"],
-                p[@"VoiceNoJumpTrial"], p[@"RKSettingsRevision"],
+        RKVLLog(@"[cfg] logEnabled=%d trial=%d wake=%d Enabled=%@ AIRecorderLog=%@ VoiceNoJumpTrial=%@ VoiceWakeApp=%@ rev=%@ bundle=%@",
+                RKVLLogEnabled, RKVLNoJumpTrial, RKVLVoiceWake, p[@"Enabled"], p[@"AIRecorderLog"],
+                p[@"VoiceNoJumpTrial"], p[@"VoiceWakeApp"], p[@"RKSettingsRevision"],
                 [[NSBundle mainBundle] bundleIdentifier]);
+        // 顺手确认超时兜底方法在当前版本存在（只查不 hook，避免猜错签名改坏调用约定）。
+        Class svc = objc_getClass("WBVoiceInputService");
+        BOOL hasFallback = svc &&
+            class_getInstanceMethod(svc, @selector(_fallbackToURLSchemeForPIPStartCommandTimeoutWithSessionId:)) != NULL;
+        RKVLLog(@"[cfg] PIPStartTimeoutFallback method=%d", hasFallback);
     }
 }

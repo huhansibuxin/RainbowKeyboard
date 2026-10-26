@@ -222,6 +222,29 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
+			<string>唤醒主 App（实验）</string>
+			<key>footerText</key>
+			<string>默认关闭。半注销后主 App 会被系统挂起，键盘发出的 PIPStart 无人处理，3 秒超时后只能跳转。开启后会在发 PIPStart 前先让主 App 恢复执行，尝试省掉这次跳转。
+需要配合「记录调试日志」观察结果。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>key</key>
+			<string>VoiceWakeApp</string>
+			<key>label</key>
+			<string>点语音前唤醒主 App</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.minis.rainbowkeyboard</string>
+			<key>PostNotification</key>
+			<string>com.minis.rainbowkeyboard.changed</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
 			<string>调试日志</string>
 			<key>footerText</key>
 			<string>开启后，键盘扩展会把诊断信息写入：
