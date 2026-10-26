@@ -30,8 +30,15 @@
 #import <notify.h>
 
 static const char *const kPipReqName = "com.huhansibuxin.rk.pipreq";
+// 2.3.61：建 pip 的**回执**通道（主 App -> 键盘侧）。
+// 为什么必须要它：键盘侧的 `pictureInPictureActive` 是主 App 通过 IPC **懒上报**的状态位，
+// 主 App 本地 pip 已经 active，键盘侧仍可能十几秒都是 0（2.3.60 实测：主 App +0.16s
+// isActive=1，键盘侧直到 +9.25s 才看到 pip=1，中间 3.0s 就被兜底误判「pip 没建起来」）。
+// ⇒ 谁真的建起来了，谁就直接喊一声，键盘侧不必猜。
+static const char *const kPipOkName  = "com.huhansibuxin.rk.pipok";
 
 static int            gReqToken = 0;
+static int            gOkToken  = 0;
 static BOOL           gFakeForeground = NO;   // 只在建 pip 窗口期内为 YES
 static NSTimeInterval gLastEngage = 0;
 static BOOL           gHookInstalled = NO;
@@ -85,6 +92,19 @@ static BOOL RKWTakeRequest(void) {
     notify_set_state(gReqToken, 0);          // 一次性消费
     RKWLog(@"取到 pip 请求（%.0fs 前）", (double)(now - req));
     return YES;
+}
+
+#pragma mark - 回执：告诉键盘侧「pip 真的活了」
+
+// 只在 pip 确实 active 时发。键盘侧收到就当 pip=1，直接免跳、不做任何回跳。
+static void RKWPostOk(NSString *why) {
+    if (!gOkToken) {
+        if (notify_register_check(kPipOkName, &gOkToken) != NOTIFY_STATUS_OK || !gOkToken) return;
+    }
+    uint64_t ts = (uint64_t)time(NULL);
+    notify_set_state(gOkToken, ts);
+    notify_post(kPipOkName);
+    RKWLog(@"回执 pip 已建 -> 键盘侧（%@）", why);
 }
 
 #pragma mark - UIScene.activationState 伪装（只在建 pip 窗口期）
@@ -171,10 +191,12 @@ static void RKWEngageOnce(id mgr, int attempt) {
         RKWLog(@"#%d 没有 startWithCompletionHandler:", attempt);
         return;
     }
-    // 回调体不读入参（防真实签名是 ^(void) 时崩），只在里面再核一次 isActive
+    // 回调体不读入参（防真实签名是 ^(void) 时崩），只在里面再核一次 isActive。
+    // 2.3.61：active 就立刻回执 —— 这是键盘侧免跳的唯一可信信号。
     void (^completion)(BOOL) = ^(BOOL ok) {
-        RKWLog(@"#%d start 回调 ok=%d isActive=%d（窗口期内）",
-               attempt, (int)ok, (int)RKWPipIsActive(mgr));
+        BOOL active = RKWPipIsActive(mgr);
+        RKWLog(@"#%d start 回调 ok=%d isActive=%d（窗口期内）", attempt, (int)ok, (int)active);
+        if (active) RKWPostOk(@"start 回调");
     };
     ((void (*)(id, SEL, id))objc_msgSend)(mgr, startSel, completion);
     RKWLog(@"#%d startWithCompletionHandler: 已发出", attempt);
@@ -192,7 +214,10 @@ static void RKWTrigger(NSString *why) {
             id mgr = RKWPipManager();
             if (!mgr) { RKWLog(@"%@ -> WBVoiceInputPIPManager 不可用", why); return; }
             if (RKWPipIsActive(mgr)) {
-                RKWLog(@"%@ -> pip 已经活着，跳过", why);
+                // 2.3.60 这里只写「跳过」就完事 —— 结果键盘侧 mask 还是 0，3s 后照样兜底。
+                // 2.3.61：pip 活着就回执，键盘侧立刻按免跳处理。
+                RKWLog(@"%@ -> pip 已经活着，回执给键盘侧", why);
+                RKWPostOk(@"already active");
                 return;
             }
             NSTimeInterval now = [NSDate date].timeIntervalSince1970;
@@ -207,21 +232,29 @@ static void RKWTrigger(NSString *why) {
             RKWInstallSceneHook();
             RKWEngageOnce(mgr, 0);
 
-            // 重试：冷启动首拍偶发失败（wcvoicekeep 实测），0.6s / 1.4s 各补一次
+            // 重试：冷启动首拍偶发失败（wcvoicekeep 实测），0.6s / 1.4s 各补一次。
+            // 2.3.61：每拍先看有没有已经建成，建成即回执并停止补刀（别重复 start）。
             for (NSNumber *secs in @[@(0.6), @(1.4)]) {
                 double d = [secs doubleValue];
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
-                    if (RKWPipIsActive(mgr)) return;
+                    if (RKWPipIsActive(mgr)) {
+                        RKWLog(@"t=%.1fs 已 active -> 回执", d);
+                        RKWPostOk(@"retry 前已成");
+                        return;
+                    }
                     RKWLog(@"t=%.1fs 仍未 active -> 重试", d);
                     RKWEngageOnce(mgr, (int)(d * 10));
                 });
             }
-            // 伪装窗口 2.5s 后关闭（够 AVKit 异步检查完）
+            // 伪装窗口 2.5s 后关闭（够 AVKit 异步检查完）；此时若成了再补一次回执，
+            // 兜住「start 回调没来」的情况。
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 gFakeForeground = NO;
-                RKWLog(@"伪装窗口关闭（isActive=%d）", (int)RKWPipIsActive(mgr));
+                BOOL active = RKWPipIsActive(mgr);
+                RKWLog(@"伪装窗口关闭（isActive=%d）", (int)active);
+                if (active) RKWPostOk(@"窗口关闭时已活");
             });
         }
     });
@@ -236,7 +269,9 @@ __attribute__((constructor)) static void RKWetypeHostInit(void) {
 
         RKWLog(@"==== RKWetypePipBuild 载入 bid=%@ home=%@", bid, NSHomeDirectory());
         uint32_t st = notify_register_check(kPipReqName, &gReqToken);
-        RKWLog(@"notify 注册 token=%d st=%u", gReqToken, st);
+        uint32_t st2 = notify_register_check(kPipOkName, &gOkToken);
+        RKWLog(@"notify 注册 reqToken=%d st=%u okToken=%d st=%u",
+               gReqToken, st, gOkToken, st2);
         RKWLog(@"类探测 PIPManager=%d VoiceInputManager=%d",
                objc_getClass("WBVoiceInputPIPManager") != nil,
                objc_getClass("WBVoiceInputManager") != nil);

@@ -1,6 +1,13 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.60）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.61）
 //
-// == 2.3.60（本版）：主 App 侧主动建 pip + 键盘侧连续右跳保底 ==
+// == 2.3.61（本版）：兜底默认关闭（测试期）+ 主 App 建 pip 成功回执 ==
+//
+// 老板要求：先验证「open 拉起小窗 + 主 App 建 pip」能不能每次都成，兜底先不参与。
+// 2.3.60 日志暴露的真因：主 App **+0.16s 就 isActive=1 建好了**，但键盘侧的
+// pictureInPictureActive 是主 App 的懒上报副本，+9.25s 才变 1 ⇒ 3.0s 的兜底每次都误判。
+// ⇒ 新增 notify 回执通道 `com.huhansibuxin.rk.pipok`：主 App 建成就喊一声，键盘侧直接免跳。
+//
+// == 2.3.60：主 App 侧主动建 pip + 键盘侧连续右跳保底 ==
 //   老板实测（2026-10-27，装 2.3.58 + 唤醒开关关 + TrollOpen 生效）：
 //   "先打开 open 的小窗，然后往右跳我们又打开了，相当于两个都打开了"。
 //   日志实证（pid 93105）：
@@ -469,6 +476,37 @@ static BOOL gRKVLFallbackLaunched = NO;  // 我们主动拉起过 ⇒ 必须回�
 //   否则就是「小窗已经开了，我们往右又开一次」= 老板实测的双窗口。
 static BOOL gRKVLSeenRecorder = NO;
 
+// == 2.3.61：兜底总闸 + 主 App 回执 ==
+//
+// ⭐ 老板要求（2026-10-27）：**先在测试期把兜底代码关掉**，只验证「open 拉起小窗 + 主 App 建 pip」
+//   能不能每次都成。兜底一开就会在 3 秒后把主 App 全屏拉起来，把「到底建没建成」这件事
+//   搅成糊涂账（2.3.60 的日志就是这样：主 App 明明 +0.16s 就 isActive=1，键盘侧 3.0s 就兜底了）。
+//   ⇒ 测试期 `gRKVLFallbackOn = NO`：只观察、只回执判定，绝不拉起、绝不回跳。
+//   要恢复兜底（老板说的「连续右跳」保底）只需把这个常量改回 YES。
+static BOOL gRKVLFallbackOn = NO;
+
+// 主 App 建 pip 成功后的回执。键盘侧的 pictureInPictureActive 是主 App 的**懒上报**副本，
+// 可能落后十几秒（2.3.60 实证：主 App +0.16s active，键盘侧 +9.25s 才看到），
+// 而兜底只有 3 秒窗口 ⇒ 必须信回执，不信 mask。
+static const char *const kRKVLPipOkName = "com.huhansibuxin.rk.pipok";
+static BOOL    gRKVLRemotePipOk = NO;      // 本轮收到过「pip 已建」回执
+static int64_t gRKVLWatchStartAt = 0;      // 本轮 watch 起始（Unix 秒），用来丢弃上一轮的回执
+static int     gRKVLOkToken = 0;
+
+// 读一次回执状态，新鲜（本轮内的）才认。
+static void RKVLPipOkCheck(void) {
+    if (!gRKVLOkToken) return;
+    uint64_t v = 0;
+    if (notify_get_state(gRKVLOkToken, &v) != NOTIFY_STATUS_OK || v == 0) return;
+    int64_t ts = (int64_t)v;
+    if (ts + 3 < gRKVLWatchStartAt) return;   // 上一轮留下的，不认
+    if (!gRKVLRemotePipOk) {
+        gRKVLRemotePipOk = YES;
+        RKVLLogForce(@"[back] 收到主 App 回执「pip 已建」ts=%lld（本轮 t0=%lld）",
+                     (long long)ts, (long long)gRKVLWatchStartAt);
+    }
+}
+
 // 2.3.56：回来之后继续盯 5 秒 —— 要看清「回来那一刻 pip 有没有自己长出来、mic 有没有被掐死」。
 //   日志实证（2.3.55）：等到 pip 才回，pip 是**录音结束进待机**时才出现的（+7.25s），
 //   所以「等 pip」这条路等于让用户在主 App 里干等 7~10 秒 ⇒ 用户判定「不会跳回来」。
@@ -520,6 +558,16 @@ static void RKVLReturnTick(void) {
     int pip = RKVLProbeFlag(@selector(pictureInPictureActive));
     double t = gRKVLReturnTicks * 0.25;
 
+    // ⭐ 2.3.61 ⓪ 主 App 回执优先 —— 它说建好了就是建好了。
+    //   比 mask 快得多：2.3.60 实证主 App +0.16s active，键盘侧 mask 要 +9.25s 才变。
+    RKVLPipOkCheck();
+    if (gRKVLRemotePipOk) {
+        gRKVLReturnPending = NO;
+        RKVLLogForce(@"[back] 主 App 回执 pip 已建（t=%.2fs mask_pip=%d）-> 免跳（不做任何事）", t, pip);
+        RKVLPostReturnProbe(0);
+        return;
+    }
+
     // 2.3.60：只作日志用，不再当兜底开关（兜底改看 pip 本身）
     if ((mic == 1 || pip == 1) && !gRKVLSeenRecorder) {
         gRKVLSeenRecorder = YES;
@@ -545,7 +593,9 @@ static void RKVLReturnTick(void) {
     //   2.3.59 的判据（见过 mic 就锁死）在 pip 建不起来时会永远不兜底 ⇒ 下一轮还得跳，
     //   用户白等。现在改成「pip 仍为 0 且已等 3.0s」就拉起：
     //   3.0s 够主 App 侧走完 setup→prepare→start 三次尝试（0.6s/1.4s 重试）。
-    if (!gRKVLFallbackLaunched && pip == 0 && t >= 3.0) {
+    // ⛔ 2.3.61：加 `gRKVLFallbackOn` 总闸，测试期关闭 —— 先把「open 建 pip 能不能每次都成」
+    //   这件事测干净，兜底一起动手就分不清是谁的功劳。
+    if (gRKVLFallbackOn && !gRKVLFallbackLaunched && pip == 0 && t >= 3.0) {
         int ok = 0;
         BOOL r = RKVLForegroundLaunchApp(&ok);
         gRKVLFallbackLaunched = YES;
@@ -577,7 +627,17 @@ static void RKVLReturnTick(void) {
         RKVLReturnToHost(@"timeout");
         return;
     }
-    // ⑤ 分屏路径迟迟没动静（既没 pip 也没 JUMP）⇒ 收工，交给原生，不再管
+    // ⑤ 兜底关闭时的安全收尾（2.3.61）：
+    //   我们从没开过自己的窗口，但原生 JUMP 发生过、6 秒还等不到 pip/回执 ⇒ 说明没有分屏插件
+    //   接这一跳，用户已经被全屏带到微信输入法里了。这时**只回跳、不重开**，别把人困住。
+    //   （有 TrollOpen 且 pip 建成的情况在上面 ⓪ 就 return 了，走不到这里）
+    if (!gRKVLFallbackOn && !gRKVLFallbackLaunched && gRKVLJumped && gRKVLReturnTicks >= 24) {
+        gRKVLReturnPending = NO;
+        RKVLLogForce(@"[back] 兜底已关 + 6s 无 pip/回执（JUMP 过）-> 只回跳不重开", t);
+        RKVLReturnToHost(@"rescue_no_split");
+        return;
+    }
+    // ⑥ 分屏路径迟迟没动静（既没 pip 也没 JUMP）⇒ 收工，交给原生，不再管
     //   2.3.59：观察窗从 6s 放宽到 10s，够看清「mic 起来了但 pip 迟到」这种慢路径。
     if (!gRKVLFallbackLaunched && gRKVLReturnTicks >= 40) {
         gRKVLReturnPending = NO;
@@ -596,8 +656,11 @@ static void RKVLStartReturnWatch(void) {
     gRKVLReturnTries = 0;
     gRKVLReturnSawMic = NO;
     gRKVLFirstMicT = 0;
-    RKVLLogForce(@"[back] watch start host=%@ jump=%d fallback=%d",
-                 gRKVLHostBundle ?: @"-", gRKVLJumped, gRKVLFallbackLaunched);
+    gRKVLRemotePipOk = NO;                       // 2.3.61：回执只认本轮的
+    gRKVLWatchStartAt = (int64_t)time(NULL);
+    RKVLLogForce(@"[back] watch start host=%@ jump=%d fallback=%d 兜底开关=%d",
+                 gRKVLHostBundle ?: @"-", gRKVLJumped, gRKVLFallbackLaunched,
+                 (int)gRKVLFallbackOn);
     RKVLReturnTick();
 }
 
@@ -913,7 +976,18 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.60 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.61 loaded path=%@ ====", RKVLLogPath());
+        // 2.3.61：注册「主 App 建 pip 成功」回执。兜底已关，pip 建没建成只能靠这条回执判定
+        //   （mask 是主 App 的懒上报副本，实测落后 9 秒，不可用）。
+        {
+            uint32_t ost = notify_register_check(kRKVLPipOkName, &gRKVLOkToken);
+            int dummy = 0;
+            notify_register_dispatch(kRKVLPipOkName, &dummy, dispatch_get_main_queue(), ^(int t) {
+                RKVLPipOkCheck();
+            });
+            RKVLLogForce(@"[cfg] pipok token=%d st=%u 兜底开关=%d(0=测试期关闭)",
+                         gRKVLOkToken, ost, (int)gRKVLFallbackOn);
+        }
         // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
         {
             NSString *mem = RKVLHostLoad();
