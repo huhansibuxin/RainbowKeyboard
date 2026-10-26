@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.55）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.56）
 //
 // == 2.3.55 做的事：回跳时机改成「pip 一立住就回」+ 宿主持久化 ==
 //   用户实测 2.3.54：能跳回去了，但 (a) 半注销后**第一次**点语音不回来，
@@ -9,6 +9,19 @@
 //       面板自然收掉。原生是「待机一建立（pip=1）就立刻回」，面板还在 ⇒ 直接能接着录。
 //       ⇒ 判据改成「只要 pip=1 就回」，不再要求先见过 mic。
 //   另外：宿主未知时**不拉起**（拉得起、回不来 = 把人扔在输入法里），老实交给原生跳转。
+//
+// == 2.3.56 做的事：回跳时机按原生节奏（录音一起就回，不等 pip）+ 日志不再看开关 ==
+//   2.3.55 实测（pid 87733）第一次按压的完整时间线：
+//     565.885 launch ok=1 → 566.532 [JUMP] → 567.048 mic=1（录音起）
+//     → **575.934 pip=1** → 575.950 回跳 → 576.4 standby → session_stopped
+//   ⇒ 宿主拿到的是对的（`[back] host=com.tencent.xin via=WeType.hostBundleID(缓存)`），
+//     **问题不在「拿不到回跳目标」，而在「等 pip 等到 7~10 秒」**：pip 只在
+//     「录音结束进待机」那一刻才出现，等它 = 让用户在主 App 里干等一整句话的时间，
+//     观感就是「不会跳回来」。
+//   ⇒ 改成：见到 mic=1 后再给 1.0s 稳定期就回（不等 pip），回来之后继续盯 5 秒，
+//     看 pip 有没有自己在后台长出来、mic 有没有被掐死（`[back] after +X.Xs`）。
+//   另：`RKVLLog` 改成**永远写**。用户「开关一直开着但它不写」的根因是开关值要靠
+//     跨进程快照/固化表兜底，扩展在注销后读不到 Preferences 就回落成 0，整条诊断链静默。
 //
 // == 已经被日志坐实的部分 ==
 //   2.3.42/2.3.44：半注销后每次点语音 → mic 0 → [entry] → [JUMP] pipFallback=0
@@ -84,7 +97,11 @@ static NSString *RKVLLogPath(void) {
 }
 
 static void RKVLLog(NSString *fmt, ...) {
-    if (!RKVLLogEnabled) return;
+    // ⚠️ 2.3.56：这里**不再看开关**。
+    //   用户反馈「日志开关一直是开的，但它不写」—— 根因是开关值要靠跨进程快照/固化表兜底，
+    //   而键盘扩展在注销后读不到 /var/mobile/Library/Preferences，回落固化表就是 0，
+    //   于是 RKVLLogEnabled=0，整条诊断链静默。诊断期的日志比开关重要：
+    //   这个文件只由「语音诊断」相关代码写，本来就只在我们自己调试时看。
     va_list ap;
     va_start(ap, fmt);
     NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
@@ -377,6 +394,23 @@ static BOOL gRKVLReturnPending = NO;
 static int  gRKVLReturnTicks = 0;
 static int  gRKVLReturnTries = 0;
 static BOOL gRKVLReturnSawMic = NO;
+static double gRKVLFirstMicT = 0;   // 首次见到 mic=1 的那一拍（单位秒）
+
+// 2.3.56：回来之后继续盯 5 秒 —— 要看清「回来那一刻 pip 有没有自己长出来、mic 有没有被掐死」。
+//   日志实证（2.3.55）：等到 pip 才回，pip 是**录音结束进待机**时才出现的（+7.25s），
+//   所以「等 pip」这条路等于让用户在主 App 里干等 7~10 秒 ⇒ 用户判定「不会跳回来」。
+static void RKVLPostReturnProbe(int step) {
+    static const double delays[] = {0.5, 1.0, 2.0, 4.0};
+    if (step < 0 || step >= 4) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delays[step] * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        RKVLLogForce(@"[back] after +%.1fs mask=0x%x mic=%d pip=%d",
+                     delays[step], RKVLProbeMask(),
+                     RKVLProbeFlag(@selector(microphoneActive)),
+                     RKVLProbeFlag(@selector(pictureInPictureActive)));
+        RKVLPostReturnProbe(step + 1);
+    });
+}
 
 static void RKVLReturnTick(void);
 
@@ -388,7 +422,7 @@ static void RKVLReturnToHost(NSString *why) {
     }
     int ok = 0;
     BOOL r = RKVLActivateBundle(bid, &ok);
-    RKVLLogForce(@"[back] (%@) -> %@ ok=%d(%d) mask=0x%x mic=%d pip=%d",
+    RKVLLogForce(@"[back] (%@) -> %@ ok=%@(%d) mask=0x%x mic=%d pip=%d",
                  why, bid, r ? @"YES" : @"NO", ok, RKVLProbeMask(),
                  RKVLProbeFlag(@selector(microphoneActive)),
                  RKVLProbeFlag(@selector(pictureInPictureActive)));
@@ -412,15 +446,30 @@ static void RKVLReturnTick(void) {
     int mic = RKVLProbeFlag(@selector(microphoneActive));
     int pip = RKVLProbeFlag(@selector(pictureInPictureActive));
     double t = gRKVLReturnTicks * 0.25;
-    if (mic == 1 && !gRKVLReturnSawMic) {
-        gRKVLReturnSawMic = YES;
-        RKVLLog(@"[back] 见到 mic=1（录音已建立）t=%.2fs", t);
+    if (mic == 1) {
+        if (!gRKVLReturnSawMic) {
+            gRKVLReturnSawMic = YES;
+            gRKVLFirstMicT = t;
+            RKVLLog(@"[back] 见到 mic=1（录音已建立）t=%.2fs pip=%d", t, pip);
+        } else if (t - gRKVLFirstMicT >= 1.0) {
+            // ⭐ 2.3.56 核心：录音一起就把人送回去，**不等 pip**。
+            //   依据（2.3.55 实测）：pip 只在「录音结束进待机」时才出现（+7.25s），
+            //   等它等于让用户在主 App 里干等 7~10 秒，用户观感就是「不回来」。
+            //   微信输入法原生就是这个节奏：跳过去 → 录音一起 → 立刻回。
+            //   留 1.0s 稳定期：录音刚起就切走，容易把采集掐掉（「录音失败」）。
+            gRKVLReturnPending = NO;
+            RKVLLogForce(@"[back] 录音已起 t=%.2fs（mic=1 +1.0s 稳定）pip=%d -> 回宿主", t, pip);
+            RKVLReturnToHost(@"mic_started");
+            RKVLPostReturnProbe(0);
+            return;
+        }
     }
-    // ① 主 App 一进录音待机（pip=1）就立刻回 —— 与原生一致，语音面板还在
+    // ① 主 App 一进录音待机（pip=1）就立刻回
     if (pip == 1) {
         gRKVLReturnPending = NO;
         RKVLLogForce(@"[back] pip 已立住 t=%.2fs mic=%d -> 回宿主", t, mic);
         RKVLReturnToHost(@"pip_ready");
+        RKVLPostReturnProbe(0);
         return;
     }
     // ② 15s 还没 pip、且不在录音 ⇒ 兜底回（宁可回微信，也不把人扔在输入法里）
@@ -448,6 +497,7 @@ static void RKVLStartReturnWatch(void) {
     gRKVLReturnTicks = 0;
     gRKVLReturnTries = 0;
     gRKVLReturnSawMic = NO;
+    gRKVLFirstMicT = 0;
     RKVLLogForce(@"[back] watch start host=%@", gRKVLHostBundle ?: @"-");
     RKVLReturnTick();
 }
@@ -722,7 +772,7 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.55 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.56 loaded path=%@ ====", RKVLLogPath());
         // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
         {
             NSString *mem = RKVLHostLoad();
