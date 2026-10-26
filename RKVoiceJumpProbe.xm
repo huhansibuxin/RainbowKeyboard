@@ -154,8 +154,8 @@ static int RKVLProbeFlag(SEL sel) {
 %hook WBVoiceCommandChannel
 - (id)ipcChannel {
     id ch = %orig;
-    static void *last;
-    if ((void *)ch != last) { last = (void *)ch; RKVLLog(@"[ipc] commandChannel=%p", ch); }
+    static __unsafe_unretained id last;
+    if (ch != last) { last = ch; RKVLLog(@"[ipc] commandChannel=%p", ch); }
     return ch;
 }
 %end
@@ -163,8 +163,8 @@ static int RKVLProbeFlag(SEL sel) {
 %hook WBVoiceEventChannel
 - (id)ipcChannel {
     id ch = %orig;
-    static void *last;
-    if ((void *)ch != last) { last = (void *)ch; RKVLLog(@"[ipc] eventChannel=%p", ch); }
+    static __unsafe_unretained id last;
+    if (ch != last) { last = ch; RKVLLog(@"[ipc] eventChannel=%p", ch); }
     return ch;
 }
 %end
