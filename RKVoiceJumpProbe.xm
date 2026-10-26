@@ -1,4 +1,11 @@
-// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.1）
+// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.2）
+//
+// == 2.4.2：日志门控再加一道「写之前先看一眼」==
+//   2.4.1 实机：日志打开能写（说明快照来源通了），但**关掉之后还在写**。
+//   设备证据：03:12:18 关掉（plist AIRecorderLog=0、revision 1793041938700203），
+//     键盘进程一路写到 03:13；dbg.plist mtime 停在 03:11 ⇒ RKVLLogRefresh 一次没被调。
+//   原因：翻设置页时键盘扩展基本挂起，libnotify 的 darwin 通知对挂起进程是丢的。
+//   ⇒ 不再依赖通知时机：语音轮次入口 `launchWBRecorderWithContext:` 第一行懒刷新（1s 节流）。
 //
 // == 2.4.1：回跳提速 + 日志门控第三来源 ==
 //   实测（2.4.0 设备日志）一轮跳转从「点语音」到「回到宿主」约 2.4~2.6s，拆开是：
@@ -165,6 +172,21 @@ static void RKVLLogRefresh(void) {
 static void RKVLPreferencesChanged(CFNotificationCenterRef center, void *observer,
                                    CFStringRef name, const void *object, CFDictionaryRef info) {
     dispatch_async(dispatch_get_main_queue(), ^{ RKVLLogRefresh(); });
+}
+
+// ⭐ 2.4.2 实测：darwin 通知在键盘扩展里**不可靠**。
+//   老板 03:12:18 关掉日志（设备 plist 已经是 AIRecorderLog=0、revision 1793041938700203），
+//   键盘进程照样继续写日志到 03:13 —— dbg.plist 的 mtime 一直停在 03:11，说明
+//   RKVLLogRefresh 一次都没被回调。原因：翻设置页时键盘扩展基本处于挂起，
+//   libnotify 的 darwin 通知对挂起进程是**丢**的，回到微信后也不会补投。
+//   ⇒ 不能在“什么时候改的”这条路上等通知，改成“要写之前先看一眼”：
+//   每个语音轮次入口懒刷新一次（1 秒节流，一次点语音最多一次 prefs 读）。
+static void RKVLLogRefreshIfStale(void) {
+    static CFAbsoluteTime last;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - last < 1.0) return;
+    last = now;
+    RKVLLogRefresh();
 }
 
 static NSString *RKVLLogPath(void) {
@@ -719,6 +741,9 @@ static void RKVLBeginRound(void) {
 //   pip/mic 已立 ⇒ 立刻返回，一行活都不干（真免跳，零开销）
 //   否则         ⇒ 主动有头拉起主 App（一次右跳），起状态机；等它进待机就自动回跳
 - (void)launchWBRecorderWithContext:(id)context finishedBlock:(id)block {
+    // ⭐ 2.4.2：先懒刷新一次门控（见 RKVLLogRefreshIfStale 的说明）——
+    //   必须在第一行日志之前，否则“刚关掉日志的那一次点语音”还会写一整轮。
+    RKVLLogRefreshIfStale();
     int micB = RKVLProbeFlag(@selector(microphoneActive));
     int pipB = RKVLProbeFlag(@selector(pictureInPictureActive));
     RKVLLogForce(@"[entry] launchWBRecorder ctx=%p 兜底=%d mask=0x%x mic=%d pip=%d",
@@ -897,7 +922,7 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.1 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.2 loaded path=%@ ====", RKVLLogPath());
         RKVLLogForce(@"[cfg] 兜底=%d log=%d（唯一路径：连续右跳）",
                      (int)RKVLVoiceWake, (int)RKVLLogEnabled);
         // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
