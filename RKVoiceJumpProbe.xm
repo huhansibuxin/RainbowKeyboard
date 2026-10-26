@@ -1,4 +1,16 @@
-// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.0 正式版）
+// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.1）
+//
+// == 2.4.1：回跳提速 + 日志门控第三来源 ==
+//   实测（2.4.0 设备日志）一轮跳转从「点语音」到「回到宿主」约 2.4~2.6s，拆开是：
+//     跳过去 → mic 在 1.3~1.5s 起来 → 再等「稳定 1.0s」→ 回跳。
+//   两处纯等待，都不影响正确性，可以砍：
+//     ① 采样 0.4s → 前 3 秒 0.10s（发现 mic 平均早 0.2s，最坏早 0.3s）
+//     ② 稳定窗 1.0s → **连续** 0.7s（密采样能看见 mic 抖动，掉了就重计时，更安全也更快）
+//     ③ 补跳阈值 2.0s → 1.5s
+//   ⇒ 理论省 0.5~0.7s，一轮约 1.7~1.9s 就回到宿主。
+//   ⚠️ 别把 0.7s 再往下降到「一拍就回」：录音刚起就切走会把采集掐断（= 录制失败）。
+//   · 日志门控：键盘扩展沙盒读不到偏好时，改从**设置页位域快照**取开关值
+//     （2.4.0 只读文件 + 落盘值，而落盘值只在能读文件时才写 ⇒ 门永远关着，开不起来）。
 //
 // == 2.4.0（正式版）：日志真正受门控 + 删掉「语音免跳转实验」开关 ==
 //   · 日志：全项目只有一个写盘口 RKVLLogWrite，**唯一门控 = RKVLLogEnabled**。
@@ -124,13 +136,22 @@ static void RKVLDbgFlagSave(BOOL on) {
 static void RKVLLogRefresh(void) {
     // ⚠️ 日志开关必须读「裸值」（RKReadStoredPreferences，**不含**固化表兜底）：
     //   固化表里 AIRecorderLog = 0，若用生效值判断，注销后永远是 0 ⇒ 落盘值机制失效。
+    //
+    // ⭐ 2.4.1 修：键盘扩展沙盒**读不到** /var/mobile/Library/Preferences 时，
+    //   2.4.0 只剩「落盘值」一条路 —— 而落盘值只有在「读得到」时才写，于是死锁：
+    //   设备上 com.minis.rainbowkeyboard.dbg.plist 实测根本不存在，日志开着也永远判 0
+    //   （表面看是「门控生效了」，其实是「门永远关着，想开也开不了」）。
+    //   正解：第三来源 = 设置页发过来的位域快照（和光效开关同一条通道，已在跑）。
+    //   合并规则交给 RKMergeDisplaySnapshot（按 revision 取新的一方）。
     NSDictionary *stored = RKReadStoredPreferences();
-    id lg = stored[@"AIRecorderLog"];
+    NSDictionary *snapshot = RKReceiveDisplaySnapshot();
+    NSDictionary *merged = RKMergeDisplaySnapshot(stored, snapshot);
+    id lg = merged[@"AIRecorderLog"];
     if (lg) {
-        id en = stored[@"Enabled"];
+        id en = merged[@"Enabled"];
         BOOL master = (!en || [en boolValue]);
         RKVLLogEnabled = master && [lg boolValue];
-        RKVLDbgFlagSave(RKVLLogEnabled);      // 供「注销后读不到偏好」时使用
+        RKVLDbgFlagSave(RKVLLogEnabled);      // 供「注销后读不到偏好+快照」时使用
     } else {
         RKVLLogEnabled = RKVLDbgFlagLoad();
     }
@@ -203,7 +224,10 @@ static __unsafe_unretained id gRKVLProbe = nil;
 static int RKVLProbeFlag(SEL sel) {
     id probe = gRKVLProbe;
     if (!probe) {
-        Class c = objc_getClass("WBVoiceStateProbe");
+        // 2.4.1：类查一次就缓存（旧写法每拍都 objc_getClass，虽然快但没意义）
+        static Class probeCls;
+        if (!probeCls) probeCls = objc_getClass("WBVoiceStateProbe");
+        Class c = probeCls;
         if (c && [c respondsToSelector:@selector(sharedInstance)])
             probe = [c performSelector:@selector(sharedInstance)];
     }
@@ -453,9 +477,15 @@ static void RKVLPostReturnProbe(int step) {
 static void RKVLReturnTick(void);
 
 // 排下一拍。捕获代际，被 nudge 作废的那一拍什么都不做。
+//
+// ⭐ 2.4.1 提速：前 3 秒 **0.10s** 一拍，之后 0.30s。
+//   实测 mic 在跳过去后 1.3~1.5s 才起来，旧的固定 0.4s 采样意味着**平均晚 0.2s、
+//   最坏晚 0.4s** 才发现 ⇒ 这 0.2~0.4s 全是用户站在输入法里干等的时间。
+//   每拍成本 = 2 次 BOOL 的 objc_msgSend（亚微秒级），0.1s 一拍 ≈ 10 次/秒，可忽略。
 static void RKVLScheduleTick(void) {
+    double delay = (RKVLNow() - gRKVLStartAt < 3.0) ? 0.10 : 0.30;
     uint32_t g = ++gRKVLGen;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (g != gRKVLGen) return;      // 已被更新的一拍取代
         RKVLReturnTick();
@@ -523,22 +553,30 @@ static BOOL RKVLReturnStep(void) {
         return NO;
     }
 
-    // ② 录音已起、稳定 1.0s 再回。刚起就切会把音频采集掐断（=「录制失败」）。
+    // ② 录音已起、连续稳定 0.7s 再回。刚起就切会把音频采集掐断（=「录制失败」）。
+    //   2.4.1：采样从 0.4s 改成 0.1s 后，这里从「等 1.0s」改成「**连续** 0.7s 不掉」——
+    //   密采样能看见抖动，一旦 mic 掉了计时就重来，所以比旧的「粗采样 1.0s」更安全也更快。
     if (gRKVLFallbackLaunched && mic == 1) {
         if (!gRKVLReturnSawMic) {
             gRKVLReturnSawMic = YES;
             gRKVLFirstMicT = t;
-            RKVLLogForce(@"[back] 录音已起 t=%.1fs pip=0 -> 等 1.0s 稳定", t);
-        } else if (t - gRKVLFirstMicT >= 1.0) {
-            RKVLLogForce(@"[back] 录音稳定 t=%.1fs（mic=1 +1.0s）-> 回宿主", t);
+            RKVLLogForce(@"[back] 录音已起 t=%.1fs pip=0 -> 等 0.7s 稳定", t);
+        } else if (t - gRKVLFirstMicT >= 0.70) {
+            RKVLLogForce(@"[back] 录音稳定 t=%.1fs（mic=1 连续 +0.7s）-> 回宿主", t);
             RKVLReturnToHost(@"mic_started");
             return NO;
         }
+    } else if (mic == 0 && gRKVLReturnSawMic) {
+        // 录音掉了（半注销首拍常见）⇒ 稳定计时作废，等它真正稳住
+        gRKVLReturnSawMic = NO;
+        gRKVLFirstMicT = 0;
+        RKVLLogForce(@"[back] ⚠️ 录音掉了 t=%.1fs -> 稳定计时重来（不提前回跳）", t);
     }
 
-    // ③ 连续右跳：2.0s 还没 mic/pip，且原生也没跳 ⇒ 这一跳没落地，再拉一次（最多 2 次）。
+    // ③ 连续右跳：1.5s 还没 mic/pip，且原生也没跳 ⇒ 这一跳没落地，再拉一次（最多 2 次）。
     //   判 `gRKVLJumped` 是为了「精准命中」：原生已经跳了就别叠第二次。
-    if (gRKVLReturnTries < 2 && !gRKVLJumped && mic == 0 && pip == 0 && t >= 2.0) {
+    //   2.4.1：阈值 2.0 → 1.5s（冷启到能建待机实测 0.8~1.5s，再等就是白等）。
+    if (gRKVLReturnTries < 2 && !gRKVLJumped && mic == 0 && pip == 0 && t >= 1.5) {
         RKVLJumpOnce("retry");
     }
 
@@ -859,7 +897,7 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.0 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.1 loaded path=%@ ====", RKVLLogPath());
         RKVLLogForce(@"[cfg] 兜底=%d log=%d（唯一路径：连续右跳）",
                      (int)RKVLVoiceWake, (int)RKVLLogEnabled);
         // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
