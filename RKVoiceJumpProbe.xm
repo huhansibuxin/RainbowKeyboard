@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.49）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.50）
 //
 // == 已经被日志坐实的部分 ==
 //   2.3.42/2.3.44：半注销后每次点语音 → mic 0 → [entry] → [JUMP] pipFallback=0
@@ -27,13 +27,13 @@
 //   isMainAppVoiceStandbyActive 不 hook：尾部 `mov x0,x20` 且另有 `mov w20,#1` 分支，
 //   返回类型不唯一（id / BOOL 混用），hook 有改坏调用约定的风险。
 //
-// == 2.3.49 做的事：修好「找 pid」+ 加 p_stat 诊断 ==
-//   2.3.46~2.3.48 三版日志全是 `[wake] pid=-1 kill(SIGCONT)=-999`，
-//   说明 proc_name()/proc_pidpath() 在 PluginKit 扩展沙盒里对别的进程返回 0，
-//   每个 pid 都被过滤掉了，SIGCONT 一次都没发出去过 —— 那个开关一直是空转。
-//   现在改成直接读 sysctl 返回的 kinfo_proc.kp_proc.p_comm（内核已填好，无跨进程权限需求）。
-//   同时打 p_stat：4=SSTOP 才能被 SIGCONT 救；3=SSLEEP 说明是 Mach task_suspend，
-//   SIGCONT 内核层就是空操作，得换方案（App 侧保活 / SpringBoard 注入）。
+// == 2.3.50 做的事：改走 FrontBoard「启动但不激活」把主 App 拉起来 ==
+//   2.3.49 拿到决定性证据：`sysctl(KERN_PROC_ALL)` 在键盘扩展沙盒里 rc=-1 errno=1(EPERM)
+//   —— 整个进程表都读不到，proc_name/proc_pidpath 同样 EPERM；`kill(-1,SIGCONT)` 能发出去
+//   但 500ms 内 mask 纹丝不动 ⇒ iOS 挂起是 Mach task_suspend，SIGCONT 对它是空操作。
+//   「枚举 + 信号」两条腿全断，于是改试：让 FrontBoard 把 App「启动但不激活」
+//   （SBSLaunchApplicationWithIdentifier(suspended) / LSApplicationWorkspace+ActivateSuspended），
+//   App 从挂起变 RUNNING 但不切前台，随后它会收到 PIPStart。
 //
 // 日志受「记录调试日志」（AIRecorderLog）与总开关（Enabled）双控，默认关。
 
@@ -130,98 +130,88 @@ static unsigned int RKVLProbeMask(void) {
 //   p_comm 上限 MAXCOMLEN+1 = 17 字节，主 App 是 "wxkb"、扩展自己是 "wxkb_plugin"，
 //   不会撞名；仍然排除 getpid() 双保险。
 
-// 返回值：>0 = 找到的主 App pid；-1 = sysctl 失败；-2 = malloc 失败；-3 = 二次 sysctl 失败；0 = 表里没找到
-static pid_t RKVLFindMainAppPID(int *outSysRc, int *outSysErr, int *outCount,
-                                char *outHint, size_t hintLen, pid_t *outSelfPid) {
-    if (outSysRc) *outSysRc = 0;
-    if (outSysErr) *outSysErr = 0;
-    if (outCount) *outCount = 0;
-    if (outHint && hintLen > 0) outHint[0] = '\0';
-    if (outSelfPid) *outSelfPid = getpid();
+// ⛔ 2.3.50 结论（别再走「枚举进程 + 信号唤醒」这条路）：
+//   2.3.49 实测 `sysctl(KERN_PROC_ALL)` 在键盘扩展沙盒里直接 `rc=-1 errno=1`(EPERM)
+//   —— 不是 p_comm 的写法问题，是整个进程表都读不到；proc_name/proc_pidpath 同样是 EPERM。
+//   `kill(-1, SIGCONT)` 能发出去（rc=0），但之后 500ms 内 mask 纹丝不动 ⇒ iOS 的「挂起」
+//   是 Mach task_suspend（suspend count 累加），SIGCONT 在内核层对它就是空操作。
+//   ⇒ 从 appex 里「枚举进程」和「信号唤醒主 App」两条腿全断。
+//
+// 2.3.50 改走 FrontBoard 的「启动但不激活」：让 App 从挂起变 RUNNING、但不切前台。
+//   ① SpringBoardServices: SBSLaunchApplicationWithIdentifier(bid, suspended=YES)
+//   ② SpringBoardServices: SBSLaunchApplicationWithIdentifierAndLaunchOptions(bid, opts, YES)
+//   ③ LSApplicationWorkspace: openApplicationWithBundleID:withOptions: @{@"ActivateSuspended": @YES}
+//   三条都试，谁 rc=0/ok=1 用谁；全失败就退回原来「直接跳」的行为，不会更糟。
+//   （静态查过 wxkb_plugin 只用过 LSApplicationWorkspace 的单参 openApplicationWithBundleID:
+//     —— 那是前台打开，也就是现成的「跳转」；WeType 自己从没试过后台启动。）
 
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0};
-    size_t size = 0;
-    int rc = sysctl(mib, 4, NULL, &size, NULL, 0);
-    int err = errno;
-    if (outSysRc) *outSysRc = rc;
-    if (outSysErr) *outSysErr = err;
-    if (rc != 0 || size == 0) return -1;
+static BOOL RKVLBackgroundLaunchApp(NSString **outMethod, int *outRC) {
+    if (outMethod) *outMethod = @"none";
+    if (outRC) *outRC = -1;
+    CFStringRef bid = CFSTR("com.tencent.wetype");
 
-    struct kinfo_proc *procs = (struct kinfo_proc *)malloc(size);
-    if (!procs) return -2;
-    if (sysctl(mib, 4, procs, &size, NULL, 0) != 0) { free(procs); return -3; }
+    void *sb = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+                      RTLD_LAZY);
+    if (sb) {
+        typedef int (*FnSuspended)(CFStringRef, Boolean);
+        FnSuspended f1 = (FnSuspended)dlsym(sb, "SBSLaunchApplicationWithIdentifier");
+        if (f1) {
+            int rc = f1(bid, true);
+            RKVLLog(@"[launch] ① SBSLaunchApplicationWithIdentifier(suspended=1) rc=%d", rc);
+            if (rc == 0) {
+                if (outMethod) *outMethod = @"SBSLaunch(suspended)";
+                if (outRC) *outRC = rc;
+                return YES;
+            }
+        } else {
+            RKVLLog(@"[launch] ① symbol SBSLaunchApplicationWithIdentifier missing");
+        }
 
-    int count = (int)(size / sizeof(struct kinfo_proc));
-    if (outCount) *outCount = count;
-
-    pid_t me = getpid();
-    pid_t found = 0;
-    char firstWxkb[32] = {0};
-    for (int i = 0; i < count; i++) {
-        pid_t p = procs[i].kp_proc.p_pid;
-        if (p <= 1 || p == me) continue;
-        char comm[sizeof(procs[i].kp_proc.p_comm) + 1];
-        memset(comm, 0, sizeof(comm));
-        strlcpy(comm, procs[i].kp_proc.p_comm, sizeof(comm));
-        if (strncmp(comm, "wxkb", 4) != 0) continue;
-        if (firstWxkb[0] == '\0') strlcpy(firstWxkb, comm, sizeof(firstWxkb));
-        if (strcmp(comm, "wxkb") == 0) { found = p; break; }
-    }
-    free(procs);
-    if (outHint && hintLen > 0) strlcpy(outHint, firstWxkb, hintLen);
-    return found;
-}
-
-// 读单个进程的 p_stat：1=SIDL 2=SRUN 3=SSLEEP 4=SSTOP 5=SZOMB。
-// ⭐ 这是判定 SIGCONT 有没有意义的关键诊断：
-//   · 主 App 是 SSTOP(4)（job-control 停住）→ SIGCONT 能救；
-//   · 是 SSLEEP(3)（iOS 正常挂起 = Mach task_suspend，suspend count 累加）
-//     → SIGCONT 在内核里对它是空操作，必须换手段。
-static int RKVLProcStat(pid_t pid) {
-    if (pid <= 0) return -1;
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
-    struct kinfo_proc kp;
-    size_t sz = sizeof(kp);
-    memset(&kp, 0, sizeof(kp));
-    if (sysctl(mib, 4, &kp, &sz, NULL, 0) != 0) return -2;
-    return (int)kp.kp_proc.p_stat;
-}
-
-// 唤醒主 App。mode: 0=没发、1=精准 pid、2=kill(-1) 兜底。
-// kill(-1, SIGCONT) 的语义：把信号发给**所有同 uid 且我们有权限的进程**；
-// POSIX 规定 SIGCONT 对本来就没停的进程无副作用（直接忽略），所以兜底不会打扰跑着的 App。
-static pid_t RKVLWakeMainApp(int *outRC, int *outErr, int *outMode, int *outFind,
-                             int *outCount, pid_t *outSelfPid, int *outStatB, int *outStatA) {
-    int sysRc = 0, sysErr = 0, count = 0;
-    char hint[32] = {0};
-    pid_t me = 0;
-    pid_t p = RKVLFindMainAppPID(&sysRc, &sysErr, &count, hint, sizeof(hint), &me);
-
-    int rc = -999, err = 0, mode = 0;
-    int stB = -1, stA = -1;
-    if (p > 0) {
-        stB = RKVLProcStat(p);
-        rc = kill(p, SIGCONT);
-        err = errno;
-        mode = 1;
-        stA = RKVLProcStat(p);
+        typedef int (*FnOpts)(CFStringRef, CFDictionaryRef, Boolean);
+        FnOpts f2 = (FnOpts)dlsym(sb, "SBSLaunchApplicationWithIdentifierAndLaunchOptions");
+        if (f2) {
+            NSDictionary *opts = @{@"SBSActivateSuspended": @YES};
+            int rc = f2(bid, (__bridge CFDictionaryRef)opts, true);
+            RKVLLog(@"[launch] ② SBSLaunchApplicationWithIdentifierAndLaunchOptions rc=%d", rc);
+            if (rc == 0) {
+                if (outMethod) *outMethod = @"SBSLaunch(opts,suspended)";
+                if (outRC) *outRC = rc;
+                return YES;
+            }
+        } else {
+            RKVLLog(@"[launch] ② symbol SBSLaunchApplicationWithIdentifierAndLaunchOptions missing");
+        }
     } else {
-        rc = kill(-1, SIGCONT);
-        err = errno;
-        mode = 2;
+        RKVLLog(@"[launch] dlopen SpringBoardServices failed");
     }
-    if (outRC) *outRC = rc;
-    if (outErr) *outErr = err;
-    if (outMode) *outMode = mode;
-    if (outFind) *outFind = (int)p;
-    if (outCount) *outCount = count;
-    if (outSelfPid) *outSelfPid = me;
-    if (outStatB) *outStatB = stB;
-    if (outStatA) *outStatA = stA;
 
-    RKVLLog(@"[wake] sysctl rc=%d errno=%d count=%d hint=%s self=%d -> find=%d p_stat=%d→%d",
-            sysRc, sysErr, count, hint[0] ? hint : "-", (int)me, (int)p, stB, stA);
-    return p;
+    Class wsCls = objc_getClass("LSApplicationWorkspace");
+    if (wsCls) {
+        id ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, sel_registerName("defaultWorkspace"));
+        SEL s = sel_registerName("openApplicationWithBundleID:withOptions:");
+        if (ws && [ws respondsToSelector:s]) {
+            NSDictionary *opts = @{@"ActivateSuspended": @YES};
+            BOOL ok = ((BOOL (*)(id, SEL, id, id))objc_msgSend)(ws, s, @"com.tencent.wetype", opts);
+            RKVLLog(@"[launch] ③ LSApplicationWorkspace openApplicationWithBundleID:withOptions: ok=%d", ok);
+            if (ok) {
+                if (outMethod) *outMethod = @"LSWorkspace(ActivateSuspended)";
+                if (outRC) *outRC = 0;
+                return YES;
+            }
+        } else {
+            RKVLLog(@"[launch] ③ LSApplicationWorkspace 没有 openApplicationWithBundleID:withOptions:");
+        }
+    } else {
+        RKVLLog(@"[launch] LSApplicationWorkspace class missing");
+    }
+    return NO;
+}
+
+// 保留 kill(-1, SIGCONT)：虽然对 Mach 挂起无效，但对 job-control 停住的进程有效，成本为零。
+static int RKVLSignalAllCont(void) {
+    int rc = kill(-1, SIGCONT);
+    RKVLLog(@"[wake] kill(-1,SIGCONT) rc=%d errno=%d", rc, errno);
+    return rc;
 }
 
 #pragma mark - 探针
@@ -302,29 +292,30 @@ static pid_t RKVLWakeMainApp(int *outRC, int *outErr, int *outMode, int *outFind
     RKVLLog(@"[entry] launchWBRecorder ctx=%p trial=%d wake=%d mask=0x%x",
             context, RKVLNoJumpTrial, RKVLVoiceWake, RKVLProbeMask());
     if (RKVLVoiceWake) {
-        int rc = 0, err = 0, mode = 0, find = 0, count = 0, stB = -1, stA = -1;
-        pid_t selfPid = 0;
         uint32_t before = RKVLProbeMask();
-        pid_t pid = RKVLWakeMainApp(&rc, &err, &mode, &find, &count, &selfPid, &stB, &stA);
-        RKVLLog(@"[wake] pid=%d mode=%d kill=%d errno=%d stat=%d→%d mask_before=0x%x mic=%d pip=%d appAlive=%d",
-                pid, mode, rc, err, stB, stA, before,
+        int sigRc = RKVLSignalAllCont();
+        NSString *method = nil;
+        int lrc = -1;
+        BOOL launched = RKVLBackgroundLaunchApp(&method, &lrc);
+        RKVLLog(@"[launch] result ok=%d method=%@ rc=%d sigRc=%d mask_before=0x%x mic=%d pip=%d appAlive=%d",
+                launched, method, lrc, sigRc, before,
                 RKVLProbeFlag(@selector(microphoneActive)),
                 RKVLProbeFlag(@selector(pictureInPictureActive)),
                 RKVLProbeFlag(@selector(appAlive)));
-        // 分两段睡，能在日志里看出「阻塞期间 mask 有没有被后台更新」——
-        // 如果两段都没变化、释放主线程后立刻变化，说明 mask 上报是走主队列的，
-        // 那这里再拉长等待也没用，得换非阻塞方案。
-        usleep(250 * 1000);
-        RKVLLog(@"[wake] +0.25s mask=0x%x mic=%d pip=%d",
+        // 分两段等（各 600ms）：冷启动主 App 到能响应 PIPStart 通常要 1 秒上下。
+        // 两段各打一次 mask，用来分辨「是不是阻塞主线程把 mask 上报也堵住了」：
+        // 若阻塞期间纹丝不动、%orig 之后立刻变，说明上报走主队列，要换成非阻塞设计。
+        usleep(600 * 1000);
+        RKVLLog(@"[wake] +0.6s mask=0x%x mic=%d pip=%d",
                 RKVLProbeMask(),
                 RKVLProbeFlag(@selector(microphoneActive)),
                 RKVLProbeFlag(@selector(pictureInPictureActive)));
-        usleep(250 * 1000);
-        RKVLLog(@"[wake] +0.5s mask=0x%x mic=%d pip=%d",
+        usleep(600 * 1000);
+        RKVLLog(@"[wake] +1.2s mask=0x%x mic=%d pip=%d",
                 RKVLProbeMask(),
                 RKVLProbeFlag(@selector(microphoneActive)),
                 RKVLProbeFlag(@selector(pictureInPictureActive)));
-        for (double d = 1.2; d <= 8.1; d += 2.2) {
+        for (double d = 2.0; d <= 8.1; d += 2.0) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(d * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
                 RKVLLog(@"[wake] +%.1fs mask=0x%x mic=%d pip=%d",
@@ -381,7 +372,17 @@ static pid_t RKVLWakeMainApp(int *outRC, int *outErr, int *outMode, int *outFind
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLog(@"==== RKVoiceJumpProbe 2.3.49 loaded path=%@ ====", RKVLLogPath());
+        RKVLLog(@"==== RKVoiceJumpProbe 2.3.50 loaded path=%@ ====", RKVLLogPath());
+        // 一次性探测：后台拉起要用的三个符号在不在（决定 ①② 有没有机会）。
+        {
+            void *sb = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
+            BOOL s1 = sb && dlsym(sb, "SBSLaunchApplicationWithIdentifier");
+            BOOL s2 = sb && dlsym(sb, "SBSLaunchApplicationWithIdentifierAndLaunchOptions");
+            Class wc = objc_getClass("LSApplicationWorkspace");
+            id w = wc ? ((id (*)(id, SEL))objc_msgSend)((id)wc, sel_registerName("defaultWorkspace")) : nil;
+            BOOL s3 = w && [w respondsToSelector:sel_registerName("openApplicationWithBundleID:withOptions:")];
+            RKVLLog(@"[cfg] launchable SBS=%d SBSOpts=%d LSWS=%d", s1, s2, s3);
+        }
         NSDictionary *p = RKReadEffectivePreferences();
         RKVLLog(@"[cfg] logEnabled=%d trial=%d wake=%d Enabled=%@ AIRecorderLog=%@ VoiceNoJumpTrial=%@ VoiceWakeApp=%@ rev=%@ bundle=%@",
                 RKVLLogEnabled, RKVLNoJumpTrial, RKVLVoiceWake, p[@"Enabled"], p[@"AIRecorderLog"],
