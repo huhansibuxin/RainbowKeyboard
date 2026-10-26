@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.53）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.54）
 //
 // == 已经被日志坐实的部分 ==
 //   2.3.42/2.3.44：半注销后每次点语音 → mic 0 → [entry] → [JUMP] pipFallback=0
@@ -221,9 +221,43 @@ static int RKVLSignalAllCont(void) {
 // respondsToSelector 先行 + nil 安全 + isKindOfClass 兜底，取不到就老实放弃）。
 
 static NSString *gRKVLHostBundle = nil;   // 跳转前的前台 App（= 要回来的目标）
+// 2.3.54：WeType 自己报出来的宿主 bundle id（靠 hook 它的 hostBundleID 属性拿到）
+static NSString *gRKVLHostFromWeType = nil;
+// 2.3.54：缓存 WBInputViewContext 实例，拉起时主动问一次 hostBundleID（不依赖 getter 被调用）
+static __unsafe_unretained id gRKVLInputCtx = nil;
+
+static void RKVLNoteHostBundle(id v, const char *via);   // 前置声明（定义在 %hook 区）
+
+// 从缓存的 WBInputViewContext 主动读宿主。全部走 respondsToSelector + isKindOfClass，
+// 读不到就 nil，绝不猜。
+static NSString *RKVLHostFromCachedCtx(void) {
+    id ctx = gRKVLInputCtx;
+    if (!ctx) return nil;
+    SEL s = sel_registerName("hostBundleID");
+    if (![ctx respondsToSelector:s]) return nil;
+    id v = ((id (*)(id, SEL))objc_msgSend)(ctx, s);
+    if ([v isKindOfClass:[NSString class]] && [(NSString *)v length] > 4) {
+        return [(NSString *)v copy];
+    }
+    return nil;
+}
 
 static NSString *RKVLFrontmostBundleID(NSString **outVia) {
     if (outVia) *outVia = @"none";
+
+    // ⭐ 2.3.54：WeType 自己知道宿主，优先用它 —— 系统侧（LS/SB）在 iOS16 问不出来。
+    // 顺序讲究：**先主动读 ctx（当下最新的宿主）**，再退回 hook 到的缓存值
+    // （缓存可能是上一次键盘会话的宿主，比如刚从设置切回来）。
+    NSString *fromCtx = RKVLHostFromCachedCtx();
+    if (fromCtx.length) {
+        RKVLNoteHostBundle(fromCtx, "ctx.active");
+        if (outVia) *outVia = @"WeType.ctx(主动)";
+        return fromCtx;
+    }
+    if (gRKVLHostFromWeType.length) {
+        if (outVia) *outVia = @"WeType.hostBundleID(缓存)";
+        return gRKVLHostFromWeType;
+    }
 
     Class wsCls = objc_getClass("LSApplicationWorkspace");
     if (!wsCls) {
@@ -512,13 +546,98 @@ static void RKVLStartReturnWatch(void) {
 }
 %end
 
+#pragma mark - 2.3.54 向 WeType 要宿主 bundle id
+
+// ⭐ 为什么改这条：2.3.53 实测 `[cfg] frontmost SBFrontmost=1(不用) LSfront=0`
+//   —— iOS 16 的 LSApplicationWorkspace **没有** -frontmostApplication，
+//   SBFrontmostApplicationDisplayIdentifier 又返回垃圾（会崩）。系统侧问不出来。
+//
+// ✅ 但 WeType 自己一定知道宿主：静态实证（wxkb_plugin 方法表）
+//   `WBInputViewController -inputViewContext` → `WBInputViewContext -hostBundleID`
+//   `WBRootViewManager    -hostBundleID` / `-refreshHostBundleID` / `-hostBundleIDDidChange`
+//   `WBVoicePendingClose  -hostBundleId` / `-setHostBundleId:`
+//   `WBVoiceReportContext -hostBundleId` / `-setHostBundleId:`
+//   `WBVoiceInputService  -currentVoiceHostPid`
+//   还有一条日志格式串：`<WBInputViewController: %p>, host = %@, %@`
+//   ⇒ 借 WeType 自己的答案，比猜私有系统 API 可靠得多（也不会有崩的风险）。
+//
+// 做法：getter 和 setter 都挂，谁先给我们算谁。全部只是「读一份返回值 / 抄一份入参」，
+// 不改任何行为。
+
+static void RKVLNoteHostBundle(id v, const char *via) {
+    if (!v || ![v isKindOfClass:[NSString class]]) return;
+    NSString *s = (NSString *)v;
+    if (s.length < 5 || ![s containsString:@"."]) return;          // 不像 bundle id
+    if ([s hasPrefix:@"com.tencent.wetype"]) return;               // 自己，没用
+    if (s.length > 128) return;
+    if (gRKVLHostFromWeType && [gRKVLHostFromWeType isEqualToString:s]) return;
+    gRKVLHostFromWeType = [s copy];
+    RKVLLogForce(@"[host] WeType 报宿主 = %@ (via %s)", s, via);
+}
+
+%group RKHostProbe
+%hook WBInputViewContext
+- (id)hostBundleID {
+    id v = %orig;
+    RKVLNoteHostBundle(v, "WBInputViewContext.get");
+    return v;
+}
+%end
+
+// 键盘主 VC 一定会在初始化时访问 inputViewContext —— 顺手把 context 实例缓存下来，
+// 这样即使 hostBundleID 的 getter 一直没人调，我们也能在拉起那一刻主动去读。
+%hook WBInputViewController
+- (id)inputViewContext {
+    id c = %orig;
+    if (c) {
+        if (c != gRKVLInputCtx) {
+            gRKVLInputCtx = c;
+            RKVLLogForce(@"[host] 缓存 inputViewContext=%p", c);
+        }
+        SEL s = sel_registerName("hostBundleID");
+        if ([c respondsToSelector:s]) {
+            id v = ((id (*)(id, SEL))objc_msgSend)(c, s);
+            RKVLNoteHostBundle(v, "WBInputViewController.ctx");
+        }
+    }
+    return c;
+}
+%end
+
+%hook WBRootViewManager
+- (id)hostBundleID {
+    id v = %orig;
+    RKVLNoteHostBundle(v, "WBRootViewManager.get");
+    return v;
+}
+%end
+%end
+
+// setter 这两个类单独一组：它们只是「锦上添花的捕获点」，
+// 缺了也不影响主路径，所以不能跟上面那组绑在一起（绑一起会让整组 init 崩）。
+%group RKHostProbe2
+%hook WBVoicePendingClose
+- (void)setHostBundleId:(id)v {
+    RKVLNoteHostBundle(v, "WBVoicePendingClose.set");
+    %orig;
+}
+%end
+
+%hook WBVoiceReportContext
+- (void)setHostBundleId:(id)v {
+    RKVLNoteHostBundle(v, "WBVoiceReportContext.set");
+    %orig;
+}
+%end
+%end
+
 %ctor {
     @autoreleasepool {
         RKVLLogRefresh();
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.53 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.54 loaded path=%@ ====", RKVLLogPath());
         // 一次性探测：后台拉起要用的三个符号在不在（决定 ①② 有没有机会）。
         {
             void *sb = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
@@ -545,5 +664,24 @@ static void RKVLStartReturnWatch(void) {
         BOOL hasFallback = svc &&
             class_getInstanceMethod(svc, @selector(_fallbackToURLSchemeForPIPStartCommandTimeoutWithSessionId:)) != NULL;
         RKVLLogForce(@"[cfg] PIPStartTimeoutFallback method=%d", hasFallback);
+
+        // 2.3.54：装「向 WeType 要宿主」的 hook。类缺一个就整组不装，避免 hook 到不存在的类。
+        BOOL h1 = objc_getClass("WBInputViewContext") != NULL;
+        BOOL h2 = objc_getClass("WBRootViewManager") != NULL;
+        BOOL h3 = objc_getClass("WBVoicePendingClose") != NULL;
+        BOOL h4 = objc_getClass("WBVoiceReportContext") != NULL;
+        BOOL h5 = objc_getClass("WBInputViewController") != NULL;
+        RKVLLogForce(@"[cfg] hostprobe classes ctx=%d rvm=%d pending=%d report=%d vc=%d",
+                     h1, h2, h3, h4, h5);
+        if (h1 && h2 && h5) {
+            %init(RKHostProbe);
+            RKVLLogForce(@"[cfg] hostprobe installed");
+        } else {
+            RKVLLogForce(@"[cfg] hostprobe 未装（关键类缺失）");
+        }
+        if (h3 && h4) {
+            %init(RKHostProbe2);
+            RKVLLogForce(@"[cfg] hostprobe2 installed");
+        }
     }
 }
