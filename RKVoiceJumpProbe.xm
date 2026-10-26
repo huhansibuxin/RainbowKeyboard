@@ -665,6 +665,11 @@ static void RKVLNoteHostBundle(id v, const char *via) {
             class_getInstanceMethod(svc, @selector(_fallbackToURLSchemeForPIPStartCommandTimeoutWithSessionId:)) != NULL;
         RKVLLogForce(@"[cfg] PIPStartTimeoutFallback method=%d", hasFallback);
 
+        // ⚠️ Logos 硬规则：文件里一旦出现 %group，原来那些「不在 group 里」的 hook
+        //   就归到 _ungrouped 组，**必须显式 %init(_ungrouped)**，否则编译直接报
+        //   `error: non-initialized hook group: _ungrouped`（2.3.54 首次构建就栽在这）。
+        %init(_ungrouped);
+
         // 2.3.54：装「向 WeType 要宿主」的 hook。类缺一个就整组不装，避免 hook 到不存在的类。
         BOOL h1 = objc_getClass("WBInputViewContext") != NULL;
         BOOL h2 = objc_getClass("WBRootViewManager") != NULL;
