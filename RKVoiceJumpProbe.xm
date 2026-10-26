@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.52）
+// RKVoiceJumpProbe.xm — 语音按钮「跳主 App」诊断 + 免跳实验（2.3.53）
 //
 // == 已经被日志坐实的部分 ==
 //   2.3.42/2.3.44：半注销后每次点语音 → mic 0 → [entry] → [JUMP] pipFallback=0
@@ -80,6 +80,23 @@ static void RKVLLog(NSString *fmt, ...) {
     NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
     va_end(ap);
     NSString *line = [NSString stringWithFormat:@"%.3f [%d] %@",
+                      [NSDate date].timeIntervalSince1970, getpid(), body];
+    FILE *fp = fopen(RKVLLogPath().UTF8String, "a");
+    if (!fp) return;
+    fprintf(fp, "%s\n", line.UTF8String);
+    fclose(fp);
+}
+
+// 2.3.53：诊断期的「必写」日志，绕过调试开关。
+// 起因：2.3.52 崩溃那轮日志一行没写（开关当时是关的），
+// 结果连「宿主能不能认出来」都不知道，白崩一次。
+// 每次进程启动只写几行（loaded / cfg / host），不吵；高频路径一律仍走 RKVLLog。
+static void RKVLLogForce(NSString *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSString *line = [NSString stringWithFormat:@"%.3f [%d] (强制) %@",
                       [NSDate date].timeIntervalSince1970, getpid(), body];
     FILE *fp = fopen(RKVLLogPath().UTF8String, "a");
     if (!fp) return;
@@ -192,56 +209,54 @@ static int RKVLSignalAllCont(void) {
 //
 // 宿主是谁？WeType 自己完全不记（wxkb_plugin 里零 host bundle 符号），
 // 只能在**跳转之前**问系统：此刻前台那个 App 就是宿主。
-// 两个候选，谁有值用谁：
-//   ① SpringBoardServices: SBFrontmostApplicationDisplayIdentifier()（dlopen，非特权可读）
-//   ② LSApplicationWorkspace -frontmostApplication 的 bundleIdentifier
+//
+// ⛔ 2.3.52 踩过的坑（IPS 已证实，别再试）：`SBFrontmostApplicationDisplayIdentifier`
+//   虽然 dlsym 能取到非空地址，但**调用返回值是垃圾**（0x10000003），
+//   我们把它当 CFString 发 copy ⇒ EXC_BAD_ACCESS at 0x10000003，键盘扩展每点一次语音崩一次。
+//   x0=0x10000003 / x1="copy" / pc=objc_msgSend，调用点 = RainbowKeyboard.dylib +132116。
+//   ⇒ 结论：**签名没验证过的私有 C 函数绝对不能直接调**。C 函数没有 respondsToSelector 保护，
+//     参数/返回类型猜错就是静默返回垃圾，比 ObjC 危险得多。
+//
+// 现在只走一条：LSApplicationWorkspace -frontmostApplication（真 ObjC 方法，
+// respondsToSelector 先行 + nil 安全 + isKindOfClass 兜底，取不到就老实放弃）。
 
 static NSString *gRKVLHostBundle = nil;   // 跳转前的前台 App（= 要回来的目标）
 
 static NSString *RKVLFrontmostBundleID(NSString **outVia) {
     if (outVia) *outVia = @"none";
 
-    void *sb = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
-                      RTLD_LAZY);
-    if (sb) {
-        typedef CFStringRef (*FnFrontmost)(void);
-        FnFrontmost f = (FnFrontmost)dlsym(sb, "SBFrontmostApplicationDisplayIdentifier");
-        if (f) {
-            CFStringRef s = f();
-            if (s) {
-                // ⚠️ 函数名不带 Copy/Create ⇒ 返回的是**不拥有**的引用，绝不能 CFRelease
-                //   （release 会过度释放并崩）。copy 一份自己持有，安全。
-                NSString *r = [(__bridge NSString *)s copy];
-                if (r.length) { if (outVia) *outVia = @"SBFrontmost"; return r; }
-            }
-            if (outVia) *outVia = @"SBFrontmost(nil)";
-        } else {
-            if (outVia) *outVia = @"SBFrontmost(missing)";
-        }
-    } else {
-        if (outVia) *outVia = @"sb(dlopen fail)";
-    }
-
     Class wsCls = objc_getClass("LSApplicationWorkspace");
-    if (wsCls) {
-        id ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, sel_registerName("defaultWorkspace"));
-        SEL s = sel_registerName("frontmostApplication");
-        if (ws && [ws respondsToSelector:s]) {
-            id app = ((id (*)(id, SEL))objc_msgSend)(ws, s);
-            SEL bs = sel_registerName("bundleIdentifier");
-            if (app && [app respondsToSelector:bs]) {
-                id bid = ((id (*)(id, SEL))objc_msgSend)(app, bs);
-                if ([bid isKindOfClass:[NSString class]] && [(NSString *)bid length]) {
-                    if (outVia) *outVia = @"LSWorkspace.frontmost";
-                    return bid;
-                }
-            }
-            if (outVia) *outVia = @"LSWorkspace.frontmost(nil)";
-        } else {
-            if (outVia) *outVia = @"LSWorkspace(no sel)";
-        }
+    if (!wsCls) {
+        if (outVia) *outVia = @"no LSApplicationWorkspace class";
+        return nil;
     }
-    return nil;
+    id ws = ((id (*)(id, SEL))objc_msgSend)((id)wsCls, sel_registerName("defaultWorkspace"));
+    if (!ws) {
+        if (outVia) *outVia = @"no defaultWorkspace";
+        return nil;
+    }
+    SEL s = sel_registerName("frontmostApplication");
+    if (![ws respondsToSelector:s]) {
+        if (outVia) *outVia = @"LSWorkspace(no frontmostApplication)";
+        return nil;
+    }
+    id app = ((id (*)(id, SEL))objc_msgSend)(ws, s);
+    if (!app) {
+        if (outVia) *outVia = @"LSWorkspace.frontmost(nil)";
+        return nil;
+    }
+    SEL bs = sel_registerName("bundleIdentifier");
+    if (![app respondsToSelector:bs]) {
+        if (outVia) *outVia = @"frontmost(no bundleIdentifier)";
+        return nil;
+    }
+    id bid = ((id (*)(id, SEL))objc_msgSend)(app, bs);
+    if (![bid isKindOfClass:[NSString class]] || [(NSString *)bid length] == 0) {
+        if (outVia) *outVia = @"frontmost(bad bid)";
+        return nil;
+    }
+    if (outVia) *outVia = @"LSWorkspace.frontmost";
+    return [(NSString *)bid copy];
 }
 
 // 用 LSApplicationWorkspace 单参接口把指定 App 提到前台（有头）。
@@ -424,7 +439,7 @@ static void RKVLStartReturnWatch(void) {
             //   拉起之后前台就变成 wxkb 了，再问只会拿到自己。
             NSString *via = nil;
             gRKVLHostBundle = RKVLFrontmostBundleID(&via);
-            RKVLLog(@"[back] host=%@ via=%@", gRKVLHostBundle ?: @"(nil)", via);
+            RKVLLogForce(@"[back] host=%@ via=%@", gRKVLHostBundle ?: @"(nil)", via);
             launched = RKVLForegroundLaunchApp(&lok);
         } else {
             RKVLLog(@"[launch] skip（已有 pip/mic 无需拉起）mic=%d pip=%d", micB, pipB);
@@ -503,7 +518,7 @@ static void RKVLStartReturnWatch(void) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLog(@"==== RKVoiceJumpProbe 2.3.52 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.3.53 loaded path=%@ ====", RKVLLogPath());
         // 一次性探测：后台拉起要用的三个符号在不在（决定 ①② 有没有机会）。
         {
             void *sb = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
@@ -512,14 +527,16 @@ static void RKVLStartReturnWatch(void) {
             Class wc = objc_getClass("LSApplicationWorkspace");
             id w = wc ? ((id (*)(id, SEL))objc_msgSend)((id)wc, sel_registerName("defaultWorkspace")) : nil;
             BOOL s3 = w && [w respondsToSelector:sel_registerName("openApplicationWithBundleID:")];
-            RKVLLog(@"[cfg] launchable SBS=%d SBSOpts=%d LSWS_single=%d", s1, s2, s3);
-            // 2.3.52：回跳要用「谁是前台 App」，两个候选的可用性一次问清
+            RKVLLogForce(@"[cfg] launchable SBS=%d SBSOpts=%d LSWS_single=%d", s1, s2, s3);
+            // 2.3.52：回跳要用「谁是前台 App」。只查 ObjC 那条；
+            // SBFrontmostApplicationDisplayIdentifier 虽然符号在，但调用返回值是垃圾
+            // （2.3.52 崩溃根因），只记存在性、绝不调用。
             BOOL s4 = sb && dlsym(sb, "SBFrontmostApplicationDisplayIdentifier");
             BOOL s5 = w && [w respondsToSelector:sel_registerName("frontmostApplication")];
-            RKVLLog(@"[cfg] frontmost SBFrontmost=%d LSfront=%d", s4, s5);
+            RKVLLogForce(@"[cfg] frontmost SBsym=%d(不用) LSfront=%d", s4, s5);
         }
         NSDictionary *p = RKReadEffectivePreferences();
-        RKVLLog(@"[cfg] logEnabled=%d trial=%d wake=%d Enabled=%@ AIRecorderLog=%@ VoiceNoJumpTrial=%@ VoiceWakeApp=%@ rev=%@ bundle=%@",
+        RKVLLogForce(@"[cfg] logEnabled=%d trial=%d wake=%d Enabled=%@ AIRecorderLog=%@ VoiceNoJumpTrial=%@ VoiceWakeApp=%@ rev=%@ bundle=%@",
                 RKVLLogEnabled, RKVLNoJumpTrial, RKVLVoiceWake, p[@"Enabled"], p[@"AIRecorderLog"],
                 p[@"VoiceNoJumpTrial"], p[@"VoiceWakeApp"], p[@"RKSettingsRevision"],
                 [[NSBundle mainBundle] bundleIdentifier]);
@@ -527,6 +544,6 @@ static void RKVLStartReturnWatch(void) {
         Class svc = objc_getClass("WBVoiceInputService");
         BOOL hasFallback = svc &&
             class_getInstanceMethod(svc, @selector(_fallbackToURLSchemeForPIPStartCommandTimeoutWithSessionId:)) != NULL;
-        RKVLLog(@"[cfg] PIPStartTimeoutFallback method=%d", hasFallback);
+        RKVLLogForce(@"[cfg] PIPStartTimeoutFallback method=%d", hasFallback);
     }
 }
