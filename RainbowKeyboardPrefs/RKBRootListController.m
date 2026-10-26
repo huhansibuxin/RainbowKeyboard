@@ -5,6 +5,20 @@
 
 static NSString * const kRKChangedNotification = @"com.minis.rainbowkeyboard.changed";
 
+// 2.4.5：兜底发布通道。
+// 根因（实测坐实）：iOS Preferences 框架里 PSSwitchCell 的开关切换默认只走 CFPreferences
+// 写盘（storeValue），**不回调** PSListController 的 setPreferenceValue:specifier:。
+// 于是 2.4.4 仅靠「代码 specifier 绑定 setter」没能可靠触发快照发布 —— 拨开关只更新了主
+// plist 字段，却不经过 RKSavePreferences，键盘读到的 notify 快照始终停在旧值（关门也关不掉）。
+// viewWillDisappear 兜底又要求「退出设置页」才发布，用户关门后直接去测就漏了。
+// 这里改为监听底层 CFPreferences 变化通知（com.apple.preferences-changed，由 cfprefsd 在
+// 域写盘后发出，与 cell 类型、是否退出页面都无关）：任何开关改动落盘后立即把全量重发到快照。
+// ⚠️ 防重入：RKSaveAndNotify 自己也会写 CFPreferences、再次触发本通知，必须用 RKReposting
+//   挡住，否则死循环；且 viewWillDisappear 里先移除监听再全量发布，避免退出时又触发。
+@class RKBRootListController;
+static BOOL RKReposting = NO;
+static void RKCFPrefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo);
+
 static NSDictionary *RKReadPreferences(void) {
     // 与键盘渲染层同一套旧档归一化（RKPreferences.h）：旧档的「风格 = 轻弹(2)」在这里
     // 就已折成「扩散(1) + 轻弹开」，历史亮度默认值折成 0.6，设置页因此不会显示过期值。
@@ -32,6 +46,11 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 
 @interface RKBCandidateListController : RKBRootListController
 @end
+
+static void RKCFPrefsChangedCallback(CFNotificationCenterRef center, void *observer, CFStringRef name, const void *object, CFDictionaryRef userInfo) {
+    RKBRootListController *self = (__bridge RKBRootListController *)observer;
+    [self rkHandleCFPrefsChanged];
+}
 
 @implementation RKBRootListController
 
@@ -123,6 +142,35 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"彩虹键盘光效";
+    // 2.4.5：进入设置页即注册底层 CFPreferences 变化监听，覆盖本页及子页所有 plist 开关。
+    [self rkInstallCFPrefsObserver];
+}
+
+// 2.4.5：任何开关改动落盘（PSSwitchCell 默认 storeValue / 我们自己的 setter 都算）后，
+// cfprefsd 会发 com.apple.preferences-changed，这里把全量重发到 notify 快照。
+// 防重入：RKSaveAndNotify 自己也会写 CFPreferences、再触发本通知，RKReposting 挡掉这一圈。
+- (void)rkHandleCFPrefsChanged {
+    if (RKReposting) return;
+    RKReposting = YES;
+    NSDictionary *values = RKReadPreferences();
+    if (values.count) RKSaveAndNotify([values mutableCopy]);
+    RKReposting = NO;
+}
+
+- (void)rkInstallCFPrefsObserver {
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge const void *)(self),
+        RKCFPrefsChangedCallback,
+        CFSTR("com.apple.preferences-changed"),
+        NULL,
+        CFNotificationSuspensionBehaviorDeliverImmediately);
+}
+
+- (void)rkRemoveCFPrefsObserver {
+    CFNotificationCenterRemoveObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+        (__bridge const void *)(self),
+        CFSTR("com.apple.preferences-changed"),
+        NULL);
 }
 
 // ⭐ 2.4.4 兜底发布：键盘扩展读不到 plist / cfprefsd 域，设置值只能靠 notify 快照送达。
@@ -130,7 +178,9 @@ static void RKSaveAndNotify(NSMutableDictionary *values) {
 // 快照就不会更新 ⇒ 键盘一直按旧值跑（「日志关了还在写」就是这个）。
 // 离开页面时把「磁盘上的全量」重新发布一次，把这类漏发全部补上。
 // 代价：一次页面退出 = 一次 plist 写盘 + 一次快照发布，人工操作频率下可忽略。
+// 2.4.5：先移除监听再发布，避免退出时的写盘又触发 com.apple.preferences-changed 回调。
 - (void)viewWillDisappear:(BOOL)animated {
+    [self rkRemoveCFPrefsObserver];
     [super viewWillDisappear:animated];
     NSDictionary *values = RKReadPreferences();
     if (values.count) RKSaveAndNotify([values mutableCopy]);

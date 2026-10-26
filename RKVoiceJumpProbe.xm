@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.4）
+// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.5）
 //
 // == 2.4.3：再提速一档 + 日志门控改成固定优先级 ==
 //   · 日志门控：2.4.2 实测「03:18:53 关掉、03:18:54 起照样写」。根因是取值规则
@@ -26,6 +26,20 @@
 //     · 键盘侧仍只「点语音时懒刷新读一次本地快照」（1s 节流、零 IPC），不向设置页发重发请求。
 //   另：门控追踪改「每次刷新都记一行 refresh」，一次点语音最多一行，
 //   开关翻转时一眼看出是哪一路（snap/file/cfp）赢的。
+//
+// == 2.4.5：关门仍关不掉 —— 根因是 PSSwitchCell 不回调 setter（2.4.4 拦截失败）==
+//   2.4.4 实测（设备日志）：4:24 关门后 rk_voice.log 一直写到 4:27，rk_gate.log 全程
+//   snap=1、4:24 之后无新 revision。铁证：主 plist 已 AIRecorderLog=False 且 revision=B，
+//   但键盘读到的快照（revision=B）里 AIRecorderLog 仍是 1。说明「关门」那一下只走了
+//   Preferences 默认 storeValue（更新了主 plist 字段），**没经过 RKSavePreferences 发布快照**；
+//   而 2.4.4 的 viewWillDisappear 兜底要退出设置页才触发，用户关门后直接测就漏了。
+//   机制坑：iOS 的 PSSwitchCell 切换默认只走 storeValue 写 CFPreferences，**不回调**
+//   PSListController 的 setPreferenceValue:specifier:，所以 2.4.4 想靠「代码 specifier 绑定
+//   setter」拦它没拦住。
+//   修法（与 cell 类型、是否退出页面都无关，最稳）：RKBRootListController 进入设置页即监听
+//   底层 com.apple.preferences-changed（cfprefsd 在域写盘后发的 Darwin notify），任何开关
+//   改动落盘后立即把全量重发到 notify 快照；RKReposting 防重入挡掉「发布又写盘再生通知」的环。
+//   键盘侧无需任何改动 —— 这才是真正的「点开关即时生效」。
 //
 // == 2.4.2：日志门控再加一道「写之前先看一眼」==
 //   2.4.1 实机：日志打开能写（说明快照来源通了），但**关掉之后还在写**。
@@ -1052,7 +1066,7 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.4 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.5 loaded path=%@ ====", RKVLLogPath());
         RKVLLogForce(@"[cfg] 兜底=%d log=%d（唯一路径：连续右跳）",
                      (int)RKVLVoiceWake, (int)RKVLLogEnabled);
         // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
