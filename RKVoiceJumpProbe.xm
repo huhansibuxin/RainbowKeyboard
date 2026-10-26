@@ -99,13 +99,6 @@ static int RKVLProbeFlag(SEL sel) {
     return ((BOOL (*)(id, SEL))objc_msgSend)(probe, sel) ? 1 : 0;
 }
 
-static unsigned int RKVLProbeMask(void) {
-    id probe = gRKVLProbe;
-    if (!probe) return 0;
-    if (![probe respondsToSelector:@selector(currentMask)]) return 0;
-    return ((uint32_t (*)(id, SEL))objc_msgSend)(probe, @selector(currentMask));
-}
-
 #pragma mark - 有头拉起主 App（= 一次右跳）
 
 // ⛔ 无头拉起全灭（别再试）：SBSLaunchApplicationWithIdentifier 缺 entitlement，重签会破坏签名。
