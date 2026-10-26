@@ -1,9 +1,13 @@
 #import <UIKit/UIKit.h>
 #import <Preferences/PSListController.h>
 #import <Preferences/PSSpecifier.h>
+#import <objc/runtime.h>
 #import "../RKPreferences.h"
 
 static NSString * const kRKChangedNotification = @"com.minis.rainbowkeyboard.changed";
+
+// 2.4.6：把「必须即时生效」的开关的 UISwitch 直接挂我们的 action，拨动瞬间发布快照。
+static void *kRKSwitchSpecKey = &kRKSwitchSpecKey;
 
 // 2.4.5：兜底发布通道。
 // 根因（实测坐实）：iOS Preferences 框架里 PSSwitchCell 的开关切换默认只走 CFPreferences
@@ -293,7 +297,41 @@ static void RKCFPrefsChangedCallback(CFNotificationCenterRef center, void *obser
         NSInteger value = [RKReadPreferences()[key] integerValue];
         cell.detailTextLabel.text = (value >= 0 && value < (NSInteger)titles.count) ? titles[value] : @"彩虹";
     }
+
+    // ⭐ 2.4.6：PSSwitchCell 拨动后默认**不回调** setPreferenceValue:（只延迟 storeValue 写盘、
+    // 且不立即发 cfprefsd 通知），导致 2.4.5 的 cfprefsd 监听在「前台拨开关、不退出页面」时
+    // 收不到 ⇒ 关门不发快照、键盘读到的 snapshot 仍是旧值（门关不掉）。
+    // 这里直接把 UISwitch 的 valueChanged 挂到我们的 action，拨动**瞬间**用 sw.isOn 当前值
+    // 即时发布快照，不经过框架写盘时机、也不依赖退出页面。
+    // 这几个键是键盘侧消费且必须立刻生效的开关（日志门控 / 免跳总闸 / 轻弹跟随）。
+    if ([key isEqualToString:@"AIRecorderLog"] ||
+        [key isEqualToString:@"VoiceWakeApp"] ||
+        [key isEqualToString:@"LightPopFollowAppearance"]) {
+        UISwitch *sw = [cell valueForKey:@"control"];
+        if ([sw isKindOfClass:[UISwitch class]]) {
+            objc_setAssociatedObject(sw, kRKSwitchSpecKey, specifier, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            [sw removeTarget:self action:@selector(rkImmediateSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+            [sw addTarget:self action:@selector(rkImmediateSwitchChanged:) forControlEvents:UIControlEventValueChanged];
+        }
+    }
     return cell;
+}
+
+// 2.4.6：UISwitch 拨动的即时发布通道（见上方注释）。读 sw.isOn 当前值，不依赖
+// storeValue / 磁盘落盘时机，确保「拨开关即时生效」。RKSaveAndNotify 内部写 CFPreferences
+// 会触发 cfprefsd 通知，由 rkHandleCFPrefsChanged 的 RKReposting 挡掉重入，不会死循环。
+- (void)rkImmediateSwitchChanged:(UISwitch *)sw {
+    PSSpecifier *spec = objc_getAssociatedObject(sw, kRKSwitchSpecKey);
+    if (!spec) return;
+    NSString *key = [spec propertyForKey:@"key"];
+    if (!key) return;
+    NSMutableDictionary *values = [RKReadPreferences() mutableCopy] ?: [NSMutableDictionary dictionary];
+    values[key] = @(sw.isOn);
+    // 开启「跟随系统深浅色」且轻弹还是关的，一并打开轻弹（与 setPreferenceValue: 分支一致）。
+    if ([key isEqualToString:@"LightPopFollowAppearance"] && sw.isOn && ![values[@"LightPop"] boolValue]) {
+        values[@"LightPop"] = @YES;
+    }
+    RKSaveAndNotify(values);
 }
 
 

@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.5）
+// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.4.6）
 //
 // == 2.4.3：再提速一档 + 日志门控改成固定优先级 ==
 //   · 日志门控：2.4.2 实测「03:18:53 关掉、03:18:54 起照样写」。根因是取值规则
@@ -40,6 +40,17 @@
 //   底层 com.apple.preferences-changed（cfprefsd 在域写盘后发的 Darwin notify），任何开关
 //   改动落盘后立即把全量重发到 notify 快照；RKReposting 防重入挡掉「发布又写盘再生通知」的环。
 //   键盘侧无需任何改动 —— 这才是真正的「点开关即时生效」。
+//
+// == 2.4.6：2.4.5 的 cfprefsd 监听在「前台拨开关、不退出页面」时仍收不到 ==
+//   设备实测（已装 2.4.5，4:44 关门）：主 plist AIRecorderLog=False（写盘成功），但
+//   RKSettingsRevision 仍停在 04:43:57（关门之前的值，没推进）⇒ 关门没发快照；
+//   键盘 snapshot 至今 snap=1（门开），rk_voice.log 停在 4:44:37 是因为用户之后没再点语音，
+//   不是门控生效。真因：PSSwitchCell 拨动后 storeValue **延迟**写盘、且不立即发
+//   com.apple.preferences-changed，cfprefsd 监听收不到；viewWillDisappear 又要退出页面。
+//   修法（最确定，不依赖任何框架写盘时机）：RKBRootListController 直接在「必须即时生效」的
+//   开关（AIRecorderLog / VoiceWakeApp / LightPopFollowAppearance）的 UISwitch 上挂我们的
+//   valueChanged —— 拨动瞬间读 sw.isOn 当前值即时 RKSaveAndNotify 发布快照。cfprefsd 监听 +
+//   viewWillDisappear 兜底作为多重保险保留。
 //
 // == 2.4.2：日志门控再加一道「写之前先看一眼」==
 //   2.4.1 实机：日志打开能写（说明快照来源通了），但**关掉之后还在写**。
@@ -1066,7 +1077,7 @@ static void RKVLNoteHostBundle(id v, const char *via) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
             RKVLPreferencesChanged, CFSTR("com.minis.rainbowkeyboard.changed"), NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
-        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.5 loaded path=%@ ====", RKVLLogPath());
+        RKVLLogForce(@"==== RKVoiceJumpProbe 2.4.6 loaded path=%@ ====", RKVLLogPath());
         RKVLLogForce(@"[cfg] 兜底=%d log=%d（唯一路径：连续右跳）",
                      (int)RKVLVoiceWake, (int)RKVLLogEnabled);
         // 2.3.55：落盘的宿主（半注销后第一次点语音能靠它回跳）
