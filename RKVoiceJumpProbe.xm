@@ -81,9 +81,11 @@ static void RKVLPreferencesChanged(CFNotificationCenterRef center, void *observe
 
 #pragma mark - 状态读取（WeType 自己的 WBVoiceStateProbe）
 
-// 从 WBVoiceStateProbe 的实例里取状态。用 unsafe_unretained 缓存实例（长生命单例），
-// 不额外 retain，避免在插件里制造循环。
-static __unsafe_unretained id gRKVLProbe = nil;
+// 从 WBVoiceStateProbe 的实例里取状态。用 __weak 缓存实例：不额外 retain（避免循环），
+// 且实例被微信释放时自动置 nil，杜绝 use-after-free 野指针。
+// ⚠️ 原来用 __unsafe_unretained：ARC 把弱指针赋给 strong 局部时会 objc_retain 已释放对象
+//    ⇒ 偶发 EXC_BAD_ACCESS（见 wxkb_plugin 崩溃 IPS，崩溃帧 objc_msgSend + retain）。
+static __weak id gRKVLProbe = nil;
 
 static int RKVLProbeFlag(SEL sel) {
     id probe = gRKVLProbe;
@@ -148,7 +150,9 @@ static BOOL RKVLActivateBundle(NSString *bid, int *outOK) {
 
 static NSString *gRKVLHostBundle = nil;   // 本轮的宿主（回跳目标）
 static NSString *gRKVLHostFromWeType = nil;
-static __unsafe_unretained id gRKVLInputCtx = nil;
+// 缓存 WBInputViewContext 实例：用 __weak，实例被微信释放时自动置 nil，
+// 避免 unsafe_unretained 的 use-after-free（RKVLHostFromCachedCtx 读它时 ARC 会 retain 野指针 ⇒ 崩溃）。
+static __weak id gRKVLInputCtx = nil;
 
 // 宿主 bundle id 落盘：半注销后第一次点语音不回来 —— 那一刻扩展进程是新的（或刚被系统回收过），
 // ctx / 内存缓存都还空，宿主取不到 ⇒ 回跳被跳过。落盘在扩展自己的沙盒 Library/Preferences 下。
