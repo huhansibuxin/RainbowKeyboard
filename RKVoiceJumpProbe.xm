@@ -1,4 +1,4 @@
-// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.5.0 纯净版）
+// RKVoiceJumpProbe.xm — 语音按钮「连续右跳」免跳兜底（2.5.3 纯净版）
 //
 // == 2.5.0：移除全部调试日志代码 ==
 //   删除 RKVLLog* / RKVLGateTrace / RKVLDbg* / RKVLPostReturnProbe 所有写盘、门控、落盘与纯诊断代码。
@@ -6,6 +6,13 @@
 //   （设置页 specifier + words[5] 位6/7 都留着），方便以后要调试时从 tag v2.4.6-with-logs
 //   把日志代码加回来，无需改动设置页与传输层。
 //   本文件只剩下「功能」：连续右跳兜底、回跳移出主线程、宿主识别与落盘、坏待机判据。
+//
+// == 2.5.3：代码审查清理 + 线程安全加固 ==
+//   · 删除死代码：从未被读取的 gRKVLReturnTicks（声明/累加/重置）、RKVLBeginRound 里紧接
+//     =YES 前的冗余 =NO、RKVLReturnToHost / RKVLJumpOnce 在移除日志后已无用的 why 哑参。
+//   · 宿主落盘文件（host.plist）串行化：新增 RKVLHostIOQueue 专用串行队列，RKVLHostSave
+//     （后台 RKVLActQueue 成功分支 + 主线程）与 RKVLHostLoad（主线程）统一走它，消除
+//     跨线程半截读写导致 dictionaryWithContentsOfFile 偶发返回 nil、回跳目标瞬间失准。
 //
 // == 这一版的「精准命中 + 不耗 CPU」怎么做的 ==
 //   1) 免跳路径零开销：入口只要 `pip==1 || mic==1` 就立刻 return，不拉起、不起定时器、
@@ -171,6 +178,18 @@ static NSString *RKVLHostStorePath(void) {
     return p;
 }
 
+// 宿主落盘 IO 串行队列：store / load 都走它，避免后台队列（RKVLActQueue 成功分支）与主线程
+// 并发读写同一个 host.plist —— 半截文件会令 dictionaryWithContentsOfFile 偶发返回 nil，
+// 最坏让回跳目标瞬间失准。串行化后写入完成才可能被读到。
+static dispatch_queue_t RKVLHostIOQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.minis.rainbowkeyboard.hostio", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
 static BOOL RKVLHostLooksValid(NSString *bid) {
     if (![bid isKindOfClass:[NSString class]] || bid.length < 5) return NO;
     if ([bid containsString:@"wetype"]) return NO;                   // 自己（wxkb / wxkb_plugin）
@@ -180,17 +199,20 @@ static BOOL RKVLHostLooksValid(NSString *bid) {
 }
 
 static NSString *RKVLHostLoad(void) {
-    NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:RKVLHostStorePath()];
-    NSString *h = d[@"host"];
+    __block NSString *h = nil;
+    dispatch_sync(RKVLHostIOQueue(), ^{
+        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:RKVLHostStorePath()];
+        h = [d[@"host"] copy];
+    });
     return RKVLHostLooksValid(h) ? h : nil;
 }
 
 static void RKVLHostSave(NSString *bid) {
     if (!RKVLHostLooksValid(bid)) return;
-    @try {
-        [@{@"host": bid, @"ts": @([NSDate date].timeIntervalSince1970)}
-            writeToFile:RKVLHostStorePath() atomically:YES];
-    } @catch (__unused NSException *e) {}
+    NSDictionary *dict = @{@"host": bid, @"ts": @([NSDate date].timeIntervalSince1970)};
+    dispatch_async(RKVLHostIOQueue(), ^{
+        [dict writeToFile:RKVLHostStorePath() atomically:YES];
+    });
 }
 
 // 从缓存的 WBInputViewContext 主动读宿主。全部走 respondsToSelector + isKindOfClass，读不到就 nil。
@@ -266,7 +288,6 @@ static NSString *RKVLFrontmostBundleID(NSString **outVia) {
 //   原生：点语音 → pip 超时 3s → 跳主 App → 停在那里不回来（用户被带走）
 //   我们：点语音 → 立刻跳主 App → 等它进待机/开录音 → 自动送回宿主 → 下一轮 pip 立着 ⇒ 免跳
 static BOOL   gRKVLReturnPending = NO;   // 本轮状态机是否在跑（唯一的停机开关）
-static int    gRKVLReturnTicks   = 0;    // 已推进的拍数
 static int    gRKVLReturnTries   = 0;    // 已经拉起过几次（含首拉，上限 2）
 static BOOL   gRKVLReturnSawMic  = NO;
 static double gRKVLFirstMicT     = 0;    // 首次见到 mic=1 的那一刻（相对本轮起点）
@@ -303,7 +324,7 @@ static dispatch_queue_t RKVLActQueue(void) {
     return q;
 }
 
-static void RKVLReturnToHost(NSString *why) {
+static void RKVLReturnToHost(void) {
     if (gRKVLReturned) return;
     gRKVLReturned = YES;
     gRKVLReturnPending = NO;
@@ -328,7 +349,7 @@ static void RKVLReturnToHost(NSString *why) {
 }
 
 // 拉起一次（连续右跳的每一跳）。调用方负责计数与判据。
-static BOOL RKVLJumpOnce(const char *why) {
+static BOOL RKVLJumpOnce(void) {
     int ok = 0;
     BOOL r = RKVLForegroundLaunchApp(&ok);
     gRKVLReturnTries++;
@@ -359,7 +380,7 @@ static BOOL RKVLReturnStep(void) {
             return YES;
         }
         if (t - gRKVLFirstPipT >= 0.15) {
-            RKVLReturnToHost(@"pip_ready");
+            RKVLReturnToHost();
             return NO;
         }
         return YES;
@@ -373,7 +394,7 @@ static BOOL RKVLReturnStep(void) {
             gRKVLReturnSawMic = YES;
             gRKVLFirstMicT = t;
         } else if (t - gRKVLFirstMicT >= 0.45) {
-            RKVLReturnToHost(@"mic_started");
+            RKVLReturnToHost();
             return NO;
         }
     } else if (mic == 0 && gRKVLReturnSawMic) {
@@ -385,12 +406,12 @@ static BOOL RKVLReturnStep(void) {
     // ③ 连续右跳：1.5s 还没 mic/pip，且原生也没跳 ⇒ 这一跳没落地，再拉一次（最多 2 次）。
     //   判 `gRKVLJumped` 是为了「精准命中」：原生已经跳了就别叠第二次。
     if (gRKVLReturnTries < 2 && !gRKVLJumped && mic == 0 && pip == 0 && t >= 1.5) {
-        RKVLJumpOnce("retry");
+        RKVLJumpOnce();
     }
 
     // ④ 6.0s 保底：拉起过但始终没起来 ⇒ 仍然回跳，绝不把人扔在输入法里。
     if (gRKVLFallbackLaunched && t >= 6.0) {
-        RKVLReturnToHost(@"timeout");
+        RKVLReturnToHost();
         return NO;
     }
 
@@ -420,7 +441,6 @@ static void RKVLReturnTick(void) {
     if (!gRKVLReturnPending) return;
     if (gRKVLInTick) return;            // nudge 从 hook 里进来时会重入，让外层那一拍处理
     gRKVLInTick = YES;
-    gRKVLReturnTicks++;
     BOOL cont = RKVLReturnStep();
     gRKVLInTick = NO;
     if (cont && gRKVLReturnPending) RKVLScheduleTick();
@@ -445,9 +465,7 @@ static void RKVLScheduleTick(void) {
 }
 
 static void RKVLBeginRound(void) {
-    gRKVLReturnPending = NO;          // 上一轮还在跑就以本轮为准（连点两次语音不会两个状态机抢同一个 host）
-    gRKVLReturnPending = YES;
-    gRKVLReturnTicks = 0;
+    gRKVLReturnPending = YES;         // 连点两次语音：以本轮为准，不会两个状态机抢同一个 host
     gRKVLReturnTries = 0;
     gRKVLReturnSawMic = NO;
     gRKVLFirstMicT = 0;
@@ -542,7 +560,7 @@ static void RKVLBeginRound(void) {
     //   那时状态机走 ⑤ 只做回跳（rescue），照样不会把人困在输入法里。
     RKVLBeginRound();
     gRKVLNeedRealRecorder = brokenStandby;   // 坏待机：只认 mic 起来，不认旧 pip
-    RKVLJumpOnce("entry");
+    RKVLJumpOnce();
     RKVLReturnTick();
     %orig;
 }
